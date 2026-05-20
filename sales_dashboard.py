@@ -28,6 +28,8 @@ st.set_page_config(page_title="Store Sales Dashboard", layout="wide")
 BLUE = "#378ADD"
 DATA_DIR = Path("Data")
 DB_PATH = DATA_DIR / "sales_dashboard.sqlite3"
+DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1kY5e6SXd7eQ7GJx-jg6M1R60WCCZ9I_25Eb7ZmuDKHw/edit?usp=sharing"
+DEFAULT_SHEET_GID = "0"
 TOTAL_PATTERN = re.compile(
     r"^(total|totals|sum|grand\s*total|ytd|year\s*to\s*date|annual|avg|average|subtotal)s?$",
     re.IGNORECASE,
@@ -186,6 +188,15 @@ def load_google_sheet_as_tsv(sheet_url, gid="0"):
         raise ValueError("Expected at least 3 columns: License, Store Name, and month columns.")
     sheet_df.columns = [str(c).strip() for c in sheet_df.columns]
     return sheet_df.to_csv(sep="\t", index=False).strip(), csv_url, sheet_df.shape
+
+def load_sheet_into_session(sheet_url, gid, clear_cache=False):
+    if clear_cache:
+        load_google_sheet_as_tsv.clear()
+    sheet_text, _, sheet_shape = load_google_sheet_as_tsv(sheet_url, gid)
+    parse_input(sheet_text)
+    st.session_state.raw_input = sheet_text
+    st.session_state.data_source_label = f"Google Sheet · {sheet_shape[0]} rows · {sheet_shape[1]} columns"
+    return sheet_shape
 
 def compute_pareto(df, months, threshold=0.80):
     totals = df[months].sum(axis=1).sort_values(ascending=False)
@@ -742,23 +753,45 @@ with st.sidebar:
 
     if "raw_input" not in st.session_state:
         st.session_state.raw_input = ""
+    if "default_sheet_checked" not in st.session_state:
+        st.session_state.default_sheet_checked = False
+    if not st.session_state.raw_input and not st.session_state.default_sheet_checked:
+        try:
+            load_sheet_into_session(DEFAULT_SHEET_URL, DEFAULT_SHEET_GID)
+        except Exception as e:
+            st.session_state.default_sheet_error = str(e)
+        st.session_state.default_sheet_checked = True
+
     if "storage_notice" in st.session_state:
         st.success(st.session_state.storage_notice)
         del st.session_state.storage_notice
 
-    st.subheader("Google Sheets")
-    sheet_url = st.text_input("Sheet URL", placeholder="https://docs.google.com/spreadsheets/d/...")
-    sheet_gid = st.text_input("Worksheet gid", value="0", help="Use the gid from the sheet tab URL. Leave 0 for the first sheet.")
-    if st.button("Load from Google Sheets", use_container_width=True):
+    st.subheader("Data Source")
+    if st.session_state.get("default_sheet_error"):
+        st.error(f"Automatic Google Sheet load failed: {st.session_state.default_sheet_error}")
+    elif st.session_state.get("data_source_label"):
+        st.caption(st.session_state.data_source_label)
+    if st.button("Refresh Google Sheet", use_container_width=True):
         try:
-            sheet_text, _, sheet_shape = load_google_sheet_as_tsv(sheet_url, sheet_gid)
-            parse_input(sheet_text)
+            sheet_shape = load_sheet_into_session(DEFAULT_SHEET_URL, DEFAULT_SHEET_GID, clear_cache=True)
         except Exception as e:
             st.error(f"Could not load sheet: {e}")
         else:
-            st.session_state.raw_input = sheet_text
-            st.session_state.storage_notice = f"Loaded Google Sheet with {sheet_shape[0]} rows and {sheet_shape[1]} columns."
+            st.session_state.pop("default_sheet_error", None)
+            st.session_state.storage_notice = f"Refreshed Google Sheet with {sheet_shape[0]} rows and {sheet_shape[1]} columns."
             st.rerun()
+
+    with st.expander("Use a different sheet"):
+        sheet_url = st.text_input("Sheet URL", value=DEFAULT_SHEET_URL)
+        sheet_gid = st.text_input("Worksheet gid", value=DEFAULT_SHEET_GID, help="Use the gid from the sheet tab URL. Leave 0 for the first sheet.")
+        if st.button("Load alternate sheet", use_container_width=True):
+            try:
+                sheet_shape = load_sheet_into_session(sheet_url, sheet_gid, clear_cache=True)
+            except Exception as e:
+                st.error(f"Could not load sheet: {e}")
+            else:
+                st.session_state.storage_notice = f"Loaded alternate sheet with {sheet_shape[0]} rows and {sheet_shape[1]} columns."
+                st.rerun()
 
     saved_datasets = list_saved_datasets()
     if saved_datasets:
@@ -773,6 +806,7 @@ with st.sidebar:
             loaded_text = get_saved_dataset(saved_options[selected_saved])
             if loaded_text:
                 st.session_state.raw_input = loaded_text
+                st.session_state.data_source_label = f"Saved dataset · {selected_saved.split(' · ')[0]}"
                 st.session_state.storage_notice = f"Loaded {selected_saved.split(' · ')[0]}."
                 st.rerun()
         if delete_col.button("Delete", use_container_width=True):
@@ -782,6 +816,7 @@ with st.sidebar:
 
     if st.button("Load demo data"):
         st.session_state.raw_input = sample
+        st.session_state.data_source_label = "Demo data"
     raw_input = st.text_area("Paste data here", height=220, placeholder="License\tStore Name\tJan\tFeb...", key="raw_input")
 
     with st.form("save_dataset_form"):
