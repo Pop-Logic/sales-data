@@ -1,3 +1,4 @@
+# Python dependencies for Streamlit Community Cloud
 streamlit==1.57.0
 pandas==2.2.3
 plotly==6.7.0
