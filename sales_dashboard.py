@@ -32,6 +32,10 @@ TOTAL_PATTERN = re.compile(
     r"^(total|totals|sum|grand\s*total|ytd|year\s*to\s*date|annual|avg|average|subtotal)s?$",
     re.IGNORECASE,
 )
+NON_REVENUE_PATTERN = re.compile(
+    r"(drop\s*date|date|notes?|comments?|status|category|type)$",
+    re.IGNORECASE,
+)
 MONTH_PATTERN = re.compile(
     r"^(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december|q[1-4])(?:[\s._/-]*\d{2,4})?$",
     re.IGNORECASE,
@@ -49,9 +53,22 @@ def pct(n, t):
 def pct_value(n, t):
     return n / t * 100 if t else 0.0
 
+def parse_amount(value, strict=True):
+    cleaned = re.sub(r"[$,\s]", "", str(value or ""))
+    if cleaned.lower() in {"", "nan", "none"}:
+        return 0.0
+    try:
+        return float(cleaned)
+    except ValueError:
+        if strict:
+            raise ValueError(f"Could not parse numeric sales value: {value!r}")
+        return 0.0
+
 def is_totals_col(header, values, other_cols):
     header_text = str(header).strip()
     if TOTAL_PATTERN.match(header_text):
+        return True
+    if NON_REVENUE_PATTERN.search(header_text):
         return True
     if MONTH_PATTERN.match(header_text):
         return False
@@ -82,7 +99,7 @@ def parse_input(text):
         arr = []
         for r in data_rows:
             val = r[j + 2] if j + 2 < len(r) else "0"
-            arr.append(float(re.sub(r"[$,\s]", "", val) or 0))
+            arr.append(parse_amount(val, strict=False))
         col_arrays.append(arr)
 
     stripped = []
@@ -107,7 +124,7 @@ def parse_input(text):
         row = {"License": lic, "Store Name": name or lic}
         for ki, j in enumerate(keep_indices):
             val = r[j + 2] if j + 2 < len(r) else "0"
-            row[months[ki]] = float(re.sub(r"[$,\s]", "", val) or 0)
+            row[months[ki]] = parse_amount(val)
         records.append(row)
 
     if not records:
