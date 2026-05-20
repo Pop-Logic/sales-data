@@ -1,6 +1,8 @@
-# Python dependencies for Streamlit Community Cloud
-streamlit==1.57.0
-pandas==2.2.3
-plotly==6.7.0
-matplotlib==3.10.9
-reportlab==4.5.1
+# Python dependencies for Streamlit Community Cloud.
+# Versions are intentionally unpinned so the cloud builder can resolve
+# compatible wheels for the selected Python runtime.
+streamlit
+pandas
+plotly
+matplotlib
+reportlab
