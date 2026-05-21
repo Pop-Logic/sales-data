@@ -24,10 +24,6 @@ from reportlab.platypus import (
 from datetime import datetime
 
 st.set_page_config(page_title="Store Sales Dashboard", layout="wide")
-_logo_path = Path(__file__).parent / "logo.png"
-if _logo_path.exists():
-    st.sidebar.image(str(_logo_path), use_container_width=True)
-
 # ── Password guard (active when 'password' key exists in secrets) ──────────────
 if "password" in st.secrets:
     if not st.session_state.get("authenticated"):
@@ -46,6 +42,14 @@ if "password" in st.secrets:
             st.session_state["authenticated"] = False
             st.rerun()
 # ───────────────────────────────────────────────────────────────────────────────
+
+# ── Page header ────────────────────────────────────────────────────────────────
+_logo_path = Path(__file__).parent / "logo.png"
+_logo_col, _title_col = st.columns([1, 4])
+if _logo_path.exists():
+    _logo_col.image(str(_logo_path), width=120)
+_title_col.markdown("<h1 style='padding-top:16px'>Store Sales Dashboard</h1>", unsafe_allow_html=True)
+st.divider()
 
 BLUE = "#378ADD"
 DATA_DIR = Path("Data")
