@@ -25,22 +25,23 @@ from datetime import datetime
 
 st.set_page_config(page_title="Store Sales Dashboard", layout="wide")
 
-# ── Auth guard ─────────────────────────────────────────────────────────────────
-if not st.user.is_logged_in:
-    st.title("Store Sales Dashboard")
-    st.info("Sign in with your Google account to access the dashboard.")
-    st.button("Sign in with Google", on_click=st.login, args=("google",))
-    st.stop()
+# ── Auth guard (only active when [auth] secrets are configured) ────────────────
+if "auth" in st.secrets:
+    if not st.user.is_logged_in:
+        st.title("Store Sales Dashboard")
+        st.info("Sign in with your Google account to access the dashboard.")
+        st.button("Sign in with Google", on_click=st.login, args=("google",))
+        st.stop()
 
-_allowed = st.secrets.get("allowed_emails", [])
-if _allowed and st.user.email not in _allowed:
-    st.error(f"Access denied — **{st.user.email}** is not on the approved list.")
-    st.button("Sign out", on_click=st.logout)
-    st.stop()
+    _allowed = st.secrets.get("allowed_emails", [])
+    if _allowed and st.user.email not in _allowed:
+        st.error(f"Access denied — **{st.user.email}** is not on the approved list.")
+        st.button("Sign out", on_click=st.logout)
+        st.stop()
 
-with st.sidebar:
-    st.caption(f"Signed in as **{st.user.email}**")
-    st.button("Sign out", on_click=st.logout, key="sidebar_signout")
+    with st.sidebar:
+        st.caption(f"Signed in as **{st.user.email}**")
+        st.button("Sign out", on_click=st.logout, key="sidebar_signout")
 # ───────────────────────────────────────────────────────────────────────────────
 
 BLUE = "#378ADD"
