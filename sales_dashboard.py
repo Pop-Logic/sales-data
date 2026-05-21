@@ -259,6 +259,23 @@ def init_storage():
                 updated_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS contact_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                license TEXT NOT NULL,
+                store_name TEXT NOT NULL,
+                contact_month TEXT NOT NULL,
+                revenue TEXT,
+                date_contacted TEXT,
+                commitment_made TEXT,
+                committed_cadence TEXT,
+                cadence_notes TEXT,
+                committed_amount TEXT,
+                notes TEXT,
+                saved_at TEXT NOT NULL,
+                UNIQUE(license, contact_month)
+            )
+        """)
 
 def list_saved_datasets():
     init_storage()
@@ -296,6 +313,73 @@ def delete_saved_dataset(dataset_id):
     init_storage()
     with sqlite3.connect(storage_path()) as conn:
         conn.execute("DELETE FROM saved_datasets WHERE id = ?", (dataset_id,))
+
+def upsert_contact_log_rows(rows: list[dict]):
+    """Insert or replace contact log entries (unique per license+month)."""
+    init_storage()
+    now = datetime.now().isoformat(timespec="seconds")
+    with sqlite3.connect(storage_path()) as conn:
+        conn.executemany("""
+            INSERT INTO contact_log
+                (license, store_name, contact_month, revenue,
+                 date_contacted, commitment_made, committed_cadence,
+                 cadence_notes, committed_amount, notes, saved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(license, contact_month) DO UPDATE SET
+                store_name       = excluded.store_name,
+                revenue          = excluded.revenue,
+                date_contacted   = excluded.date_contacted,
+                commitment_made  = excluded.commitment_made,
+                committed_cadence= excluded.committed_cadence,
+                cadence_notes    = excluded.cadence_notes,
+                committed_amount = excluded.committed_amount,
+                notes            = excluded.notes,
+                saved_at         = excluded.saved_at
+        """, [
+            (r["license"], r["store_name"], r["contact_month"], r.get("revenue"),
+             r.get("date_contacted"), r.get("commitment_made"), r.get("committed_cadence"),
+             r.get("cadence_notes"), r.get("committed_amount"), r.get("notes"), now)
+            for r in rows
+        ])
+
+def load_contact_log() -> pd.DataFrame:
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT license, store_name, contact_month, revenue,
+                   date_contacted, commitment_made, committed_cadence,
+                   cadence_notes, committed_amount, notes, saved_at
+            FROM contact_log
+            ORDER BY saved_at DESC
+        """).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows], columns=[
+        "license", "store_name", "contact_month", "revenue",
+        "date_contacted", "commitment_made", "committed_cadence",
+        "cadence_notes", "committed_amount", "notes", "saved_at",
+    ]).rename(columns={
+        "license": "License", "store_name": "Store Name",
+        "contact_month": "Month", "revenue": "Revenue",
+        "date_contacted": "Date Contacted", "commitment_made": "Commitment",
+        "committed_cadence": "Cadence", "cadence_notes": "Cadence Notes",
+        "committed_amount": "Committed Amount", "notes": "Notes",
+        "saved_at": "Saved At",
+    })
+
+def delete_contact_log_entry(license_id: str, month: str):
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        conn.execute(
+            "DELETE FROM contact_log WHERE license = ? AND contact_month = ?",
+            (license_id, month)
+        )
+
+def clear_contact_log():
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        conn.execute("DELETE FROM contact_log")
 
 # ── Chart helpers (return PNG BytesIO for embedding in PDF) ───────────────────
 
@@ -1187,6 +1271,7 @@ with tab3:
             "Committed Cadence":  [""] * len(top30_lics),
             "Cadence Notes":      [""] * len(top30_lics),
             "Committed Amount":   [""] * len(top30_lics),
+            "Notes":              [""] * len(top30_lics),
         })
 
     edited_contacts = st.data_editor(
@@ -1212,6 +1297,10 @@ with tab3:
                 options=AMOUNT_OPTIONS,
                 help="Committed monthly purchase amount range",
             ),
+            "Notes": st.column_config.TextColumn(
+                help="Any additional notes about this contact",
+                width="large",
+            ),
         },
         hide_index=True,
         use_container_width=True,
@@ -1221,14 +1310,88 @@ with tab3:
     st.session_state[contact_key] = edited_contacts
 
     st.divider()
-    dl_col, reset_col = st.columns([3, 1])
+    save_col, dl_col, reset_col = st.columns([2, 2, 1])
+
+    if save_col.button("💾 Save to Team Log", use_container_width=True, type="primary"):
+        rev_col = f"{contact_month} Revenue"
+        rows_to_save = []
+        for _, row in edited_contacts.iterrows():
+            has_entry = (
+                row.get("Commitment Made") == "Yes"
+                or bool(str(row.get("Committed Cadence") or "").strip())
+                or bool(str(row.get("Committed Amount") or "").strip())
+                or bool(str(row.get("Notes") or "").strip())
+            )
+            if has_entry:
+                rows_to_save.append({
+                    "license":           row["License"],
+                    "store_name":        row["Store Name"],
+                    "contact_month":     contact_month,
+                    "revenue":           row.get(rev_col, ""),
+                    "date_contacted":    str(row.get("Date Contacted", "")),
+                    "commitment_made":   row.get("Commitment Made", ""),
+                    "committed_cadence": row.get("Committed Cadence", ""),
+                    "cadence_notes":     row.get("Cadence Notes", ""),
+                    "committed_amount":  row.get("Committed Amount", ""),
+                    "notes":             row.get("Notes", ""),
+                })
+        if rows_to_save:
+            upsert_contact_log_rows(rows_to_save)
+            st.success(f"Saved {len(rows_to_save)} entr{'y' if len(rows_to_save)==1 else 'ies'} to team log.")
+        else:
+            st.info("No entries to save — fill in at least one field per store.")
+
     csv_data = edited_contacts.to_csv(index=False)
     dl_col.download_button(
-        "⬇ Download Contact Log (CSV)",
+        "⬇ Download as CSV",
         data=csv_data,
         file_name=f"store-contacts-{slugify(contact_month)}.csv",
         mime="text/csv",
+        use_container_width=True,
     )
-    if reset_col.button("Reset Form", use_container_width=True):
+    if reset_col.button("Reset", use_container_width=True):
         del st.session_state[contact_key]
         st.rerun()
+
+    # ── Team Log ──────────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Team Contact Log")
+    st.caption("All saved contact entries across all months, visible to the entire team.")
+
+    log_df = load_contact_log()
+    if log_df.empty:
+        st.info("No entries saved yet. Fill in the form above and click **Save to Team Log**.")
+    else:
+        # Search / filter
+        filter_col, dl_log_col, clear_col = st.columns([3, 2, 1])
+        search = filter_col.text_input("Filter by store name or license", placeholder="Search…", label_visibility="collapsed")
+        if search:
+            mask = (
+                log_df["Store Name"].str.contains(search, case=False, na=False)
+                | log_df["License"].str.contains(search, case=False, na=False)
+            )
+            log_df = log_df[mask]
+
+        st.dataframe(
+            log_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Saved At": st.column_config.TextColumn("Saved At"),
+                "Store Name": st.column_config.TextColumn(width="large"),
+                "Notes": st.column_config.TextColumn(width="large"),
+            },
+        )
+        st.caption(f"{len(log_df)} entr{'y' if len(log_df)==1 else 'ies'}")
+
+        log_csv = log_df.to_csv(index=False)
+        dl_log_col.download_button(
+            "⬇ Download Full Log (CSV)",
+            data=log_csv,
+            file_name="team-contact-log.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        if clear_col.button("Clear All", use_container_width=True):
+            clear_contact_log()
+            st.rerun()
