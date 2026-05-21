@@ -25,26 +25,23 @@ from datetime import datetime
 
 st.set_page_config(page_title="Store Sales Dashboard", layout="wide")
 
-# ── Auth guard (only active when [auth] secrets are configured) ────────────────
-if "auth" in st.secrets:
-    if not st.user.is_logged_in:
+# ── Password guard (active when 'password' key exists in secrets) ──────────────
+if "password" in st.secrets:
+    if not st.session_state.get("authenticated"):
         st.title("Store Sales Dashboard")
-        st.info("Sign in with your Google account to access the dashboard.")
-        if st.button("Sign in with Google"):
-            st.login("google")
-        st.stop()
-
-    _allowed = st.secrets.get("allowed_emails", [])
-    if _allowed and st.user.email not in _allowed:
-        st.error(f"Access denied — **{st.user.email}** is not on the approved list.")
-        if st.button("Sign out"):
-            st.logout()
+        pwd = st.text_input("Password", type="password")
+        if st.button("Sign in", type="primary"):
+            if pwd == st.secrets["password"]:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
         st.stop()
 
     with st.sidebar:
-        st.caption(f"Signed in as **{st.user.email}**")
         if st.button("Sign out", key="sidebar_signout"):
-            st.logout()
+            st.session_state["authenticated"] = False
+            st.rerun()
 # ───────────────────────────────────────────────────────────────────────────────
 
 BLUE = "#378ADD"
