@@ -1317,118 +1317,104 @@ with tab_contact:
 
     INITIALS_OPTIONS = ["", "DK", "CH"]
 
-    contact_key = f"contact_data_{contact_month}"
-    if contact_key not in st.session_state:
-        st.session_state[contact_key] = pd.DataFrame({
-            "Store Name":         df.loc[top30_lics, "Store Name"].values,
-            "License":            top30_lics,
-            f"{contact_month} Revenue": [fmt_usd(df.loc[lic, contact_month]) for lic in top30_lics],
-            "Date Contacted":     [today_date] * len(top30_lics),
-            "Initials":           [""] * len(top30_lics),
-            "Person Contacted":   [""] * len(top30_lics),
-            "Contact Method":     [""] * len(top30_lics),
-            "Commitment Made":    ["No"] * len(top30_lics),
-            "Committed Cadence":  [""] * len(top30_lics),
-            "Committed Amount":   [""] * len(top30_lics),
-            "Notes":              [""] * len(top30_lics),
-        })
+    METHOD_OPTIONS = ["", "In-person", "Phone", "Email"]
 
-    # Migrate older session state missing new columns
-    _sdf = st.session_state[contact_key]
-    if "Initials" not in _sdf.columns:
-        _sdf.insert(4, "Initials", "")
-    if "Person Contacted" not in _sdf.columns:
-        _sdf["Person Contacted"] = ""
-    if "Contact Method" not in _sdf.columns:
-        _sdf["Contact Method"] = ""
+    # Load saved entries for this month to pre-populate widgets
+    _saved_log = load_contact_log()
+    _saved_map: dict = {}
+    if not _saved_log.empty:
+        for _, _r in _saved_log[_saved_log["Month"] == contact_month].iterrows():
+            _saved_map[_r["License"]] = _r.to_dict()
+
+    def _saved(lic, field, default=""):
+        v = _saved_map.get(lic, {}).get(field, default)
+        return v if v is not None else default
+
+    def _sel_idx(options, value):
+        return options.index(value) if value in options else 0
 
     # Search filter
     contact_search = st.text_input(
         "Search stores", placeholder="Store name or license…", key="contact_search"
     )
-    full_contact_df = st.session_state[contact_key]
-    if contact_search:
-        _mask = (
-            full_contact_df["Store Name"].str.contains(contact_search, case=False, na=False)
-            | full_contact_df["License"].str.contains(contact_search, case=False, na=False)
-        )
-        display_contact_df = full_contact_df[_mask]
-    else:
-        display_contact_df = full_contact_df
+    _q = contact_search.lower()
+    display_lics = [
+        lic for lic in top30_lics
+        if not _q
+        or _q in df.loc[lic, "Store Name"].lower()
+        or _q in lic.lower()
+    ]
 
-    edited_contacts = st.data_editor(
-        display_contact_df,
-        column_config={
-            "Store Name": st.column_config.TextColumn(disabled=True, width="large"),
-            "License": st.column_config.TextColumn(disabled=True),
-            f"{contact_month} Revenue": st.column_config.TextColumn(disabled=True),
-            "Date Contacted": st.column_config.DateColumn(
-                default=today_date, format="MM/DD/YYYY"
-            ),
-            "Initials": st.column_config.SelectboxColumn(
-                options=INITIALS_OPTIONS,
-                help="Initials of person who made contact",
-            ),
-            "Person Contacted": st.column_config.TextColumn(
-                help="Name of the store contact person",
-            ),
-            "Contact Method": st.column_config.SelectboxColumn(
-                options=["", "In-person", "Phone", "Email"],
-                help="How contact was made",
-            ),
-            "Commitment Made": st.column_config.SelectboxColumn(
-                options=["Yes", "No"], default="No", required=True
-            ),
-            "Committed Cadence": st.column_config.SelectboxColumn(
-                options=CADENCE_OPTIONS,
-                help="Select commitment frequency",
-            ),
-            "Committed Amount": st.column_config.SelectboxColumn(
-                options=AMOUNT_OPTIONS,
-                help="Committed monthly purchase amount range",
-            ),
-            "Notes": st.column_config.TextColumn(
-                help="Any additional notes about this contact",
-                width="large",
-            ),
-        },
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        key=f"contact_editor_{contact_month}",
-    )
-    # Merge edited rows back into the full DataFrame (preserves unfiltered rows)
-    full_contact_df.update(edited_contacts)
-    st.session_state[contact_key] = full_contact_df
-    edited_contacts = full_contact_df
+    for rank, lic in enumerate(display_lics, 1):
+        store_name = df.loc[lic, "Store Name"]
+        revenue = fmt_usd(df.loc[lic, contact_month])
+        has_saved = lic in _saved_map
+        label = f"{'✅ ' if has_saved else ''}#{rank}  {store_name}  ·  {lic}  ·  {revenue}"
+        with st.expander(label):
+            _date_default = today_date
+            _date_str = _saved(lic, "Date Contacted")
+            if _date_str:
+                try:
+                    _date_default = datetime.strptime(str(_date_str)[:10], "%Y-%m-%d").date()
+                except Exception:
+                    pass
+
+            r1a, r1b, r1c, r1d = st.columns(4)
+            r1a.date_input("Date Contacted", value=_date_default,
+                           format="MM/DD/YYYY", key=f"cf_{lic}_date")
+            r1b.selectbox("Initials", INITIALS_OPTIONS,
+                          index=_sel_idx(INITIALS_OPTIONS, _saved(lic, "Initials")),
+                          key=f"cf_{lic}_initials")
+            r1c.text_input("Person Contacted", value=_saved(lic, "Person Contacted"),
+                           key=f"cf_{lic}_person")
+            r1d.selectbox("Contact Method", METHOD_OPTIONS,
+                          index=_sel_idx(METHOD_OPTIONS, _saved(lic, "Contact Method")),
+                          key=f"cf_{lic}_method")
+
+            r2a, r2b, r2c = st.columns(3)
+            r2a.selectbox("Commitment Made", ["No", "Yes"],
+                          index=_sel_idx(["No", "Yes"], _saved(lic, "Commitment", "No")),
+                          key=f"cf_{lic}_commitment")
+            r2b.selectbox("Committed Cadence", CADENCE_OPTIONS,
+                          index=_sel_idx(CADENCE_OPTIONS, _saved(lic, "Cadence")),
+                          key=f"cf_{lic}_cadence")
+            r2c.selectbox("Committed Amount", AMOUNT_OPTIONS,
+                          index=_sel_idx(AMOUNT_OPTIONS, _saved(lic, "Committed Amount")),
+                          key=f"cf_{lic}_amount")
+
+            st.text_area("Notes", value=_saved(lic, "Notes"),
+                         height=120, key=f"cf_{lic}_notes")
 
     st.divider()
     save_col, dl_col, reset_col = st.columns([2, 2, 1])
 
     if save_col.button("💾 Save to Team Log", use_container_width=True, type="primary"):
-        rev_col = f"{contact_month} Revenue"
         rows_to_save = []
-        for _, row in edited_contacts.iterrows():
-            has_entry = (
-                row.get("Commitment Made") == "Yes"
-                or bool(str(row.get("Committed Cadence") or "").strip())
-                or bool(str(row.get("Committed Amount") or "").strip())
-                or bool(str(row.get("Notes") or "").strip())
+        for lic in top30_lics:
+            commitment = st.session_state.get(f"cf_{lic}_commitment", "No")
+            cadence    = st.session_state.get(f"cf_{lic}_cadence", "")
+            amount     = st.session_state.get(f"cf_{lic}_amount", "")
+            notes      = st.session_state.get(f"cf_{lic}_notes", "")
+            has_entry  = (
+                commitment == "Yes"
+                or bool(str(cadence or "").strip())
+                or bool(str(amount or "").strip())
+                or bool(str(notes or "").strip())
             )
             if has_entry:
                 rows_to_save.append({
-                    "license":           row["License"],
-                    "store_name":        row["Store Name"],
+                    "license":           lic,
+                    "store_name":        df.loc[lic, "Store Name"],
                     "contact_month":     contact_month,
-                    "revenue":           row.get(rev_col, ""),
-                    "date_contacted":    str(row.get("Date Contacted", "")),
-                    "commitment_made":   row.get("Commitment Made", ""),
-                    "committed_cadence":  row.get("Committed Cadence", ""),
-                    "committed_amount":   row.get("Committed Amount", ""),
-                    "notes":             row.get("Notes", ""),
-                    "person_contacted":  row.get("Person Contacted", ""),
-                    "contact_method":    row.get("Contact Method", ""),
-                    "initials":          row.get("Initials", ""),
+                    "revenue":           fmt_usd(df.loc[lic, contact_month]),
+                    "date_contacted":    str(st.session_state.get(f"cf_{lic}_date", today_date)),
+                    "initials":          st.session_state.get(f"cf_{lic}_initials", ""),
+                    "person_contacted":  st.session_state.get(f"cf_{lic}_person", ""),
+                    "contact_method":    st.session_state.get(f"cf_{lic}_method", ""),
+                    "commitment_made":   commitment,
+                    "committed_cadence": cadence,
+                    "committed_amount":  amount,
+                    "notes":             notes,
                 })
         if rows_to_save:
             upsert_contact_log_rows(rows_to_save)
@@ -1436,16 +1422,36 @@ with tab_contact:
         else:
             st.info("No entries to save — fill in at least one field per store.")
 
-    csv_data = edited_contacts.to_csv(index=False)
+    # Build CSV from current widget state
+    _csv_rows = []
+    for lic in top30_lics:
+        _csv_rows.append({
+            "License":           lic,
+            "Store Name":        df.loc[lic, "Store Name"],
+            "Month":             contact_month,
+            "Revenue":           fmt_usd(df.loc[lic, contact_month]),
+            "Date Contacted":    str(st.session_state.get(f"cf_{lic}_date", today_date)),
+            "Initials":          st.session_state.get(f"cf_{lic}_initials", ""),
+            "Person Contacted":  st.session_state.get(f"cf_{lic}_person", ""),
+            "Contact Method":    st.session_state.get(f"cf_{lic}_method", ""),
+            "Commitment Made":   st.session_state.get(f"cf_{lic}_commitment", "No"),
+            "Committed Cadence": st.session_state.get(f"cf_{lic}_cadence", ""),
+            "Committed Amount":  st.session_state.get(f"cf_{lic}_amount", ""),
+            "Notes":             st.session_state.get(f"cf_{lic}_notes", ""),
+        })
     dl_col.download_button(
         "⬇ Download as CSV",
-        data=csv_data,
+        data=pd.DataFrame(_csv_rows).to_csv(index=False),
         file_name=f"store-contacts-{slugify(contact_month)}.csv",
         mime="text/csv",
         use_container_width=True,
     )
+
     if reset_col.button("Reset", use_container_width=True):
-        del st.session_state[contact_key]
+        for lic in top30_lics:
+            for field in ("date", "initials", "person", "method",
+                          "commitment", "cadence", "amount", "notes"):
+                st.session_state.pop(f"cf_{lic}_{field}", None)
         st.rerun()
 
     # ── Team Log ──────────────────────────────────────────────────────────────
