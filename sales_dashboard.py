@@ -278,10 +278,15 @@ def init_storage():
                 cadence_notes TEXT,
                 committed_amount TEXT,
                 notes TEXT,
+                initials TEXT,
                 saved_at TEXT NOT NULL,
                 UNIQUE(license, contact_month)
             )
         """)
+        try:
+            conn.execute("ALTER TABLE contact_log ADD COLUMN initials TEXT")
+        except Exception:
+            pass  # column already exists
 
 def list_saved_datasets():
     init_storage()
@@ -329,8 +334,8 @@ def upsert_contact_log_rows(rows: list[dict]):
             INSERT INTO contact_log
                 (license, store_name, contact_month, revenue,
                  date_contacted, commitment_made, committed_cadence,
-                 cadence_notes, committed_amount, notes, saved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 cadence_notes, committed_amount, notes, initials, saved_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(license, contact_month) DO UPDATE SET
                 store_name       = excluded.store_name,
                 revenue          = excluded.revenue,
@@ -340,11 +345,13 @@ def upsert_contact_log_rows(rows: list[dict]):
                 cadence_notes    = excluded.cadence_notes,
                 committed_amount = excluded.committed_amount,
                 notes            = excluded.notes,
+                initials         = excluded.initials,
                 saved_at         = excluded.saved_at
         """, [
             (r["license"], r["store_name"], r["contact_month"], r.get("revenue"),
              r.get("date_contacted"), r.get("commitment_made"), r.get("committed_cadence"),
-             r.get("cadence_notes"), r.get("committed_amount"), r.get("notes"), now)
+             r.get("cadence_notes"), r.get("committed_amount"), r.get("notes"),
+             r.get("initials"), now)
             for r in rows
         ])
 
@@ -355,7 +362,7 @@ def load_contact_log() -> pd.DataFrame:
         rows = conn.execute("""
             SELECT license, store_name, contact_month, revenue,
                    date_contacted, commitment_made, committed_cadence,
-                   cadence_notes, committed_amount, notes, saved_at
+                   cadence_notes, committed_amount, notes, initials, saved_at
             FROM contact_log
             ORDER BY saved_at DESC
         """).fetchall()
@@ -364,14 +371,14 @@ def load_contact_log() -> pd.DataFrame:
     return pd.DataFrame([dict(r) for r in rows], columns=[
         "license", "store_name", "contact_month", "revenue",
         "date_contacted", "commitment_made", "committed_cadence",
-        "cadence_notes", "committed_amount", "notes", "saved_at",
+        "cadence_notes", "committed_amount", "notes", "initials", "saved_at",
     ]).rename(columns={
         "license": "License", "store_name": "Store Name",
         "contact_month": "Month", "revenue": "Revenue",
         "date_contacted": "Date Contacted", "commitment_made": "Commitment",
         "committed_cadence": "Cadence", "cadence_notes": "Cadence Notes",
         "committed_amount": "Committed Amount", "notes": "Notes",
-        "saved_at": "Saved At",
+        "initials": "Initials", "saved_at": "Saved At",
     })
 
 def delete_contact_log_entry(license_id: str, month: str):
@@ -1300,6 +1307,8 @@ with tab_contact:
     ]
     CADENCE_OPTIONS = ["", "Weekly", "Bi-Weekly", "Monthly", "Other"]
 
+    INITIALS_OPTIONS = ["", "DK", "CH"]
+
     contact_key = f"contact_data_{contact_month}"
     if contact_key not in st.session_state:
         st.session_state[contact_key] = pd.DataFrame({
@@ -1307,6 +1316,7 @@ with tab_contact:
             "License":            top30_lics,
             f"{contact_month} Revenue": [fmt_usd(df.loc[lic, contact_month]) for lic in top30_lics],
             "Date Contacted":     [today_date] * len(top30_lics),
+            "Initials":           [""] * len(top30_lics),
             "Commitment Made":    ["No"] * len(top30_lics),
             "Committed Cadence":  [""] * len(top30_lics),
             "Cadence Notes":      [""] * len(top30_lics),
@@ -1314,14 +1324,36 @@ with tab_contact:
             "Notes":              [""] * len(top30_lics),
         })
 
+    # Ensure Initials column exists in older session state
+    if "Initials" not in st.session_state[contact_key].columns:
+        st.session_state[contact_key].insert(4, "Initials", "")
+
+    # Search filter
+    contact_search = st.text_input(
+        "Search stores", placeholder="Store name or license…", key="contact_search"
+    )
+    full_contact_df = st.session_state[contact_key]
+    if contact_search:
+        _mask = (
+            full_contact_df["Store Name"].str.contains(contact_search, case=False, na=False)
+            | full_contact_df["License"].str.contains(contact_search, case=False, na=False)
+        )
+        display_contact_df = full_contact_df[_mask]
+    else:
+        display_contact_df = full_contact_df
+
     edited_contacts = st.data_editor(
-        st.session_state[contact_key],
+        display_contact_df,
         column_config={
             "Store Name": st.column_config.TextColumn(disabled=True, width="large"),
             "License": st.column_config.TextColumn(disabled=True),
             f"{contact_month} Revenue": st.column_config.TextColumn(disabled=True),
             "Date Contacted": st.column_config.DateColumn(
                 default=today_date, format="MM/DD/YYYY"
+            ),
+            "Initials": st.column_config.SelectboxColumn(
+                options=INITIALS_OPTIONS,
+                help="Initials of person who made contact",
             ),
             "Commitment Made": st.column_config.SelectboxColumn(
                 options=["Yes", "No"], default="No", required=True
@@ -1347,7 +1379,10 @@ with tab_contact:
         num_rows="fixed",
         key=f"contact_editor_{contact_month}",
     )
-    st.session_state[contact_key] = edited_contacts
+    # Merge edited rows back into the full DataFrame (preserves unfiltered rows)
+    full_contact_df.update(edited_contacts)
+    st.session_state[contact_key] = full_contact_df
+    edited_contacts = full_contact_df
 
     st.divider()
     save_col, dl_col, reset_col = st.columns([2, 2, 1])
