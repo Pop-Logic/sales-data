@@ -1187,28 +1187,25 @@ with tab_top:
         )
         share_df2 = share_df2[mask]
 
-    col_left, col_right = st.columns([1, 1])
-    with col_left:
-        st.caption(f"Group total {range_label}: **{fmt_usd(grp_rev_range)}** · {pct(grp_rev_range, all_rev_range)} of all stores")
-        disp2 = share_df2.reset_index()[["#", "Store Name", "License", "_rev", "% of Group", "% of All"]].copy()
-        disp2.columns = ["#", "Store Name", "License", "Revenue", "% of Group", "% of All Stores"]
-        disp2["Revenue"] = disp2["Revenue"].apply(fmt_usd)
-        disp2["% of Group"]      = disp2["% of Group"].apply(lambda x: f"{x:.1f}%")
-        disp2["% of All Stores"] = disp2["% of All Stores"].apply(lambda x: f"{x:.1f}%")
-        st.dataframe(disp2, use_container_width=True, hide_index=True)
+    st.caption(f"Group total {range_label}: **{fmt_usd(grp_rev_range)}** · {pct(grp_rev_range, all_rev_range)} of all stores")
+    disp2 = share_df2.reset_index()[["#", "Store Name", "License", "_rev", "% of Group", "% of All"]].copy()
+    disp2.columns = ["#", "Store Name", "License", "Revenue", "% of Group", "% of All Stores"]
+    disp2["Revenue"] = disp2["Revenue"].apply(fmt_usd)
+    disp2["% of Group"]      = disp2["% of Group"].apply(lambda x: f"{x:.1f}%")
+    disp2["% of All Stores"] = disp2["% of All Stores"].apply(lambda x: f"{x:.1f}%")
+    st.dataframe(disp2, use_container_width=True, hide_index=True)
 
-    with col_right:
-        st.subheader("Revenue share")
-        if grp_rev_range > 0 and not share_df2.empty:
-            fig_pie2 = px.pie(
-                share_df2.reset_index(), values="_rev", names="Store Name",
-                color_discrete_sequence=px.colors.qualitative.Set2, hole=0.4
-            )
-            fig_pie2.update_traces(textposition="inside", textinfo="percent+label")
-            fig_pie2.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig_pie2, use_container_width=True)
-        else:
-            st.info("No revenue for the selected period.")
+    st.subheader("Revenue share")
+    if grp_rev_range > 0 and not share_df2.empty:
+        fig_pie2 = px.pie(
+            share_df2.reset_index(), values="_rev", names="Store Name",
+            color_discrete_sequence=px.colors.qualitative.Set2, hole=0.4
+        )
+        fig_pie2.update_traces(textposition="inside", textinfo="percent+label")
+        fig_pie2.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
+        st.plotly_chart(fig_pie2, use_container_width=True)
+    else:
+        st.info("No revenue for the selected period.")
 
     share_report2 = build_share_by_store_pdf(
         df, to_month, sort_by2,
