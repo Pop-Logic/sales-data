@@ -132,20 +132,21 @@ def parse_input(text):
     if not records:
         raise ValueError("No store rows found.")
 
-    df = pd.DataFrame(records).set_index("License")
-
-    # Deduplicate index: same license appearing twice gets "-2", "-3", etc.
-    counts = {}
-    new_index = []
-    for lic in df.index:
-        if lic in counts:
-            counts[lic] += 1
-            new_index.append(f"{lic}-{counts[lic]}")
+    # Aggregate duplicate licenses: sum revenue columns, combine distinct store names
+    agg: dict = {}
+    for rec in records:
+        lic = rec["License"]
+        if lic not in agg:
+            agg[lic] = rec.copy()
         else:
-            counts[lic] = 0
-            new_index.append(lic)
-    df.index = pd.Index(new_index, name=df.index.name)
+            existing_name = agg[lic]["Store Name"]
+            new_name = rec["Store Name"]
+            if new_name and new_name not in existing_name:
+                agg[lic]["Store Name"] = existing_name + " / " + new_name
+            for m in months:
+                agg[lic][m] = agg[lic].get(m, 0) + rec.get(m, 0)
 
+    df = pd.DataFrame(list(agg.values())).set_index("License")
     return df, months, stripped
 
 def google_sheet_csv_url(sheet_url, gid="0"):
@@ -211,6 +212,21 @@ def compute_pareto(df, months, threshold=0.80):
         if cum / grand >= threshold:
             break
     return top_lics, grand
+
+def find_last_month_col(months):
+    """Return the column name matching the previous calendar month, or the last column."""
+    today = datetime.now()
+    prev_month = today.month - 1 if today.month > 1 else 12
+    abbrevs = {
+        1: ["jan"], 2: ["feb"], 3: ["mar"], 4: ["apr"],
+        5: ["may"], 6: ["jun"], 7: ["jul"], 8: ["aug"],
+        9: ["sep", "sept"], 10: ["oct"], 11: ["nov"], 12: ["dec"],
+    }
+    targets = abbrevs[prev_month]
+    for col in reversed(months):
+        if any(t in col.lower() for t in targets):
+            return col
+    return months[-1]
 
 SORT_OPTIONS = ["Highest first", "Lowest first", "Store name", "License #"]
 
@@ -865,7 +881,7 @@ top_store = all_totals.idxmax()
 report_date = datetime.now().strftime("%B %d, %Y")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["📊 All Stores", f"⭐ Top {int(threshold*100)}% Stores"])
+tab1, tab2, tab3 = st.tabs(["📊 All Stores", f"⭐ Top {int(threshold*100)}% Stores", "📋 Store Contact Form"])
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB 1 — All stores                                             ║
@@ -1137,3 +1153,82 @@ with tab2:
         file_name=f"pareto-dashboard-{int(threshold*100)}pct.pdf",
         mime="application/pdf"
     )
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  TAB 3 — Store Contact Form                                      ║
+# ╚══════════════════════════════════════════════════════════════════╝
+with tab3:
+    contact_month = find_last_month_col(months)
+    today_date = datetime.now().date()
+
+    st.caption(f"Top 30 stores by **{contact_month}** revenue · Ranked highest to lowest")
+
+    top30_lics = (
+        df[contact_month]
+        .sort_values(ascending=False)
+        .head(30)
+        .index.tolist()
+    )
+
+    AMOUNT_OPTIONS = [
+        "", "$500–$1,000", "$1,000–$2,500", "$2,500–$5,000",
+        "$5,000–$10,000", "$10,000–$15,000", "$15,000–$25,000",
+    ]
+    CADENCE_OPTIONS = ["", "Weekly", "Bi-Weekly", "Monthly", "Other"]
+
+    contact_key = f"contact_data_{contact_month}"
+    if contact_key not in st.session_state:
+        st.session_state[contact_key] = pd.DataFrame({
+            "Store Name":         df.loc[top30_lics, "Store Name"].values,
+            "License":            top30_lics,
+            f"{contact_month} Revenue": [fmt_usd(df.loc[lic, contact_month]) for lic in top30_lics],
+            "Date Contacted":     [today_date] * len(top30_lics),
+            "Commitment Made":    ["No"] * len(top30_lics),
+            "Committed Cadence":  [""] * len(top30_lics),
+            "Cadence Notes":      [""] * len(top30_lics),
+            "Committed Amount":   [""] * len(top30_lics),
+        })
+
+    edited_contacts = st.data_editor(
+        st.session_state[contact_key],
+        column_config={
+            "Store Name": st.column_config.TextColumn(disabled=True, width="large"),
+            "License": st.column_config.TextColumn(disabled=True),
+            f"{contact_month} Revenue": st.column_config.TextColumn(disabled=True),
+            "Date Contacted": st.column_config.DateColumn(
+                default=today_date, format="MM/DD/YYYY"
+            ),
+            "Commitment Made": st.column_config.SelectboxColumn(
+                options=["Yes", "No"], default="No", required=True
+            ),
+            "Committed Cadence": st.column_config.SelectboxColumn(
+                options=CADENCE_OPTIONS,
+                help="Select commitment frequency; use Cadence Notes for 'Other'",
+            ),
+            "Cadence Notes": st.column_config.TextColumn(
+                help="Describe cadence when 'Other' is selected",
+            ),
+            "Committed Amount": st.column_config.SelectboxColumn(
+                options=AMOUNT_OPTIONS,
+                help="Committed monthly purchase amount range",
+            ),
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key=f"contact_editor_{contact_month}",
+    )
+    st.session_state[contact_key] = edited_contacts
+
+    st.divider()
+    dl_col, reset_col = st.columns([3, 1])
+    csv_data = edited_contacts.to_csv(index=False)
+    dl_col.download_button(
+        "⬇ Download Contact Log (CSV)",
+        data=csv_data,
+        file_name=f"store-contacts-{slugify(contact_month)}.csv",
+        mime="text/csv",
+    )
+    if reset_col.button("Reset Form", use_container_width=True):
+        del st.session_state[contact_key]
+        st.rerun()
