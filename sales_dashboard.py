@@ -48,7 +48,7 @@ _logo_path = Path(__file__).parent / "logo.png"
 _logo_col, _title_col = st.columns([1, 4])
 if _logo_path.exists():
     _logo_col.image(str(_logo_path), width=120)
-_title_col.markdown("<h1 style='padding-top:16px'>Store Sales Dashboard</h1>", unsafe_allow_html=True)
+_title_col.markdown("<h1 style='margin:0; padding-left:10px; line-height:1.2'>Store Sales Dashboard</h1>", unsafe_allow_html=True)
 st.divider()
 
 BLUE = "#378ADD"
@@ -878,8 +878,6 @@ st.markdown(f"""
   [data-testid="stMetric"] label {{font-size:12px !important}}
 </style>
 """, unsafe_allow_html=True)
-
-st.title("Store Sales Dashboard")
 
 # ── Sidebar: data input ────────────────────────────────────────────────────────
 with st.sidebar:
