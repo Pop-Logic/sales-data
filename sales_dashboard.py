@@ -26,7 +26,7 @@ from datetime import datetime
 st.set_page_config(page_title="Store Sales Dashboard", layout="wide")
 _logo_path = Path(__file__).parent / "logo.png"
 if _logo_path.exists():
-    st.logo(str(_logo_path))
+    st.sidebar.image(str(_logo_path), use_container_width=True)
 
 # ── Password guard (active when 'password' key exists in secrets) ──────────────
 if "password" in st.secrets:
