@@ -24,6 +24,7 @@ from reportlab.platypus import (
 from datetime import datetime
 
 st.set_page_config(page_title="Store Sales Dashboard", layout="wide")
+st.logo("logo.png")
 
 # ── Password guard (active when 'password' key exists in secrets) ──────────────
 if "password" in st.secrets:
@@ -1005,7 +1006,7 @@ top_store = all_totals.idxmax()
 report_date = datetime.now().strftime("%B %d, %Y")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_top, tab_all, tab_contact = st.tabs([f"⭐ Top {int(threshold*100)}% Stores", "📊 All Stores", "📋 Store Contact Form"])
+tab_contact, tab_top, tab_all = st.tabs(["📋 Store Contact Form", f"⭐ Top {int(threshold*100)}% Stores", "📊 All Stores"])
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — All stores                                               ║
