@@ -310,8 +310,25 @@ def parse_orders(file_obj) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_order_sheet_as_df(sheet_url, gid="0"):
+    import requests as _req
     csv_url = google_sheet_csv_url(sheet_url, gid)
-    raw = pd.read_csv(csv_url).dropna(how="all").dropna(axis=1, how="all")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+    }
+    resp = _req.get(csv_url, headers=headers, allow_redirects=True, timeout=15)
+    if resp.status_code != 200:
+        raise ValueError(
+            f"Google returned HTTP {resp.status_code} for the export URL.\n"
+            f"URL tried: {csv_url}\n"
+            f"Confirm the sheet is shared as 'Anyone with the link can view' "
+            f"and the spreadsheet ID is correct."
+        )
+    from io import StringIO as _StringIO
+    raw = pd.read_csv(_StringIO(resp.text)).dropna(how="all").dropna(axis=1, how="all")
     if raw.empty:
         raise ValueError("The order sheet is empty.")
     return raw, raw.shape
