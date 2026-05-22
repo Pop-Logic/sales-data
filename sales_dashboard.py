@@ -282,6 +282,28 @@ def sort_share_rows(share_df, revenue_col, sort_by):
 def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-") or "report"
 
+def parse_orders(file_obj) -> pd.DataFrame:
+    name = getattr(file_obj, "name", "")
+    if name.lower().endswith(".csv"):
+        odf = pd.read_csv(file_obj)
+    else:
+        odf = pd.read_excel(file_obj, engine="openpyxl")
+    def _brand(sub):
+        s = str(sub).strip()
+        if s.startswith("LL"):   return "Leisure Land"
+        if s.startswith("MF"):   return "Mayfield"
+        if s.startswith("KS"):   return "K. Savage"
+        if s.startswith("Bulk"): return "Bulk"
+        return "Other"
+    odf["Brand"] = odf["Sub Product Line"].apply(_brand)
+    if "Submitted Date" in odf.columns:
+        odf["Submitted Date"] = pd.to_datetime(odf["Submitted Date"], errors="coerce")
+    if "License #" in odf.columns:
+        odf["License #"] = odf["License #"].apply(
+            lambda x: str(int(float(x))) if pd.notna(x) and str(x).strip() not in ("", "nan") else ""
+        )
+    return odf
+
 def storage_path():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DB_PATH
@@ -991,6 +1013,23 @@ with st.sidebar:
 
     threshold = st.select_slider("Pareto threshold", options=[0.7, 0.8, 0.9], value=0.8, format_func=lambda x: f"{int(x*100)}%")
 
+    st.divider()
+    st.subheader("Order Data")
+    st.caption("Upload order detail export (.xlsx or .csv) to enable Order Activity tab and store order indicators.")
+    order_file = st.file_uploader("Order file", type=["xlsx", "xls", "csv"], key="order_file_upload", label_visibility="collapsed")
+    if order_file is not None:
+        try:
+            st.session_state["order_df"] = parse_orders(order_file)
+            st.caption(f"✅ {len(st.session_state['order_df'])} lines · {st.session_state['order_df']['Order #'].nunique()} orders loaded")
+        except Exception as _oe:
+            st.error(f"Could not read order file: {_oe}")
+    if st.session_state.get("order_df") is not None and order_file is None:
+        _odf = st.session_state["order_df"]
+        st.caption(f"✅ {len(_odf)} lines · {_odf['Order #'].nunique()} orders loaded")
+        if st.button("Clear order data", use_container_width=True):
+            del st.session_state["order_df"]
+            st.rerun()
+
 # ── Parse ──────────────────────────────────────────────────────────────────────
 df, months, stripped = None, [], []
 if raw_input.strip():
@@ -1016,7 +1055,12 @@ top_store = all_totals.idxmax()
 report_date = datetime.now().strftime("%B %d, %Y")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_contact, tab_top, tab_all = st.tabs(["📋 Store Contact Form", f"⭐ Top {int(threshold*100)}% Stores", "📊 All Stores"])
+tab_contact, tab_top, tab_all, tab_orders = st.tabs([
+    "📋 Store Contact Form",
+    f"⭐ Top {int(threshold*100)}% Stores",
+    "📊 All Stores",
+    "📦 Order Activity",
+])
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — All stores                                               ║
@@ -1238,6 +1282,10 @@ with tab_top:
     disp2["Revenue"] = disp2["Revenue"].apply(fmt_usd)
     disp2["% of Group"]      = disp2["% of Group"].apply(lambda x: f"{x:.1f}%")
     disp2["% of All Stores"] = disp2["% of All Stores"].apply(lambda x: f"{x:.1f}%")
+    _ord_df_ref = st.session_state.get("order_df")
+    if _ord_df_ref is not None:
+        _ord_lics = set(_ord_df_ref["License #"].dropna().astype(str))
+        disp2.insert(3, "Order", disp2["License"].apply(lambda l: "✅" if str(l) in _ord_lics else ""))
     st.dataframe(disp2, use_container_width=True, hide_index=True)
 
     st.subheader("Revenue share")
@@ -1526,3 +1574,140 @@ with tab_contact:
         if clear_col.button("Clear All", use_container_width=True):
             clear_contact_log()
             st.rerun()
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  TAB — Order Activity                                            ║
+# ╚══════════════════════════════════════════════════════════════════╝
+with tab_orders:
+    BRANDS = ["Leisure Land", "Mayfield", "K. Savage", "Bulk"]
+    BRAND_COLORS = {
+        "Leisure Land": "#4C9BE8",
+        "Mayfield":     "#E8844C",
+        "K. Savage":    "#4CE89C",
+        "Bulk":         "#B07FE8",
+    }
+
+    ord_df = st.session_state.get("order_df")
+    if ord_df is None:
+        st.info("Upload an order detail file (.xlsx or .csv) in the sidebar to enable this tab.")
+        st.stop()
+
+    # ── Status filter ─────────────────────────────────────────────────────────
+    status_opts = ["All"] + sorted(ord_df["Status"].dropna().unique().tolist())
+    _s_col, _ = st.columns([1, 3])
+    status_filter = _s_col.selectbox("Status filter", status_opts, key="ord_status")
+    view = ord_df if status_filter == "All" else ord_df[ord_df["Status"] == status_filter]
+
+    # ── Brand KPI cards ───────────────────────────────────────────────────────
+    st.subheader("Brand Summary")
+    b_cols = st.columns(4)
+    for bcol, brand in zip(b_cols, BRANDS):
+        bdf = view[view["Brand"] == brand]
+        bcol.metric(brand, fmt_usd(bdf["Line Total"].sum()))
+        bcol.caption(f"{bdf['Order #'].nunique()} orders · {int(bdf['Units'].sum()):,} units")
+
+    st.divider()
+
+    # ── Brand comparison charts ───────────────────────────────────────────────
+    st.subheader("Brand Comparison")
+    brand_summary = (
+        view.groupby("Brand")
+        .agg(Revenue=("Line Total", "sum"), Units=("Units", "sum"), Orders=("Order #", "nunique"))
+        .reindex(BRANDS)
+        .reset_index()
+    )
+    ch1, ch2 = st.columns(2)
+    fig_rev = px.bar(
+        brand_summary, x="Revenue", y="Brand", orientation="h",
+        color="Brand", color_discrete_map=BRAND_COLORS, text_auto="$.0f",
+    )
+    fig_rev.update_layout(showlegend=False, margin=dict(t=10, b=10), height=260,
+                          xaxis_tickprefix="$", xaxis_tickformat=",")
+    fig_rev.update_yaxes(autorange="reversed")
+    ch1.plotly_chart(fig_rev, use_container_width=True)
+
+    fig_units = px.bar(
+        brand_summary, x="Units", y="Brand", orientation="h",
+        color="Brand", color_discrete_map=BRAND_COLORS, text_auto=True,
+    )
+    fig_units.update_layout(showlegend=False, margin=dict(t=10, b=10), height=260)
+    fig_units.update_yaxes(autorange="reversed")
+    ch2.plotly_chart(fig_units, use_container_width=True)
+
+    st.divider()
+
+    # ── Order timeline ────────────────────────────────────────────────────────
+    st.subheader("Order Timeline")
+    if "Submitted Date" in view.columns and view["Submitted Date"].notna().any():
+        timeline = (
+            view.dropna(subset=["Submitted Date"])
+            .groupby(["Submitted Date", "Brand"])["Order #"]
+            .nunique()
+            .reset_index()
+            .rename(columns={"Order #": "Orders"})
+        )
+        fig_time = px.bar(
+            timeline, x="Submitted Date", y="Orders", color="Brand",
+            color_discrete_map=BRAND_COLORS, barmode="stack",
+        )
+        fig_time.update_layout(margin=dict(t=10, b=10), height=300,
+                                xaxis_title=None, legend_title=None)
+        st.plotly_chart(fig_time, use_container_width=True)
+
+    st.divider()
+
+    # ── Top products per brand ────────────────────────────────────────────────
+    st.subheader("Top Products by Brand")
+    brand_tabs = st.tabs(BRANDS)
+    for btab, brand in zip(brand_tabs, BRANDS):
+        with btab:
+            bdf = view[view["Brand"] == brand]
+            top_prods = (
+                bdf.groupby("Product")
+                .agg(Units=("Units", "sum"), Revenue=("Line Total", "sum"))
+                .sort_values("Units", ascending=False)
+                .head(15)
+                .reset_index()
+            )
+            if not top_prods.empty:
+                top_prods["Revenue"] = top_prods["Revenue"].apply(fmt_usd)
+                fig_prod = px.bar(
+                    top_prods, x="Units", y="Product", orientation="h",
+                    color_discrete_sequence=[BRAND_COLORS.get(brand, BLUE)],
+                    text_auto=True,
+                )
+                fig_prod.update_layout(
+                    showlegend=False, margin=dict(t=10, b=10),
+                    height=max(300, len(top_prods) * 32),
+                )
+                fig_prod.update_yaxes(autorange="reversed")
+                st.plotly_chart(fig_prod, use_container_width=True)
+            else:
+                st.info(f"No {brand} lines in current selection.")
+
+    st.divider()
+
+    # ── Rep performance ───────────────────────────────────────────────────────
+    st.subheader("Rep Performance")
+    if "Submitted By" in view.columns:
+        rep_summary = (
+            view.groupby("Submitted By")
+            .agg(Revenue=("Line Total", "sum"), Orders=("Order #", "nunique"), Units=("Units", "sum"))
+            .sort_values("Revenue", ascending=False)
+            .reset_index()
+        )
+        rc1, rc2 = st.columns([2, 1])
+        fig_rep = px.bar(
+            rep_summary, x="Revenue", y="Submitted By", orientation="h",
+            color_discrete_sequence=[BLUE], text_auto="$.0f",
+        )
+        fig_rep.update_layout(
+            showlegend=False, margin=dict(t=10, b=10),
+            height=max(200, len(rep_summary) * 48),
+            xaxis_tickprefix="$", xaxis_tickformat=",",
+        )
+        fig_rep.update_yaxes(autorange="reversed")
+        rc1.plotly_chart(fig_rep, use_container_width=True)
+        rep_disp = rep_summary.copy()
+        rep_disp["Revenue"] = rep_disp["Revenue"].apply(fmt_usd)
+        rc2.dataframe(rep_disp, use_container_width=True, hide_index=True)
