@@ -1168,322 +1168,276 @@ peak_month = month_totals.idxmax()
 top_store = all_totals.idxmax()
 report_date = datetime.now().strftime("%B %d, %Y")
 
+# Pre-compute window/pareto so all tabs can reference w_top_lics
+_default_window = last_n_month_cols(months, 3)
+_ss_window = st.session_state.get("t2_window", _default_window)
+window_months = [m for m in _ss_window if m in months] or _default_window
+w_top_lics, _ = compute_pareto(df, window_months, threshold)
+
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_contact, tab_top, tab_all, tab_orders = st.tabs([
+tab_contact, tab_sales, tab_orders = st.tabs([
     "📋 Store Contact Form",
-    f"⭐ Top {int(threshold*100)}% Stores",
-    "📊 All Stores",
+    "📊 Sales by Store",
     "📦 Order Activity",
 ])
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  TAB — All stores                                               ║
+# ║  TAB — Sales by Store                                            ║
 # ╚══════════════════════════════════════════════════════════════════╝
-with tab_all:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Revenue", fmt_usd(grand))
-    c2.metric("Avg Monthly", fmt_usd(avg_month))
-    c3.metric("Peak Month", peak_month)
-    c4.metric("Top Store", df.loc[top_store, "Store Name"])
+with tab_sales:
+    view_mode = st.radio(
+        "View", [f"Top {int(threshold*100)}%", "All Stores"],
+        horizontal=True, key="sales_view_mode"
+    )
 
-    st.divider()
+    if view_mode == f"Top {int(threshold*100)}%":
+        # ── Time window filter ────────────────────────────────────────────────
+        window_months = st.multiselect(
+            "Time window", months, default=window_months, key="t2_window",
+            help="Months included in Pareto ranking and group metrics"
+        )
+        if not window_months:
+            window_months = _default_window
+        w_top_lics, _ = compute_pareto(df, window_months, threshold)
 
-    # Share by store
-    col_left, col_right = st.columns([1, 1])
-    with col_left:
+        w_totals = df[window_months].sum(axis=1)
+        w_grand = w_totals.sum()
+        top_rev = df.loc[w_top_lics, window_months].sum().sum()
+        act_pct = pct_value(top_rev, w_grand)
+        top_avg = df.loc[w_top_lics, window_months].sum().mean()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Stores in Group", f"{len(w_top_lics)} of {len(all_lics)}")
+        c2.metric("Revenue Share", f"{act_pct:.1f}%")
+        c3.metric("Group Total", fmt_usd(top_rev))
+        c4.metric("Avg Monthly", fmt_usd(top_avg))
+
+        st.divider()
+
+        # Pareto breakdown table
+        st.subheader("Pareto breakdown")
+        sorted_lics = w_totals.sort_values(ascending=False).index.tolist()
+        cum = 0
+        pareto_rows = []
+        for i, lic in enumerate(sorted_lics, 1):
+            tot = w_totals[lic]
+            sp = pct_value(tot, w_grand)
+            cum += sp
+            pareto_rows.append({
+                "#": i,
+                "Store Name": df.loc[lic, "Store Name"],
+                "License": lic,
+                "Total": fmt_usd(tot),
+                "Share": f"{sp:.1f}%",
+                "Cumulative": f"{min(cum,100):.1f}%",
+                "Group": "✅ IN" if lic in w_top_lics else "out",
+            })
+        pareto_df = pd.DataFrame(pareto_rows)
+
+        def highlight_in(row):
+            if "✅" in str(row["Group"]):
+                return ["font-weight:600; color:#1558b0"] * len(pareto_df.columns)
+            return [""] * len(pareto_df.columns)
+
+        st.dataframe(pareto_df.style.apply(highlight_in, axis=1), use_container_width=True, hide_index=True)
+
+        remaining_pct = max(0, 100 - act_pct) if w_grand else 0.0
+        st.caption(f"Remaining {len(all_lics)-len(w_top_lics)} store{'s' if len(all_lics)-len(w_top_lics)!=1 else ''} account for {remaining_pct:.1f}% of total revenue · window: {', '.join(window_months)}")
+
+        st.divider()
+
+        # Share by store (top group only)
         st.subheader("Share by store")
-        sel_month = st.selectbox("Month", months, index=len(months)-1, key="t1_month")
-        sort_by = st.selectbox("Sort", SORT_OPTIONS, key="t1_sort")
+        fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 2])
+        _from_default = months.index(window_months[0])
+        _to_default   = months.index(window_months[-1])
+        from_month = fc1.selectbox("From", months, index=_from_default, key="t2_from")
+        to_month   = fc2.selectbox("To",   months, index=_to_default,   key="t2_to")
+        sort_by2   = fc3.selectbox("Sort", SORT_OPTIONS, key="t2_sort")
+        search2    = fc4.text_input("Search", placeholder="Store name or license…", key="t2_search")
 
-        month_total = df[sel_month].sum()
-        share_df = df[["Store Name", sel_month]].copy()
-        share_df["Share"] = share_df[sel_month].apply(lambda v: pct_value(v, month_total))
-        share_df.index.name = "License"
+        fi, ti = months.index(from_month), months.index(to_month)
+        if fi > ti:
+            fi, ti = ti, fi
+        range_months = months[fi: ti + 1]
+        range_label  = from_month if fi == ti else f"{from_month} – {to_month}"
 
-        share_df = sort_share_rows(share_df, sel_month, sort_by)
-
-        st.caption(f"Total for {sel_month}: **{fmt_usd(month_total)}**")
-        display = share_df.reset_index()[["Store Name", "License", sel_month, "Share"]].copy()
-        display.columns = ["Store Name", "License", "Revenue", "Share %"]
-        display["Revenue"] = display["Revenue"].apply(fmt_usd)
-        display["Share %"] = display["Share %"].apply(lambda x: f"{x:.1f}%")
-        st.dataframe(display, use_container_width=True, hide_index=True)
-
-    with col_right:
-        st.subheader("Revenue share")
-        if month_total > 0:
-            fig_pie = px.pie(
-                share_df.reset_index(), values=sel_month, names="Store Name",
-                color_discrete_sequence=px.colors.qualitative.Set2,
-                hole=0.4
+        share_df2 = df.loc[w_top_lics, ["Store Name"] + range_months].copy()
+        share_df2["_rev"] = share_df2[range_months].sum(axis=1)
+        all_rev_range = df[range_months].sum(axis=1).sum()
+        grp_rev_range = share_df2["_rev"].sum()
+        share_df2["% of Group"] = share_df2["_rev"].apply(lambda v: pct_value(v, grp_rev_range))
+        share_df2["% of All"]   = share_df2["_rev"].apply(lambda v: pct_value(v, all_rev_range))
+        share_df2 = sort_share_rows(share_df2, "_rev", sort_by2)
+        share_df2.insert(0, "#", range(1, len(share_df2) + 1))
+        if search2:
+            mask = (
+                share_df2["Store Name"].str.contains(search2, case=False, na=False)
+                | share_df2.index.str.contains(search2, case=False)
             )
-            fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-            fig_pie.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig_pie, use_container_width=True)
+            share_df2 = share_df2[mask]
+
+        st.caption(f"Group total {range_label}: **{fmt_usd(grp_rev_range)}** · {pct(grp_rev_range, all_rev_range)} of all stores")
+        disp2 = share_df2.reset_index()[["#", "Store Name", "License", "_rev", "% of Group", "% of All"]].copy()
+        disp2.columns = ["#", "Store Name", "License", "Revenue", "% of Group", "% of All Stores"]
+        disp2["Revenue"] = disp2["Revenue"].apply(fmt_usd)
+        disp2["% of Group"]      = disp2["% of Group"].apply(lambda x: f"{x:.1f}%")
+        disp2["% of All Stores"] = disp2["% of All Stores"].apply(lambda x: f"{x:.1f}%")
+        _ord_df_ref = st.session_state.get("order_df")
+        if _ord_df_ref is not None:
+            _ord_lics = set(_ord_df_ref["License #"].dropna().astype(str))
+            disp2.insert(3, "Order", disp2["License"].apply(lambda l: "✅" if str(l) in _ord_lics else ""))
+        st.dataframe(disp2, use_container_width=True, hide_index=True)
+
+        st.subheader("Revenue share")
+        if grp_rev_range > 0 and not share_df2.empty:
+            fig_pie2 = px.pie(
+                share_df2.reset_index(), values="_rev", names="Store Name",
+                color_discrete_sequence=px.colors.qualitative.Set2, hole=0.4
+            )
+            fig_pie2.update_traces(textposition="inside", textinfo="percent+label")
+            fig_pie2.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig_pie2, use_container_width=True)
         else:
-            st.info("No revenue for the selected month.")
+            st.info("No revenue for the selected period.")
 
-    share_report = build_share_by_store_pdf(df, sel_month, sort_by, report_date=report_date)
-    st.download_button(
-        "⬇ Download Share by Store Report",
-        data=share_report,
-        file_name=f"share-by-store-{slugify(sel_month)}-{slugify(sort_by)}.pdf",
-        mime="application/pdf",
-        key="t1_share_report"
-    )
-
-    st.divider()
-
-    # Monthly totals chart
-    st.subheader("Monthly totals")
-    fig_bar = go.Figure(go.Bar(
-        x=months, y=[month_totals[m] for m in months],
-        marker_color=BLUE, text=[fmt_usd(month_totals[m]) for m in months],
-        textposition="outside"
-    ))
-    fig_bar.update_layout(
-        yaxis_tickformat="$,.0f", margin=dict(t=20, b=20), height=320,
-        plot_bgcolor="white", yaxis=dict(gridcolor="#eee")
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-    # Monthly table
-    mt = pd.DataFrame({
-        "Month": months,
-        "Total": [fmt_usd(month_totals[m]) for m in months],
-        "vs Avg": [("+" if month_totals[m] >= avg_month else "") + fmt_usd(month_totals[m] - avg_month) for m in months],
-    })
-    st.dataframe(mt, use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    # Store trends
-    st.subheader("Store trends")
-    store_options = df["Store Name"].tolist()
-    default_sel = df["Store Name"].loc[all_totals.sort_values(ascending=False).index[:min(6, len(all_lics))]].tolist()
-    sel_stores = st.multiselect("Select stores", store_options, default=default_sel, key="t1_trend")
-    if sel_stores:
-        lic_map = {v: k for k, v in df["Store Name"].to_dict().items()}
-        sel_lics = [lic_map[s] for s in sel_stores if s in lic_map]
-        fig_line = go.Figure()
-        palette = px.colors.qualitative.Set1
-        for i, lic in enumerate(sel_lics):
-            fig_line.add_trace(go.Scatter(
-                x=months, y=[df.loc[lic, m] for m in months],
-                name=df.loc[lic, "Store Name"], mode="lines+markers",
-                line=dict(color=palette[i % len(palette)], width=2)
-            ))
-        fig_line.update_layout(
-            yaxis_tickformat="$,.0f", height=320, margin=dict(t=10, b=10),
-            plot_bgcolor="white", yaxis=dict(gridcolor="#eee"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02)
+        share_report2 = build_share_by_store_pdf(df, to_month, sort_by2, top_lics=w_top_lics, threshold=threshold, report_date=report_date)
+        st.download_button(
+            f"⬇ Download Share by Store Report — Top {int(threshold*100)}%",
+            data=share_report2,
+            file_name=f"share-by-store-top-{int(threshold*100)}pct-{slugify(range_label)}-{slugify(sort_by2)}.pdf",
+            mime="application/pdf", key="t2_share_report"
         )
-        st.plotly_chart(fig_line, use_container_width=True)
 
-    st.divider()
-    pdf_buf = build_pdf(df, months, report_date=report_date)
-    st.download_button(
-        "⬇ Download PDF Report",
-        data=pdf_buf,
-        file_name="store-sales-dashboard.pdf",
-        mime="application/pdf"
-    )
+        st.divider()
 
-# ╔══════════════════════════════════════════════════════════════════╗
-# ║  TAB — Pareto / top X%                                          ║
-# ╚══════════════════════════════════════════════════════════════════╝
-with tab_top:
-    # ── Time window filter ────────────────────────────────────────────────────
-    _default_window = last_n_month_cols(months, 3)
-    window_months = st.multiselect(
-        "Time window", months, default=_default_window, key="t2_window",
-        help="Months included in Pareto ranking and group metrics"
-    )
-    if not window_months:
-        window_months = _default_window
+        st.subheader("Monthly totals — group vs all stores")
+        grp_m = df.loc[w_top_lics, months].sum()
+        all_m = df[months].sum()
+        fig_bar2 = go.Figure()
+        fig_bar2.add_trace(go.Bar(x=months, y=[grp_m[m] for m in months], name=f"Top {int(threshold*100)}% stores", marker_color=BLUE))
+        fig_bar2.add_trace(go.Bar(x=months, y=[all_m[m] for m in months], name="All stores", marker_color="#B5D4F4"))
+        fig_bar2.update_layout(barmode="group", yaxis_tickformat="$,.0f", height=300,
+            margin=dict(t=10, b=10), plot_bgcolor="white", yaxis=dict(gridcolor="#eee"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        st.plotly_chart(fig_bar2, use_container_width=True)
 
-    w_totals = df[window_months].sum(axis=1)
-    w_grand = w_totals.sum()
-    w_top_lics, _ = compute_pareto(df, window_months, threshold)
-
-    top_rev = df.loc[w_top_lics, window_months].sum().sum()
-    act_pct = pct_value(top_rev, w_grand)
-    top_avg = df.loc[w_top_lics, window_months].sum().mean()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Stores in Group", f"{len(w_top_lics)} of {len(all_lics)}")
-    c2.metric("Revenue Share", f"{act_pct:.1f}%")
-    c3.metric("Group Total", fmt_usd(top_rev))
-    c4.metric("Avg Monthly", fmt_usd(top_avg))
-
-    st.divider()
-
-    # Pareto breakdown table
-    st.subheader("Pareto breakdown")
-    sorted_lics = w_totals.sort_values(ascending=False).index.tolist()
-    cum = 0
-    pareto_rows = []
-    for i, lic in enumerate(sorted_lics, 1):
-        tot = w_totals[lic]
-        sp = pct_value(tot, w_grand)
-        cum += sp
-        pareto_rows.append({
-            "#": i,
-            "Store Name": df.loc[lic, "Store Name"],
-            "License": lic,
-            "Total": fmt_usd(tot),
-            "Share": f"{sp:.1f}%",
-            "Cumulative": f"{min(cum,100):.1f}%",
-            "Group": "✅ IN" if lic in w_top_lics else "out",
+        mt2 = pd.DataFrame({
+            "Month": months,
+            "Group": [fmt_usd(grp_m[m]) for m in months],
+            "All Stores": [fmt_usd(all_m[m]) for m in months],
+            "Group Share": [pct(grp_m[m], all_m[m]) for m in months],
         })
-    pareto_df = pd.DataFrame(pareto_rows)
+        st.dataframe(mt2, use_container_width=True, hide_index=True)
 
-    def highlight_in(row):
-        if "✅" in str(row["Group"]):
-            return ["font-weight:600; color:#1558b0"] * len(pareto_df.columns)
-        return [""] * len(pareto_df.columns)
+        st.divider()
 
-    st.dataframe(
-        pareto_df.style.apply(highlight_in, axis=1),
-        use_container_width=True, hide_index=True
-    )
+        st.subheader("Store trends")
+        top_names = df.loc[w_top_lics, "Store Name"].tolist()
+        sel_stores2 = st.multiselect("Select stores", top_names, default=top_names, key="t2_trend")
+        if sel_stores2:
+            lic_map2 = {v: k for k, v in df["Store Name"].to_dict().items()}
+            sel_lics2 = [lic_map2[s] for s in sel_stores2 if s in lic_map2]
+            fig_line2 = go.Figure()
+            palette = px.colors.qualitative.Set1
+            for i, lic in enumerate(sel_lics2):
+                fig_line2.add_trace(go.Scatter(
+                    x=months, y=[df.loc[lic, m] for m in months],
+                    name=df.loc[lic, "Store Name"], mode="lines+markers",
+                    line=dict(color=palette[i % len(palette)], width=2)
+                ))
+            fig_line2.update_layout(yaxis_tickformat="$,.0f", height=300, margin=dict(t=10, b=10),
+                plot_bgcolor="white", yaxis=dict(gridcolor="#eee"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02))
+            st.plotly_chart(fig_line2, use_container_width=True)
 
-    remaining_pct = max(0, 100 - act_pct) if w_grand else 0.0
-    st.caption(f"Remaining {len(all_lics)-len(w_top_lics)} store{'s' if len(all_lics)-len(w_top_lics)!=1 else ''} account for {remaining_pct:.1f}% of total revenue · window: {', '.join(window_months)}")
+        st.divider()
+        pdf_buf2 = build_pdf(df, months, top_lics=w_top_lics, threshold=threshold, report_date=report_date)
+        st.download_button(f"⬇ Download PDF Report — Top {int(threshold*100)}%",
+            data=pdf_buf2, file_name=f"pareto-dashboard-{int(threshold*100)}pct.pdf", mime="application/pdf")
 
-    st.divider()
+    else:  # All Stores
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Revenue", fmt_usd(grand))
+        c2.metric("Avg Monthly", fmt_usd(avg_month))
+        c3.metric("Peak Month", peak_month)
+        c4.metric("Top Store", df.loc[top_store, "Store Name"])
 
-    # Share by store (top group only)
-    st.subheader("Share by store")
+        st.divider()
 
-    # ── Controls ─────────────────────────────────────────────────────────────
-    fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 2])
-    _from_default = months.index(window_months[0])
-    _to_default   = months.index(window_months[-1])
-    from_month = fc1.selectbox("From", months, index=_from_default, key="t2_from")
-    to_month   = fc2.selectbox("To",   months, index=_to_default,   key="t2_to")
-    sort_by2   = fc3.selectbox("Sort", SORT_OPTIONS, key="t2_sort")
-    search2    = fc4.text_input("Search", placeholder="Store name or license…", key="t2_search")
+        col_left, col_right = st.columns([1, 1])
+        with col_left:
+            st.subheader("Share by store")
+            sel_month = st.selectbox("Month", months, index=len(months)-1, key="t1_month")
+            sort_by = st.selectbox("Sort", SORT_OPTIONS, key="t1_sort")
+            month_total = df[sel_month].sum()
+            share_df = df[["Store Name", sel_month]].copy()
+            share_df["Share"] = share_df[sel_month].apply(lambda v: pct_value(v, month_total))
+            share_df.index.name = "License"
+            share_df = sort_share_rows(share_df, sel_month, sort_by)
+            st.caption(f"Total for {sel_month}: **{fmt_usd(month_total)}**")
+            display = share_df.reset_index()[["Store Name", "License", sel_month, "Share"]].copy()
+            display.columns = ["Store Name", "License", "Revenue", "Share %"]
+            display["Revenue"] = display["Revenue"].apply(fmt_usd)
+            display["Share %"] = display["Share %"].apply(lambda x: f"{x:.1f}%")
+            st.dataframe(display, use_container_width=True, hide_index=True)
 
-    # Resolve range (swap if user picks From > To)
-    fi, ti = months.index(from_month), months.index(to_month)
-    if fi > ti:
-        fi, ti = ti, fi
-    range_months = months[fi: ti + 1]
-    range_label  = from_month if fi == ti else f"{from_month} – {to_month}"
+        with col_right:
+            st.subheader("Revenue share")
+            if month_total > 0:
+                fig_pie = px.pie(share_df.reset_index(), values=sel_month, names="Store Name",
+                    color_discrete_sequence=px.colors.qualitative.Set2, hole=0.4)
+                fig_pie.update_traces(textposition="inside", textinfo="percent+label")
+                fig_pie.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
+                st.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                st.info("No revenue for the selected month.")
 
-    # Revenue summed across range
-    share_df2 = df.loc[w_top_lics, ["Store Name"] + range_months].copy()
-    share_df2["_rev"] = share_df2[range_months].sum(axis=1)
-    all_rev_range = df[range_months].sum(axis=1).sum()
-    grp_rev_range = share_df2["_rev"].sum()
-    share_df2["% of Group"] = share_df2["_rev"].apply(lambda v: pct_value(v, grp_rev_range))
-    share_df2["% of All"]   = share_df2["_rev"].apply(lambda v: pct_value(v, all_rev_range))
+        share_report = build_share_by_store_pdf(df, sel_month, sort_by, report_date=report_date)
+        st.download_button("⬇ Download Share by Store Report", data=share_report,
+            file_name=f"share-by-store-{slugify(sel_month)}-{slugify(sort_by)}.pdf",
+            mime="application/pdf", key="t1_share_report")
 
-    # Sort then search-filter (rank reflects sorted order before filtering)
-    share_df2 = sort_share_rows(share_df2, "_rev", sort_by2)
-    share_df2.insert(0, "#", range(1, len(share_df2) + 1))
-    if search2:
-        mask = (
-            share_df2["Store Name"].str.contains(search2, case=False, na=False)
-            | share_df2.index.str.contains(search2, case=False)
-        )
-        share_df2 = share_df2[mask]
+        st.divider()
 
-    st.caption(f"Group total {range_label}: **{fmt_usd(grp_rev_range)}** · {pct(grp_rev_range, all_rev_range)} of all stores")
-    disp2 = share_df2.reset_index()[["#", "Store Name", "License", "_rev", "% of Group", "% of All"]].copy()
-    disp2.columns = ["#", "Store Name", "License", "Revenue", "% of Group", "% of All Stores"]
-    disp2["Revenue"] = disp2["Revenue"].apply(fmt_usd)
-    disp2["% of Group"]      = disp2["% of Group"].apply(lambda x: f"{x:.1f}%")
-    disp2["% of All Stores"] = disp2["% of All Stores"].apply(lambda x: f"{x:.1f}%")
-    _ord_df_ref = st.session_state.get("order_df")
-    if _ord_df_ref is not None:
-        _ord_lics = set(_ord_df_ref["License #"].dropna().astype(str))
-        disp2.insert(3, "Order", disp2["License"].apply(lambda l: "✅" if str(l) in _ord_lics else ""))
-    st.dataframe(disp2, use_container_width=True, hide_index=True)
+        st.subheader("Monthly totals")
+        fig_bar = go.Figure(go.Bar(x=months, y=[month_totals[m] for m in months],
+            marker_color=BLUE, text=[fmt_usd(month_totals[m]) for m in months], textposition="outside"))
+        fig_bar.update_layout(yaxis_tickformat="$,.0f", margin=dict(t=20, b=20), height=320,
+            plot_bgcolor="white", yaxis=dict(gridcolor="#eee"))
+        st.plotly_chart(fig_bar, use_container_width=True)
 
-    st.subheader("Revenue share")
-    if grp_rev_range > 0 and not share_df2.empty:
-        fig_pie2 = px.pie(
-            share_df2.reset_index(), values="_rev", names="Store Name",
-            color_discrete_sequence=px.colors.qualitative.Set2, hole=0.4
-        )
-        fig_pie2.update_traces(textposition="inside", textinfo="percent+label")
-        fig_pie2.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-        st.plotly_chart(fig_pie2, use_container_width=True)
-    else:
-        st.info("No revenue for the selected period.")
+        mt = pd.DataFrame({
+            "Month": months,
+            "Total": [fmt_usd(month_totals[m]) for m in months],
+            "vs Avg": [("+" if month_totals[m] >= avg_month else "") + fmt_usd(month_totals[m] - avg_month) for m in months],
+        })
+        st.dataframe(mt, use_container_width=True, hide_index=True)
 
-    share_report2 = build_share_by_store_pdf(
-        df, to_month, sort_by2,
-        top_lics=w_top_lics, threshold=threshold,
-        report_date=report_date
-    )
-    st.download_button(
-        f"⬇ Download Share by Store Report — Top {int(threshold*100)}%",
-        data=share_report2,
-        file_name=f"share-by-store-top-{int(threshold*100)}pct-{slugify(range_label)}-{slugify(sort_by2)}.pdf",
-        mime="application/pdf",
-        key="t2_share_report"
-    )
+        st.divider()
 
-    st.divider()
+        st.subheader("Store trends")
+        store_options = df["Store Name"].tolist()
+        default_sel = df["Store Name"].loc[all_totals.sort_values(ascending=False).index[:min(6, len(all_lics))]].tolist()
+        sel_stores = st.multiselect("Select stores", store_options, default=default_sel, key="t1_trend")
+        if sel_stores:
+            lic_map = {v: k for k, v in df["Store Name"].to_dict().items()}
+            sel_lics = [lic_map[s] for s in sel_stores if s in lic_map]
+            fig_line = go.Figure()
+            palette = px.colors.qualitative.Set1
+            for i, lic in enumerate(sel_lics):
+                fig_line.add_trace(go.Scatter(x=months, y=[df.loc[lic, m] for m in months],
+                    name=df.loc[lic, "Store Name"], mode="lines+markers",
+                    line=dict(color=palette[i % len(palette)], width=2)))
+            fig_line.update_layout(yaxis_tickformat="$,.0f", height=320, margin=dict(t=10, b=10),
+                plot_bgcolor="white", yaxis=dict(gridcolor="#eee"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02))
+            st.plotly_chart(fig_line, use_container_width=True)
 
-    # Monthly totals — group vs all
-    st.subheader("Monthly totals — group vs all stores")
-    grp_m = df.loc[w_top_lics, months].sum()
-    all_m = df[months].sum()
-    fig_bar2 = go.Figure()
-    fig_bar2.add_trace(go.Bar(x=months, y=[grp_m[m] for m in months], name=f"Top {int(threshold*100)}% stores", marker_color=BLUE))
-    fig_bar2.add_trace(go.Bar(x=months, y=[all_m[m] for m in months], name="All stores", marker_color="#B5D4F4"))
-    fig_bar2.update_layout(
-        barmode="group", yaxis_tickformat="$,.0f", height=300,
-        margin=dict(t=10, b=10), plot_bgcolor="white",
-        yaxis=dict(gridcolor="#eee"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02)
-    )
-    st.plotly_chart(fig_bar2, use_container_width=True)
-
-    mt2 = pd.DataFrame({
-        "Month": months,
-        "Group": [fmt_usd(grp_m[m]) for m in months],
-        "All Stores": [fmt_usd(all_m[m]) for m in months],
-        "Group Share": [pct(grp_m[m], all_m[m]) for m in months],
-    })
-    st.dataframe(mt2, use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    # Trend chart (top stores only)
-    st.subheader("Store trends")
-    top_names = df.loc[w_top_lics, "Store Name"].tolist()
-    sel_stores2 = st.multiselect("Select stores", top_names, default=top_names, key="t2_trend")
-    if sel_stores2:
-        lic_map2 = {v: k for k, v in df["Store Name"].to_dict().items()}
-        sel_lics2 = [lic_map2[s] for s in sel_stores2 if s in lic_map2]
-        fig_line2 = go.Figure()
-        palette = px.colors.qualitative.Set1
-        for i, lic in enumerate(sel_lics2):
-            fig_line2.add_trace(go.Scatter(
-                x=months, y=[df.loc[lic, m] for m in months],
-                name=df.loc[lic, "Store Name"], mode="lines+markers",
-                line=dict(color=palette[i % len(palette)], width=2)
-            ))
-        fig_line2.update_layout(
-            yaxis_tickformat="$,.0f", height=300, margin=dict(t=10, b=10),
-            plot_bgcolor="white", yaxis=dict(gridcolor="#eee"),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02)
-        )
-        st.plotly_chart(fig_line2, use_container_width=True)
-
-    st.divider()
-    pdf_buf2 = build_pdf(df, months, top_lics=w_top_lics, threshold=threshold, report_date=report_date)
-    st.download_button(
-        f"⬇ Download PDF Report — Top {int(threshold*100)}%",
-        data=pdf_buf2,
-        file_name=f"pareto-dashboard-{int(threshold*100)}pct.pdf",
-        mime="application/pdf"
-    )
+        st.divider()
+        pdf_buf = build_pdf(df, months, report_date=report_date)
+        st.download_button("⬇ Download PDF Report", data=pdf_buf,
+            file_name="store-sales-dashboard.pdf", mime="application/pdf")
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Store Contact Form                                        ║
