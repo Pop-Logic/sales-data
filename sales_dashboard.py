@@ -51,7 +51,7 @@ if _logo_path.exists():
     st.markdown(f"""
 <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px">
     <img src="data:image/png;base64,{_logo_b64}" height="60">
-    <h1 style="margin:0; line-height:1.2">Store Sales Dashboard</h1>
+    <h1 style="margin:0; line-height:1.2; color:#e3e3d8">Store Sales Dashboard</h1>
 </div>""", unsafe_allow_html=True)
 else:
     st.markdown("<h1>Store Sales Dashboard</h1>", unsafe_allow_html=True)
