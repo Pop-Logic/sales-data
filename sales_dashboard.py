@@ -1919,14 +1919,20 @@ with tab_orders:
 
         sample_totals = (
             sample_view.groupby(["Client", "License #"])
-            .agg(Total_Units=("Units", "sum"), Drops=("Order #", "nunique"))
+            .agg(
+                Total_Units=("Units", "sum"),
+                Drops=("Order #", "nunique"),
+                Last_Drop=("Submitted Date", "max"),
+            )
             .reset_index()
         )
+        sample_totals["Last_Drop"] = sample_totals["Last_Drop"].dt.strftime("%m/%d/%Y")
         sample_table = sample_totals.merge(sample_pivot, on=["Client", "License #"], how="left")
         sample_table = sample_table.sort_values("Total_Units", ascending=False)
         sample_table = sample_table.rename(columns={
-            "Client": "Store", "License #": "License", "Total_Units": "Total Units"
-        })[["Store", "License", "Drops", "Total Units"] + BRANDS]
+            "Client": "Store", "License #": "License",
+            "Total_Units": "Total Units", "Last_Drop": "Last Drop",
+        })[["Store", "License", "Drops", "Last Drop", "Total Units"] + BRANDS]
 
         st.dataframe(sample_table, use_container_width=True, hide_index=True)
 
