@@ -282,12 +282,7 @@ def sort_share_rows(share_df, revenue_col, sort_by):
 def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-") or "report"
 
-def parse_orders(file_obj) -> pd.DataFrame:
-    name = getattr(file_obj, "name", "")
-    if name.lower().endswith(".csv"):
-        odf = pd.read_csv(file_obj)
-    else:
-        odf = pd.read_excel(file_obj, engine="openpyxl")
+def _enrich_order_df(odf: pd.DataFrame) -> pd.DataFrame:
     def _brand(sub):
         s = str(sub).strip()
         if s.startswith("LL"):   return "Leisure Land"
@@ -295,6 +290,7 @@ def parse_orders(file_obj) -> pd.DataFrame:
         if s.startswith("KS"):   return "K. Savage"
         if s.startswith("Bulk"): return "Bulk"
         return "Other"
+    odf = odf.copy()
     odf["Brand"] = odf["Sub Product Line"].apply(_brand)
     if "Submitted Date" in odf.columns:
         odf["Submitted Date"] = pd.to_datetime(odf["Submitted Date"], errors="coerce")
@@ -303,6 +299,30 @@ def parse_orders(file_obj) -> pd.DataFrame:
             lambda x: str(int(float(x))) if pd.notna(x) and str(x).strip() not in ("", "nan") else ""
         )
     return odf
+
+def parse_orders(file_obj) -> pd.DataFrame:
+    name = getattr(file_obj, "name", "")
+    if name.lower().endswith(".csv"):
+        raw = pd.read_csv(file_obj)
+    else:
+        raw = pd.read_excel(file_obj, engine="openpyxl")
+    return _enrich_order_df(raw)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_order_sheet_as_df(sheet_url, gid="0"):
+    csv_url = google_sheet_csv_url(sheet_url, gid)
+    raw = pd.read_csv(csv_url).dropna(how="all").dropna(axis=1, how="all")
+    if raw.empty:
+        raise ValueError("The order sheet is empty.")
+    return raw, raw.shape
+
+def load_order_sheet_into_session(sheet_url, gid, clear_cache=False):
+    if clear_cache:
+        load_order_sheet_as_df.clear()
+    raw, shape = load_order_sheet_as_df(sheet_url, gid)
+    st.session_state["order_df"] = _enrich_order_df(raw)
+    st.session_state["order_data_label"] = f"Google Sheet · {shape[0]} rows · {shape[1]} columns"
+    return shape
 
 def storage_path():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -344,6 +364,26 @@ def init_storage():
                 conn.execute(f"ALTER TABLE contact_log ADD COLUMN {col}")
             except Exception:
                 pass  # column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+
+def get_setting(key: str, default: str = "") -> str:
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+def set_setting(key: str, value: str):
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
 def list_saved_datasets():
     init_storage()
@@ -1015,20 +1055,76 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Order Data")
-    st.caption("Upload order detail export (.xlsx or .csv) to enable Order Activity tab and store order indicators.")
-    order_file = st.file_uploader("Order file", type=["xlsx", "xls", "csv"], key="order_file_upload", label_visibility="collapsed")
+
+    # Auto-load from saved default sheet on first run of this session
+    if not st.session_state.get("order_sheet_checked"):
+        _saved_url = get_setting("order_sheet_url")
+        _saved_gid = get_setting("order_sheet_gid", "0")
+        if _saved_url and "order_df" not in st.session_state:
+            try:
+                load_order_sheet_into_session(_saved_url, _saved_gid)
+            except Exception as _e:
+                st.session_state["order_sheet_error"] = str(_e)
+        st.session_state["order_sheet_checked"] = True
+
+    if st.session_state.get("order_sheet_error"):
+        st.error(f"Order sheet load failed: {st.session_state['order_sheet_error']}")
+
+    _odf = st.session_state.get("order_df")
+    if _odf is not None:
+        st.caption(st.session_state.get("order_data_label", f"✅ {len(_odf)} lines · {_odf['Order #'].nunique()} orders"))
+        _saved_url = get_setting("order_sheet_url")
+        if _saved_url:
+            if st.button("Refresh Order Sheet", use_container_width=True):
+                try:
+                    _shape = load_order_sheet_into_session(
+                        _saved_url, get_setting("order_sheet_gid", "0"), clear_cache=True
+                    )
+                    st.session_state.pop("order_sheet_error", None)
+                    st.session_state["order_data_label"] = f"Google Sheet · {_shape[0]} rows · {_shape[1]} columns"
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Could not refresh: {_e}")
+        if st.button("Clear order data", use_container_width=True):
+            del st.session_state["order_df"]
+            st.session_state.pop("order_data_label", None)
+            st.rerun()
+
+    with st.expander("Link a Google Sheet" if not get_setting("order_sheet_url") else "Change order sheet"):
+        _cur_url = get_setting("order_sheet_url", "")
+        _cur_gid = get_setting("order_sheet_gid", "0")
+        _new_url = st.text_input("Google Sheet URL", value=_cur_url, key="order_sheet_url_input",
+                                  placeholder="https://docs.google.com/spreadsheets/d/…")
+        _new_gid = st.text_input("Worksheet gid", value=_cur_gid, key="order_sheet_gid_input",
+                                  help="gid from the sheet tab URL; 0 for first sheet")
+        if st.button("Load & save as default", use_container_width=True, key="load_order_sheet"):
+            if not _new_url.strip():
+                st.warning("Enter a sheet URL.")
+            else:
+                try:
+                    _shape = load_order_sheet_into_session(_new_url.strip(), _new_gid.strip(), clear_cache=True)
+                    set_setting("order_sheet_url", _new_url.strip())
+                    set_setting("order_sheet_gid", _new_gid.strip() or "0")
+                    st.session_state.pop("order_sheet_error", None)
+                    st.session_state["order_data_label"] = f"Google Sheet · {_shape[0]} rows · {_shape[1]} columns"
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Could not load sheet: {_e}")
+        if _cur_url and st.button("Remove default sheet", use_container_width=True, key="remove_order_sheet"):
+            set_setting("order_sheet_url", "")
+            st.rerun()
+
+    st.caption("Or upload a file:")
+    order_file = st.file_uploader("Order file", type=["xlsx", "xls", "csv"],
+                                   key="order_file_upload", label_visibility="collapsed")
     if order_file is not None:
         try:
             st.session_state["order_df"] = parse_orders(order_file)
-            st.caption(f"✅ {len(st.session_state['order_df'])} lines · {st.session_state['order_df']['Order #'].nunique()} orders loaded")
+            st.session_state["order_data_label"] = f"File · {len(st.session_state['order_df'])} lines"
+            st.session_state.pop("order_sheet_error", None)
+            st.rerun()
         except Exception as _oe:
             st.error(f"Could not read order file: {_oe}")
-    if st.session_state.get("order_df") is not None and order_file is None:
-        _odf = st.session_state["order_df"]
-        st.caption(f"✅ {len(_odf)} lines · {_odf['Order #'].nunique()} orders loaded")
-        if st.button("Clear order data", use_container_width=True):
-            del st.session_state["order_df"]
-            st.rerun()
 
 # ── Parse ──────────────────────────────────────────────────────────────────────
 df, months, stripped = None, [], []
