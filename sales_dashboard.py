@@ -1817,3 +1817,72 @@ with tab_orders:
                 st.plotly_chart(fig_prod, use_container_width=True)
             else:
                 st.info(f"No paid {brand} lines in current selection.")
+
+    st.divider()
+
+    # ── Store-level activity ───────────────────────────────────────────────────
+    st.subheader("Store Activity")
+
+    # Summary table: one row per store, columns per brand + totals
+    store_summary = (
+        paid_view.groupby(["Client", "License #", "Brand"])
+        .agg(Units=("Units", "sum"), Revenue=("Line Total", "sum"))
+        .reset_index()
+    )
+    store_pivot = store_summary.pivot_table(
+        index=["Client", "License #"],
+        columns="Brand",
+        values="Units",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+    store_pivot.columns.name = None
+
+    store_totals = (
+        paid_view.groupby(["Client", "License #"])
+        .agg(
+            Total_Units=("Units", "sum"),
+            Total_Revenue=("Line Total", "sum"),
+            Orders=("Order #", "nunique"),
+        )
+        .reset_index()
+    )
+    store_table = store_totals.merge(store_pivot, on=["Client", "License #"], how="left")
+    for brand in BRANDS:
+        if brand not in store_table.columns:
+            store_table[brand] = 0
+    store_table = store_table.sort_values("Total_Revenue", ascending=False)
+    store_table["Total_Revenue"] = store_table["Total_Revenue"].apply(fmt_usd)
+
+    # Search
+    store_search = st.text_input("Search stores", placeholder="Store name or license…", key="ord_store_search")
+    if store_search:
+        _q = store_search.lower()
+        store_table = store_table[
+            store_table["Client"].str.lower().str.contains(_q, na=False)
+            | store_table["License #"].astype(str).str.contains(_q, na=False)
+        ]
+
+    disp_store = store_table.rename(columns={
+        "Client": "Store", "License #": "License",
+        "Total_Units": "Total Units", "Total_Revenue": "Revenue",
+    })[["Store", "License", "Orders", "Revenue", "Total Units"] + BRANDS]
+    st.dataframe(disp_store, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # Store drill-down
+    st.subheader("Store Order Detail")
+    store_names = sorted(paid_view["Client"].dropna().unique().tolist())
+    selected_store = st.selectbox("Select store", store_names, key="ord_store_select")
+    if selected_store:
+        store_orders = paid_view[paid_view["Client"] == selected_store].copy()
+        store_orders["Submitted Date"] = store_orders["Submitted Date"].dt.strftime("%m/%d/%Y")
+        store_orders["Line Total"] = store_orders["Line Total"].apply(fmt_usd)
+        detail_cols = ["Order #", "Submitted Date", "Brand", "Product", "Units", "Line Total", "Status"]
+        detail_cols = [c for c in detail_cols if c in store_orders.columns]
+        st.dataframe(
+            store_orders[detail_cols].sort_values("Order #"),
+            use_container_width=True,
+            hide_index=True,
+        )
