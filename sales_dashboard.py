@@ -1932,7 +1932,11 @@ with tab_orders:
 
         # Filters
         sf1, sf2, sf3 = st.columns([2, 1, 1])
-        order_nums = sorted(store_orders["Order #"].dropna().unique().tolist(), key=lambda x: int(float(x)) if str(x).replace(".", "").isdigit() else x)
+        def _ord_sort_key(x):
+            import re as _re
+            m = _re.search(r"(\d+)$", str(x))
+            return int(m.group(1)) if m else str(x)
+        order_nums = sorted(store_orders["Order #"].dropna().unique().tolist(), key=_ord_sort_key)
         sel_orders = sf1.multiselect("Filter by Order #", order_nums, placeholder="All orders", key="sod_order_filter")
         _so_dates = store_orders["Submitted Date"].dropna()
         _so_min = _so_dates.min().date() if not _so_dates.empty else _min_date
