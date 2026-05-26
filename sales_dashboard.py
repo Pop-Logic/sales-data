@@ -2039,15 +2039,29 @@ with tab_mom:
             return fallback
         _prev_idx = _find_month_idx(_pm, len(months) - 1)
 
-        mc1, _ = st.columns([2, 5])
-        prev_month = mc1.selectbox("Last month", months, index=_prev_idx, key="mom_base")
+        # Date bounds from order sheet
+        _ord_dates = _ord_df_mom["Submitted Date"].dropna()
+        _ord_min = _ord_dates.min().date() if not _ord_dates.empty else _today.date()
+        _ord_max = _ord_dates.max().date() if not _ord_dates.empty else _today.date()
+        # Default current-month window: first to last day with data in current calendar month
+        import calendar as _cal
+        _cm_first = _today.replace(day=1).date()
+        _cm_last  = _today.replace(day=_cal.monthrange(_today.year, _today.month)[1]).date()
+        _cm_from_default = max(_ord_min, _cm_first)
+        _cm_to_default   = min(_ord_max, _cm_last)
 
-        # Current month: aggregate paid orders from the Google Sheet for this calendar month
-        _curr_label = _today.strftime("%B %Y")
+        mc1, mc2, mc3, _ = st.columns([2, 1, 1, 2])
+        prev_month  = mc1.selectbox("Last month", months, index=_prev_idx, key="mom_base")
+        _cm_from    = mc2.date_input("Current from", value=_cm_from_default,
+                                      min_value=_ord_min, max_value=_ord_max, key="mom_from")
+        _cm_to      = mc3.date_input("Current to",   value=_cm_to_default,
+                                      min_value=_ord_min, max_value=_ord_max, key="mom_to")
+
+        _curr_label = f"{_cm_from.strftime('%b %-d')} – {_cm_to.strftime('%b %-d, %Y')}"
         _curr_paid = _ord_df_mom[
-            (_ord_df_mom["Submitted Date"].dt.month == _today.month) &
-            (_ord_df_mom["Submitted Date"].dt.year  == _today.year)  &
-            (_ord_df_mom["Brand"] != "Bulk")                         &
+            (_ord_df_mom["Submitted Date"].dt.date >= _cm_from) &
+            (_ord_df_mom["Submitted Date"].dt.date <= _cm_to)   &
+            (_ord_df_mom["Brand"] != "Bulk")                    &
             (_ord_df_mom["Line Total"] > 0)
         ]
         # Group by License # only — avoid multi-row joins from Client name variations
