@@ -1891,7 +1891,7 @@ with tab_orders:
     for brand in BRANDS:
         if brand not in store_table.columns:
             store_table[brand] = 0
-    store_table = store_table.sort_values("Total_Revenue", ascending=False)
+    store_table = store_table.sort_values("Last_Order", ascending=False)
 
     # Search
     store_search = st.text_input("Search stores", placeholder="Store name or license…", key="ord_store_search")
