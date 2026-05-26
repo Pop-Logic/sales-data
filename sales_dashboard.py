@@ -1936,6 +1936,23 @@ with tab_orders:
     selected_store = st.selectbox("Select store", store_names, index=_default_idx, key="ord_store_select")
     if selected_store:
         store_orders = paid_view[paid_view["Client"] == selected_store].copy()
+
+        # Filters
+        sf1, sf2, sf3 = st.columns([2, 1, 1])
+        order_nums = sorted(store_orders["Order #"].dropna().unique().tolist())
+        sel_orders = sf1.multiselect("Filter by Order #", order_nums, placeholder="All orders", key="sod_order_filter")
+        _so_dates = store_orders["Submitted Date"].dropna()
+        _so_min = _so_dates.min().date() if not _so_dates.empty else _min_date
+        _so_max = _so_dates.max().date() if not _so_dates.empty else _max_date
+        sod_from = sf2.date_input("From", value=_so_min, min_value=_so_min, max_value=_so_max, key="sod_from")
+        sod_to   = sf3.date_input("To",   value=_so_max, min_value=_so_min, max_value=_so_max, key="sod_to")
+
+        if sel_orders:
+            store_orders = store_orders[store_orders["Order #"].isin(sel_orders)]
+        store_orders = store_orders[
+            store_orders["Submitted Date"].dt.date.between(sod_from, sod_to)
+        ]
+
         store_orders["Submitted Date"] = store_orders["Submitted Date"].dt.strftime("%m/%d/%Y")
         store_orders["Line Total"] = store_orders["Line Total"].apply(fmt_usd)
         detail_cols = ["Order #", "Submitted Date", "Brand", "Product", "Units", "Line Total", "Status"]
