@@ -2050,28 +2050,27 @@ with tab_mom:
             (_ord_df_mom["Brand"] != "Bulk")                         &
             (_ord_df_mom["Line Total"] > 0)
         ]
-        _curr_by_lic = (
-            _curr_paid.groupby(["License #", "Client"])["Line Total"].sum()
-            .reset_index()
-            .rename(columns={"License #": "License", "Client": "Store Name", "Line Total": "Current Month"})
+        # Group by License # only — avoid multi-row joins from Client name variations
+        _curr_rev = _curr_paid.groupby("License #")["Line Total"].sum().reset_index()
+        _curr_rev.columns = ["License", "Current Month"]
+        # Store name: take the first Client value per license from the order sheet
+        _curr_names = (
+            _curr_paid.drop_duplicates("License #")[["License #", "Client"]]
+            .rename(columns={"License #": "License", "Client": "_ord_name"})
         )
+        _curr_rev = _curr_rev.merge(_curr_names, on="License", how="left")
 
-        # Start from order-sheet stores so no current-month revenue is dropped,
-        # then bring in last-month revenue from the dashboard where license matches.
-        _rev = df[[prev_month]].copy()
+        # Revenue dashboard: last-month column + store name, keyed by license
+        _rev = df[[prev_month, "Store Name"]].copy()
         _rev.index.name = "License"
         _rev = _rev.reset_index()
         _rev["License"] = _rev["License"].astype(str)
 
-        mom = _curr_by_lic.merge(_rev, on="License", how="outer")
-        # Fill store names for licenses only in the revenue data
-        _rev_names = df[["Store Name"]].copy()
-        _rev_names.index.name = "License"
-        _rev_names = _rev_names.reset_index()
-        _rev_names["License"] = _rev_names["License"].astype(str)
-        mom = mom.merge(_rev_names.rename(columns={"Store Name": "_rev_name"}), on="License", how="left")
-        mom["Store Name"] = mom["Store Name"].combine_first(mom["_rev_name"])
-        mom = mom.drop(columns=["_rev_name"])
+        # Outer join so neither source drops rows
+        mom = _curr_rev.merge(_rev, on="License", how="outer")
+        # Prefer revenue-dashboard store name; fall back to order-sheet name
+        mom["Store Name"] = mom["Store Name"].combine_first(mom["_ord_name"])
+        mom = mom.drop(columns=["_ord_name"])
         mom = mom.rename(columns={prev_month: "Last Month"})
         mom["Current Month"] = mom["Current Month"].fillna(0)
         mom["Last Month"]    = mom["Last Month"].fillna(0)
@@ -2096,7 +2095,7 @@ with tab_mom:
         k3.metric("$ Change",    fmt_usd(total_change), delta=fmt_usd(total_change))
         k4.metric("% Change",    f"{total_pct:+.1f}%",  delta=f"{total_pct:+.1f}%")
         k5.metric("Stores",      f"▲ {gainers}  ▼ {losers}")
-        st.caption(f"Current month ({_curr_label}) pulled from order sheet · {len(_curr_paid)} paid lines across {_curr_by_lic.shape[0]} stores")
+        st.caption(f"Current month ({_curr_label}) pulled from order sheet · {len(_curr_paid)} paid lines across {_curr_rev.shape[0]} stores")
 
         st.divider()
 
