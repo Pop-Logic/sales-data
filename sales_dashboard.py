@@ -2021,10 +2021,26 @@ with tab_mom:
     if len(months) < 2:
         st.info("Need at least two months of data for a comparison.")
     else:
-        # Month selectors — default to two most recent columns
+        # Anchor defaults to current calendar month and the month before it
+        _mom_abbrevs = {
+            1: ["jan"], 2: ["feb"], 3: ["mar"], 4: ["apr"],
+            5: ["may"], 6: ["jun"], 7: ["jul"], 8: ["aug"],
+            9: ["sep", "sept"], 10: ["oct"], 11: ["nov"], 12: ["dec"],
+        }
+        _today = datetime.now()
+        _cm, _pm = _today.month, (_today.month - 1 if _today.month > 1 else 12)
+        def _find_month_idx(m_num, fallback):
+            tgts = _mom_abbrevs[m_num]
+            for col in reversed(months):
+                if any(t in col.lower() for t in tgts):
+                    return months.index(col)
+            return fallback
+        _curr_idx = _find_month_idx(_cm, len(months) - 1)
+        _prev_idx = _find_month_idx(_pm, max(0, _curr_idx - 1))
+
         mc1, mc2, _ = st.columns([2, 2, 3])
-        prev_month = mc1.selectbox("Last month", months, index=len(months) - 2, key="mom_base")
-        curr_month = mc2.selectbox("Current month", months, index=len(months) - 1, key="mom_curr")
+        prev_month = mc1.selectbox("Last month", months, index=_prev_idx, key="mom_base")
+        curr_month = mc2.selectbox("Current month", months, index=_curr_idx, key="mom_curr")
 
         if prev_month == curr_month:
             st.warning("Select two different months to compare.")
