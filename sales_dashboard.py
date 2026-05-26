@@ -1879,7 +1879,15 @@ with tab_orders:
         )
         .reset_index()
     )
+    # Most recent order number per store
+    _last_idx = paid_view.groupby(["Client", "License #"])["Submitted Date"].idxmax()
+    _last_order_nums = (
+        paid_view.loc[_last_idx, ["Client", "License #", "Order #"]]
+        .rename(columns={"Order #": "Last_Order_Num"})
+        .reset_index(drop=True)
+    )
     store_table = store_totals.merge(store_pivot, on=["Client", "License #"], how="left")
+    store_table = store_table.merge(_last_order_nums, on=["Client", "License #"], how="left")
     for brand in BRANDS:
         if brand not in store_table.columns:
             store_table[brand] = 0
@@ -1897,8 +1905,8 @@ with tab_orders:
     disp_store = store_table.rename(columns={
         "Client": "Store", "License #": "License",
         "Total_Units": "Total Units", "Total_Revenue": "Revenue",
-        "Last_Order": "Last Order",
-    })[["Store", "License", "Orders", "Last Order", "Revenue", "Total Units"] + BRANDS]
+        "Last_Order": "Last Order", "Last_Order_Num": "Order #",
+    })[["Store", "License", "Orders", "Last Order", "Order #", "Revenue", "Total Units"] + BRANDS]
     st.dataframe(
         disp_store,
         use_container_width=True,
