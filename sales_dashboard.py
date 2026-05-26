@@ -2050,15 +2050,31 @@ with tab_mom:
             (_ord_df_mom["Brand"] != "Bulk")                         &
             (_ord_df_mom["Line Total"] > 0)
         ]
-        _curr_by_lic = _curr_paid.groupby("License #")["Line Total"].sum()
+        _curr_by_lic = (
+            _curr_paid.groupby(["License #", "Client"])["Line Total"].sum()
+            .reset_index()
+            .rename(columns={"License #": "License", "Client": "Store Name", "Line Total": "Current Month"})
+        )
 
-        # Build comparison table — all stores from revenue data, current month from order sheet
-        mom = df[["Store Name", prev_month]].copy()
-        mom.index.name = "License"
-        mom = mom.reset_index()
-        mom["License"] = mom["License"].astype(str)
-        mom["Current Month"] = mom["License"].map(_curr_by_lic).fillna(0)
+        # Start from order-sheet stores so no current-month revenue is dropped,
+        # then bring in last-month revenue from the dashboard where license matches.
+        _rev = df[[prev_month]].copy()
+        _rev.index.name = "License"
+        _rev = _rev.reset_index()
+        _rev["License"] = _rev["License"].astype(str)
+
+        mom = _curr_by_lic.merge(_rev, on="License", how="outer")
+        # Fill store names for licenses only in the revenue data
+        _rev_names = df[["Store Name"]].copy()
+        _rev_names.index.name = "License"
+        _rev_names = _rev_names.reset_index()
+        _rev_names["License"] = _rev_names["License"].astype(str)
+        mom = mom.merge(_rev_names.rename(columns={"Store Name": "_rev_name"}), on="License", how="left")
+        mom["Store Name"] = mom["Store Name"].combine_first(mom["_rev_name"])
+        mom = mom.drop(columns=["_rev_name"])
         mom = mom.rename(columns={prev_month: "Last Month"})
+        mom["Current Month"] = mom["Current Month"].fillna(0)
+        mom["Last Month"]    = mom["Last Month"].fillna(0)
         mom["$ Change"] = mom["Current Month"] - mom["Last Month"]
         mom["% Change"] = mom.apply(
             lambda r: (r["$ Change"] / r["Last Month"] * 100) if r["Last Month"] != 0 else None,
