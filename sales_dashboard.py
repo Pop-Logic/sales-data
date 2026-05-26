@@ -2018,113 +2018,124 @@ with tab_orders:
 # ║  TAB — Month over Month                                          ║
 # ╚══════════════════════════════════════════════════════════════════╝
 with tab_mom:
-    if len(months) < 2:
-        st.info("Need at least two months of data for a comparison.")
+    _ord_df_mom = st.session_state.get("order_df")
+    if _ord_df_mom is None:
+        st.info("Link a Google Sheet in the sidebar (Order Activity tab) to enable current-month data.")
+    elif len(months) < 1:
+        st.info("Need at least one month of revenue data.")
     else:
-        # Anchor defaults to current calendar month and the month before it
+        _today = datetime.now()
+        _pm = _today.month - 1 if _today.month > 1 else 12
         _mom_abbrevs = {
             1: ["jan"], 2: ["feb"], 3: ["mar"], 4: ["apr"],
             5: ["may"], 6: ["jun"], 7: ["jul"], 8: ["aug"],
             9: ["sep", "sept"], 10: ["oct"], 11: ["nov"], 12: ["dec"],
         }
-        _today = datetime.now()
-        _cm, _pm = _today.month, (_today.month - 1 if _today.month > 1 else 12)
         def _find_month_idx(m_num, fallback):
             tgts = _mom_abbrevs[m_num]
             for col in reversed(months):
                 if any(t in col.lower() for t in tgts):
                     return months.index(col)
             return fallback
-        _curr_idx = _find_month_idx(_cm, len(months) - 1)
-        _prev_idx = _find_month_idx(_pm, max(0, _curr_idx - 1))
+        _prev_idx = _find_month_idx(_pm, len(months) - 1)
 
-        mc1, mc2, _ = st.columns([2, 2, 3])
+        mc1, _ = st.columns([2, 5])
         prev_month = mc1.selectbox("Last month", months, index=_prev_idx, key="mom_base")
-        curr_month = mc2.selectbox("Current month", months, index=_curr_idx, key="mom_curr")
 
-        if prev_month == curr_month:
-            st.warning("Select two different months to compare.")
-        else:
-            mom = df[["Store Name", prev_month, curr_month]].copy()
-            mom.index.name = "License"
-            mom = mom.reset_index()
-            mom = mom.rename(columns={prev_month: "Base", curr_month: "Compare"})
-            mom["$ Change"] = mom["Compare"] - mom["Base"]
-            mom["% Change"] = mom.apply(
-                lambda r: (r["$ Change"] / r["Base"] * 100) if r["Base"] != 0 else None,
-                axis=1,
+        # Current month: aggregate paid orders from the Google Sheet for this calendar month
+        _curr_label = _today.strftime("%B %Y")
+        _curr_paid = _ord_df_mom[
+            (_ord_df_mom["Submitted Date"].dt.month == _today.month) &
+            (_ord_df_mom["Submitted Date"].dt.year  == _today.year)  &
+            (_ord_df_mom["Brand"] != "Bulk")                         &
+            (_ord_df_mom["Line Total"] > 0)
+        ]
+        _curr_by_lic = _curr_paid.groupby("License #")["Line Total"].sum()
+
+        # Build comparison table — all stores from revenue data, current month from order sheet
+        mom = df[["Store Name", prev_month]].copy()
+        mom.index.name = "License"
+        mom = mom.reset_index()
+        mom["License"] = mom["License"].astype(str)
+        mom["Current Month"] = mom["License"].map(_curr_by_lic).fillna(0)
+        mom = mom.rename(columns={prev_month: "Last Month"})
+        mom["$ Change"] = mom["Current Month"] - mom["Last Month"]
+        mom["% Change"] = mom.apply(
+            lambda r: (r["$ Change"] / r["Last Month"] * 100) if r["Last Month"] != 0 else None,
+            axis=1,
+        )
+        mom = mom.sort_values("$ Change", ascending=False)
+
+        # ── Summary KPIs ──────────────────────────────────────────────────────
+        total_base   = mom["Last Month"].sum()
+        total_curr   = mom["Current Month"].sum()
+        total_change = total_curr - total_base
+        total_pct    = (total_change / total_base * 100) if total_base else 0
+        gainers = (mom["$ Change"] > 0).sum()
+        losers  = (mom["$ Change"] < 0).sum()
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric(prev_month,    fmt_usd(total_base))
+        k2.metric(_curr_label,   fmt_usd(total_curr))
+        k3.metric("$ Change",    fmt_usd(total_change), delta=fmt_usd(total_change))
+        k4.metric("% Change",    f"{total_pct:+.1f}%",  delta=f"{total_pct:+.1f}%")
+        k5.metric("Stores",      f"▲ {gainers}  ▼ {losers}")
+        st.caption(f"Current month ({_curr_label}) pulled from order sheet · {len(_curr_paid)} paid lines across {_curr_by_lic.shape[0]} stores")
+
+        st.divider()
+
+        # ── Store-level table ─────────────────────────────────────────────────
+        mom_search = st.text_input("Search stores", placeholder="Store name or license…", key="mom_search")
+        disp_mom = mom.copy()
+        if mom_search:
+            _q = mom_search.lower()
+            disp_mom = disp_mom[
+                disp_mom["Store Name"].str.lower().str.contains(_q, na=False)
+                | disp_mom["License"].astype(str).str.contains(_q, na=False)
+            ]
+
+        st.dataframe(
+            disp_mom,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Last Month":     st.column_config.NumberColumn(prev_month,   format="$%.0f"),
+                "Current Month":  st.column_config.NumberColumn(_curr_label,  format="$%.0f"),
+                "$ Change":       st.column_config.NumberColumn("$ Change",   format="$%.0f"),
+                "% Change":       st.column_config.NumberColumn("% Change",   format="%.1f%%"),
+                "Store Name":     st.column_config.TextColumn(width="large"),
+            },
+        )
+        st.caption(f"{len(disp_mom)} store{'s' if len(disp_mom) != 1 else ''}")
+
+        # ── Top movers chart ──────────────────────────────────────────────────
+        st.divider()
+        st.subheader("Top Movers")
+        n_movers = 15
+        top_up   = mom[mom["$ Change"] > 0].nlargest(n_movers,  "$ Change")
+        top_down = mom[mom["$ Change"] < 0].nsmallest(n_movers, "$ Change")
+        movers   = pd.concat([top_up, top_down]).sort_values("$ Change", ascending=True)
+
+        if not movers.empty:
+            movers["Color"] = movers["$ Change"].apply(lambda v: "#4CE89C" if v >= 0 else "#E8844C")
+            fig_mom = px.bar(
+                movers,
+                x="$ Change",
+                y="Store Name",
+                orientation="h",
+                color="Color",
+                color_discrete_map="identity",
+                text=movers["$ Change"].apply(fmt_usd),
             )
-            mom = mom.sort_values("$ Change", ascending=False)
-
-            # ── Summary KPIs ──────────────────────────────────────────────────
-            total_base    = mom["Base"].sum()
-            total_curr    = mom["Compare"].sum()
-            total_change  = total_curr - total_base
-            total_pct     = (total_change / total_base * 100) if total_base else 0
-            gainers = (mom["$ Change"] > 0).sum()
-            losers  = (mom["$ Change"] < 0).sum()
-
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric(prev_month,   fmt_usd(total_base))
-            k2.metric(curr_month,   fmt_usd(total_curr))
-            k3.metric("$ Change",   fmt_usd(total_change),  delta=fmt_usd(total_change))
-            k4.metric("% Change",   f"{total_pct:+.1f}%",   delta=f"{total_pct:+.1f}%")
-            k5.metric("Stores",     f"▲ {gainers}  ▼ {losers}")
-
-            st.divider()
-
-            # ── Store-level table ─────────────────────────────────────────────
-            mom_search = st.text_input("Search stores", placeholder="Store name or license…", key="mom_search")
-            disp_mom = mom.copy()
-            if mom_search:
-                _q = mom_search.lower()
-                disp_mom = disp_mom[
-                    disp_mom["Store Name"].str.lower().str.contains(_q, na=False)
-                    | disp_mom["License"].astype(str).str.contains(_q, na=False)
-                ]
-
-            st.dataframe(
-                disp_mom,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Base":     st.column_config.NumberColumn(prev_month,    format="$%.0f"),
-                    "Compare":  st.column_config.NumberColumn(curr_month,    format="$%.0f"),
-                    "$ Change": st.column_config.NumberColumn("$ Change",    format="$%.0f"),
-                    "% Change": st.column_config.NumberColumn("% Change",    format="%.1f%%"),
-                    "Store Name": st.column_config.TextColumn(width="large"),
-                },
+            fig_mom.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e3e3d8",
+                showlegend=False,
+                height=max(300, len(movers) * 28),
+                margin=dict(l=0, r=20, t=10, b=10),
+                xaxis_title="",
+                yaxis_title="",
             )
-            st.caption(f"{len(disp_mom)} store{'s' if len(disp_mom) != 1 else ''}")
-
-            # ── Top movers chart ──────────────────────────────────────────────
-            st.divider()
-            st.subheader("Top Movers")
-            n_movers = 15
-            top_up   = mom[mom["$ Change"] > 0].nlargest(n_movers,  "$ Change")
-            top_down = mom[mom["$ Change"] < 0].nsmallest(n_movers, "$ Change")
-            movers   = pd.concat([top_up, top_down]).sort_values("$ Change", ascending=True)
-
-            if not movers.empty:
-                movers["Color"] = movers["$ Change"].apply(lambda v: "#4CE89C" if v >= 0 else "#E8844C")
-                fig_mom = px.bar(
-                    movers,
-                    x="$ Change",
-                    y="Store Name",
-                    orientation="h",
-                    color="Color",
-                    color_discrete_map="identity",
-                    text=movers["$ Change"].apply(fmt_usd),
-                )
-                fig_mom.update_layout(
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    font_color="#e3e3d8",
-                    showlegend=False,
-                    height=max(300, len(movers) * 28),
-                    margin=dict(l=0, r=20, t=10, b=10),
-                    xaxis_title="",
-                    yaxis_title="",
-                )
-                fig_mom.update_traces(textposition="outside", cliponaxis=False)
-                st.plotly_chart(fig_mom, use_container_width=True)
+            fig_mom.update_traces(textposition="outside", cliponaxis=False)
+            st.plotly_chart(fig_mom, use_container_width=True)
