@@ -1612,15 +1612,16 @@ with tab_contact:
         # Search / filter
         filter_col, dl_log_col, clear_col = st.columns([3, 2, 1])
         search = filter_col.text_input("Filter by store name or license", placeholder="Search…", label_visibility="collapsed")
+        display_log_df = log_df.copy()
         if search:
             mask = (
-                log_df["Store Name"].str.contains(search, case=False, na=False)
-                | log_df["License"].str.contains(search, case=False, na=False)
+                display_log_df["Store Name"].str.contains(search, case=False, na=False)
+                | display_log_df["License"].str.contains(search, case=False, na=False)
             )
-            log_df = log_df[mask]
+            display_log_df = display_log_df[mask]
 
         st.dataframe(
-            log_df,
+            display_log_df,
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -1629,9 +1630,9 @@ with tab_contact:
                 "Notes": st.column_config.TextColumn(width="large"),
             },
         )
-        st.caption(f"{len(log_df)} entr{'y' if len(log_df)==1 else 'ies'}")
+        st.caption(f"{len(display_log_df)} entr{'y' if len(display_log_df)==1 else 'ies'}")
 
-        log_csv = log_df.to_csv(index=False)
+        log_csv = display_log_df.to_csv(index=False)
         dl_log_col.download_button(
             "⬇ Download Full Log (CSV)",
             data=log_csv,
@@ -1642,6 +1643,82 @@ with tab_contact:
         if clear_col.button("Clear All", use_container_width=True):
             clear_contact_log()
             st.rerun()
+
+        # ── Edit / Delete individual entry ────────────────────────────────────
+        st.divider()
+        with st.expander("Edit or Delete an Entry"):
+            entry_labels = [
+                f"{row['Store Name']}  ·  {row['License']}  ·  {row['Month']}"
+                for _, row in log_df.iterrows()
+            ]
+            sel_label = st.selectbox("Select entry", entry_labels, key="log_edit_select")
+            sel_idx = entry_labels.index(sel_label)
+            sel_row = log_df.iloc[sel_idx]
+
+            def _opt_idx(opts, val):
+                try:
+                    return opts.index(str(val)) if str(val) in opts else 0
+                except ValueError:
+                    return 0
+
+            def _date_val(v):
+                if pd.isna(v) or str(v).strip() in ("", "None", "nan"):
+                    return datetime.now().date()
+                try:
+                    return datetime.strptime(str(v), "%Y-%m-%d").date()
+                except Exception:
+                    return datetime.now().date()
+
+            ea1, ea2, ea3, ea4 = st.columns(4)
+            ed_date      = ea1.date_input("Date Contacted", value=_date_val(sel_row["Date Contacted"]),
+                                           format="MM/DD/YYYY", key="log_ed_date")
+            ed_initials  = ea2.selectbox("Initials", INITIALS_OPTIONS,
+                                          index=_opt_idx(INITIALS_OPTIONS, sel_row["Initials"]),
+                                          key="log_ed_initials")
+            ed_person    = ea3.text_input("Person Contacted",
+                                           value=("" if pd.isna(sel_row["Person Contacted"]) else str(sel_row["Person Contacted"])),
+                                           key="log_ed_person")
+            ed_method    = ea4.selectbox("Contact Method", METHOD_OPTIONS,
+                                          index=_opt_idx(METHOD_OPTIONS, sel_row["Contact Method"]),
+                                          key="log_ed_method")
+
+            eb1, eb2, eb3 = st.columns(3)
+            ed_commit    = eb1.selectbox("Commitment Made", ["No", "Yes"],
+                                          index=_opt_idx(["No", "Yes"], sel_row["Commitment"]),
+                                          key="log_ed_commit")
+            ed_cadence   = eb2.selectbox("Committed Cadence", CADENCE_OPTIONS,
+                                          index=_opt_idx(CADENCE_OPTIONS, sel_row["Cadence"]),
+                                          key="log_ed_cadence")
+            ed_amount    = eb3.selectbox("Committed Amount", AMOUNT_OPTIONS,
+                                          index=_opt_idx(AMOUNT_OPTIONS, sel_row["Committed Amount"]),
+                                          key="log_ed_amount")
+
+            ed_notes = st.text_area("Notes",
+                                     value=("" if pd.isna(sel_row["Notes"]) else str(sel_row["Notes"])),
+                                     height=120, key="log_ed_notes")
+
+            save_ed_col, del_ed_col = st.columns([1, 1])
+            if save_ed_col.button("Save Changes", type="primary", use_container_width=True, key="log_ed_save"):
+                upsert_contact_log_rows([{
+                    "license":           sel_row["License"],
+                    "store_name":        sel_row["Store Name"],
+                    "contact_month":     sel_row["Month"],
+                    "revenue":           sel_row.get("Revenue"),
+                    "date_contacted":    ed_date.strftime("%Y-%m-%d"),
+                    "commitment_made":   ed_commit,
+                    "committed_cadence": ed_cadence,
+                    "committed_amount":  ed_amount,
+                    "notes":             ed_notes,
+                    "initials":          ed_initials,
+                    "person_contacted":  ed_person,
+                    "contact_method":    ed_method,
+                }])
+                st.success("Entry updated.")
+                st.rerun()
+            if del_ed_col.button("Delete Entry", type="secondary", use_container_width=True, key="log_ed_delete"):
+                delete_contact_log_entry(sel_row["License"], sel_row["Month"])
+                st.success(f"Deleted entry for {sel_row['Store Name']} · {sel_row['Month']}.")
+                st.rerun()
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Order Activity                                            ║
