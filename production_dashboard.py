@@ -271,9 +271,11 @@ st.markdown("<h1 style='color:#e3e3d8'>Production Sales</h1>", unsafe_allow_html
 _facilities_loaded = sorted(all_df["Facility"].dropna().unique().tolist())
 _fac_options = _facilities_loaded + (["Both"] if len(_facilities_loaded) > 1 else [])
 sel_facility = st.radio(
-    "", _fac_options,
+    "Facility",
+    _fac_options,
     index=_fac_options.index("Both") if "Both" in _fac_options else 0,
     horizontal=True,
+    label_visibility="collapsed",
     key="sel_facility",
 )
 st.divider()
