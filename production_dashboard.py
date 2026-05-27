@@ -398,7 +398,8 @@ with tab_brand:
             bview = bview[bview["Brand"] == sel_b_brand]
         if sel_b_type != "All":
             bview = bview[bview["Product"] == sel_b_type]
-        bview = bview[bview["Transfer Date"].dt.date.between(b_from, b_to)]
+        _b_in_range = bview["Transfer Date"].dt.date.between(b_from, b_to).fillna(True)
+        bview = bview[_b_in_range]
 
         bview_g = bview[bview["Units UOM"] == "Grams"]
 
@@ -458,7 +459,7 @@ with tab_brand:
         with st.expander("🔍 Raw data lookup (troubleshoot missing rows)"):
             _diag_q = st.text_input("Search strain name", key="diag_strain_search")
             if _diag_q:
-                _dcols = ["Facility", "Vendor", "Strain", "Product", "Units UOM", "Units", "Total", "Transfer Date"]
+                _dcols = ["Facility", "Vendor", "Strain", "Product", "Units UOM", "Units", "Total", "Transfer Date", "Month"]
                 _m = lambda df: df["Strain"].str.contains(_diag_q, case=False, na=False)
                 _d1 = display_df[_m(display_df)]
                 _d2 = brand_df[_m(brand_df)]
@@ -622,7 +623,8 @@ with tab_wholesale:
             wview = wview[wview["Vendor"] == sel_w_vendor]
         if sel_w_type != "All":
             wview = wview[wview["Product"] == sel_w_type]
-        wview = wview[wview["Transfer Date"].dt.date.between(w_from, w_to)]
+        _w_in_range = wview["Transfer Date"].dt.date.between(w_from, w_to).fillna(True)
+        wview = wview[_w_in_range]
 
         wview_g = wview[wview["Units UOM"] == "Grams"]
 
