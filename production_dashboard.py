@@ -236,9 +236,9 @@ all_df = pd.concat(dfs, ignore_index=True)
 all_df = all_df[~all_df["Vendor"].isin(EXCLUDE_VENDORS)]
 
 # ── Sidebar — Brand Assignments ───────────────────────────────────────────────
-# Only show strains that appear in brand-partner rows
+# All strains except explicitly excluded vendors
 _brand_strains = sorted(
-    all_df[all_df["Vendor"].isin(BRAND_VENDORS)]["Strain"]
+    all_df[~all_df["Vendor"].isin(EXCLUDE_VENDORS)]["Strain"]
     .dropna()
     .unique()
     .tolist()
@@ -351,9 +351,13 @@ st.divider()
 # Apply facility filter for display
 display_df = all_df if sel_facility == "Both" else all_df[all_df["Facility"] == sel_facility]
 
-# Apply brand assignments to brand-partner rows
-brand_df = display_df[display_df["Vendor"].isin(BRAND_VENDORS)].copy()
-brand_df["Brand"] = brand_df["Strain"].map(strain_map).fillna("Unassigned")
+# Brand Sales = any row whose strain is assigned to a brand (not excluded)
+_assigned_strains = set(strain_map.keys())
+brand_df = display_df[
+    display_df["Strain"].isin(_assigned_strains) &
+    ~display_df["Vendor"].isin(EXCLUDE_VENDORS)
+].copy()
+brand_df["Brand"] = brand_df["Strain"].map(strain_map)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_brand, tab_wholesale = st.tabs(["🏷️ Brand Sales", "🏪 Wholesale"])
@@ -542,7 +546,10 @@ with tab_brand:
 # ║  TAB — Wholesale                                                 ║
 # ╚══════════════════════════════════════════════════════════════════╝
 with tab_wholesale:
-    ws_df = display_df[~display_df["Vendor"].isin(BRAND_VENDORS)].copy()
+    ws_df = display_df[
+        ~display_df["Strain"].isin(_assigned_strains) &
+        ~display_df["Vendor"].isin(EXCLUDE_VENDORS)
+    ].copy()
 
     if ws_df.empty:
         st.info("No Wholesale records found in the loaded data.")
