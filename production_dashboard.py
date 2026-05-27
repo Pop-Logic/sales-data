@@ -407,8 +407,21 @@ with tab_brand:
 
         # ── Strain summary table ───────────────────────────────────────────────
         st.subheader("Strain by Brand")
+        _sf1, _sf2, _sf3 = st.columns([2, 2, 2])
+        _tbl_brands   = ["All"] + sorted(bview["Brand"].dropna().unique().tolist())
+        _tbl_products = ["All"] + sorted(bview["Product"].dropna().replace("nan", pd.NA).dropna().unique().tolist())
+        _tbl_strains  = ["All"] + sorted(bview["Strain"].dropna().unique().tolist())
+        _tbl_brand   = _sf1.selectbox("Brand",   _tbl_brands,   key="tbl_brand")
+        _tbl_product = _sf2.selectbox("Product", _tbl_products, key="tbl_product")
+        _tbl_strain  = _sf3.selectbox("Strain",  _tbl_strains,  key="tbl_strain")
+
+        _tview = bview.copy()
+        if _tbl_brand   != "All": _tview = _tview[_tview["Brand"]   == _tbl_brand]
+        if _tbl_product != "All": _tview = _tview[_tview["Product"] == _tbl_product]
+        if _tbl_strain  != "All": _tview = _tview[_tview["Strain"]  == _tbl_strain]
+
         strain_tbl = (
-            bview.groupby(["Brand", "Product", "Strain", "Units UOM"])
+            _tview.groupby(["Brand", "Product", "Strain", "Units UOM"])
             .agg(Units=("Units", "sum"), Revenue=("Total", "sum"))
             .reset_index()
         )
@@ -429,6 +442,16 @@ with tab_brand:
                 "$/gram":   st.column_config.NumberColumn("$/gram",   format="$%.2f"),
             },
         )
+
+        # ── Diagnostic: raw data search ────────────────────────────────────────
+        with st.expander("🔍 Raw data lookup (troubleshoot missing rows)"):
+            _diag_q = st.text_input("Search strain name", key="diag_strain_search")
+            if _diag_q:
+                _diag = display_df[
+                    display_df["Strain"].str.contains(_diag_q, case=False, na=False)
+                ][["Facility", "Vendor", "Strain", "Product", "Units UOM", "Units", "Total", "Transfer Date"]]
+                st.caption(f"{len(_diag)} rows found in raw data for '{_diag_q}'")
+                st.dataframe(_diag, use_container_width=True, hide_index=True)
 
         st.divider()
 
