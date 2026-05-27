@@ -234,6 +234,48 @@ with st.sidebar:
     st.header("Brand Assignments")
     st.caption("Assign strains to brands. Unassigned strains appear under 'Unassigned'.")
 
+    # ── Import / Export ───────────────────────────────────────────────
+    if strain_map:
+        _export_df = pd.DataFrame(
+            list(strain_map.items()), columns=["Strain", "Brand"]
+        ).sort_values("Strain")
+        st.download_button(
+            "⬇ Download assignments (.csv)",
+            data=_export_df.to_csv(index=False),
+            file_name="strain_assignments.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    _upload = st.file_uploader(
+        "Upload assignments (.csv or .json)",
+        type=["csv", "json"],
+        key="assignment_upload",
+        label_visibility="collapsed",
+    )
+    if _upload is not None:
+        try:
+            if _upload.name.endswith(".json"):
+                import json as _json
+                _imported = _json.loads(_upload.read().decode())
+                if not isinstance(_imported, dict):
+                    st.error("JSON must be a {strain: brand} object.")
+                    _imported = None
+            else:
+                _imp_df = pd.read_csv(_upload)
+                if "Strain" not in _imp_df.columns or "Brand" not in _imp_df.columns:
+                    st.error("CSV must have 'Strain' and 'Brand' columns.")
+                    _imported = None
+                else:
+                    _imported = dict(zip(_imp_df["Strain"].astype(str), _imp_df["Brand"].astype(str)))
+            if _imported:
+                save_strain_map(_imported)
+                strain_map = _imported
+                st.success(f"Imported {len(_imported)} assignments.")
+                st.rerun()
+        except Exception as _e:
+            st.error(f"Import failed: {_e}")
+
     if not _brand_strains:
         st.info("Load data first to see available strains.")
     else:
