@@ -265,17 +265,25 @@ with st.sidebar:
             strain_map = _new_assignments
             st.success("Saved.")
 
-# Apply brand assignments to brand-partner rows
-brand_df = all_df[all_df["Vendor"].isin(BRAND_VENDORS)].copy()
-brand_df["Brand"] = brand_df["Strain"].map(strain_map).fillna("Unassigned")
-
 # ── Header ────────────────────────────────────────────────────────────────────
-facilities_loaded = all_df["Facility"].unique().tolist()
-st.markdown(
-    f"<h1 style='color:#e3e3d8'>Production Sales · {' & '.join(sorted(facilities_loaded))}</h1>",
-    unsafe_allow_html=True,
+st.markdown("<h1 style='color:#e3e3d8'>Production Sales</h1>", unsafe_allow_html=True)
+
+_facilities_loaded = sorted(all_df["Facility"].dropna().unique().tolist())
+_fac_options = _facilities_loaded + (["Both"] if len(_facilities_loaded) > 1 else [])
+sel_facility = st.radio(
+    "", _fac_options,
+    index=_fac_options.index("Both") if "Both" in _fac_options else 0,
+    horizontal=True,
+    key="sel_facility",
 )
 st.divider()
+
+# Apply facility filter for display
+display_df = all_df if sel_facility == "Both" else all_df[all_df["Facility"] == sel_facility]
+
+# Apply brand assignments to brand-partner rows
+brand_df = display_df[display_df["Vendor"].isin(BRAND_VENDORS)].copy()
+brand_df["Brand"] = brand_df["Strain"].map(strain_map).fillna("Unassigned")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_brand, tab_wholesale = st.tabs(["🏷️ Brand Sales", "🏪 Wholesale"])
@@ -288,23 +296,19 @@ with tab_brand:
         st.info("No Brand Sales records found in the loaded data.")
     else:
         # ── Filters ───────────────────────────────────────────────────────────
-        bf1, bf2, bf3, bf4, bf5, bf6 = st.columns([2, 2, 2, 1, 1, 1])
-        _b_facilities = ["All"] + sorted(brand_df["Facility"].unique().tolist())
-        _b_brands     = ["All"] + sorted(brand_df["Brand"].dropna().unique().tolist())
-        _b_types      = ["All"] + sorted(brand_df["Product"].dropna().replace("nan", pd.NA).dropna().unique().tolist())
-        _b_dates      = brand_df["Transfer Date"].dropna()
+        bf1, bf2, bf3, bf4 = st.columns([2, 2, 1, 1])
+        _b_brands = ["All"] + sorted(brand_df["Brand"].dropna().unique().tolist())
+        _b_types  = ["All"] + sorted(brand_df["Product"].dropna().replace("nan", pd.NA).dropna().unique().tolist())
+        _b_dates  = brand_df["Transfer Date"].dropna()
         _b_min = _b_dates.min().date() if not _b_dates.empty else datetime.now().date()
         _b_max = _b_dates.max().date() if not _b_dates.empty else datetime.now().date()
 
-        sel_b_facility = bf1.selectbox("Facility", _b_facilities, key="bs_facility")
-        sel_b_brand    = bf2.selectbox("Brand",    _b_brands,     key="bs_brand")
-        sel_b_type     = bf3.selectbox("Product",   _b_types,      key="bs_type")
-        b_from = bf4.date_input("From", value=_b_min, min_value=_b_min, max_value=_b_max, key="bs_from")
-        b_to   = bf5.date_input("To",   value=_b_max, min_value=_b_min, max_value=_b_max, key="bs_to")
+        sel_b_brand = bf1.selectbox("Brand",   _b_brands, key="bs_brand")
+        sel_b_type  = bf2.selectbox("Product", _b_types,  key="bs_type")
+        b_from = bf3.date_input("From", value=_b_min, min_value=_b_min, max_value=_b_max, key="bs_from")
+        b_to   = bf4.date_input("To",   value=_b_max, min_value=_b_min, max_value=_b_max, key="bs_to")
 
         bview = brand_df.copy()
-        if sel_b_facility != "All":
-            bview = bview[bview["Facility"] == sel_b_facility]
         if sel_b_brand != "All":
             bview = bview[bview["Brand"] == sel_b_brand]
         if sel_b_type != "All":
@@ -468,29 +472,25 @@ with tab_brand:
 # ║  TAB — Wholesale                                                 ║
 # ╚══════════════════════════════════════════════════════════════════╝
 with tab_wholesale:
-    ws_df = all_df[~all_df["Vendor"].isin(BRAND_VENDORS)].copy()
+    ws_df = display_df[~display_df["Vendor"].isin(BRAND_VENDORS)].copy()
 
     if ws_df.empty:
         st.info("No Wholesale records found in the loaded data.")
     else:
         # ── Filters ───────────────────────────────────────────────────────────
-        wf1, wf2, wf3, wf4, wf5, wf6 = st.columns([2, 2, 2, 1, 1, 1])
-        _w_facilities = ["All"] + sorted(ws_df["Facility"].unique().tolist())
-        _w_vendors    = ["All"] + sorted(ws_df["Vendor"].dropna().unique().tolist())
-        _w_types      = ["All"] + sorted(ws_df["Product"].dropna().replace("nan", pd.NA).dropna().unique().tolist())
-        _w_dates      = ws_df["Transfer Date"].dropna()
+        wf1, wf2, wf3, wf4 = st.columns([2, 2, 1, 1])
+        _w_vendors = ["All"] + sorted(ws_df["Vendor"].dropna().unique().tolist())
+        _w_types   = ["All"] + sorted(ws_df["Product"].dropna().replace("nan", pd.NA).dropna().unique().tolist())
+        _w_dates   = ws_df["Transfer Date"].dropna()
         _w_min = _w_dates.min().date() if not _w_dates.empty else datetime.now().date()
         _w_max = _w_dates.max().date() if not _w_dates.empty else datetime.now().date()
 
-        sel_w_facility = wf1.selectbox("Facility", _w_facilities, key="ws_facility")
-        sel_w_vendor   = wf2.selectbox("Vendor",   _w_vendors,    key="ws_vendor")
-        sel_w_type     = wf3.selectbox("Product",   _w_types,      key="ws_type")
-        w_from = wf4.date_input("From", value=_w_min, min_value=_w_min, max_value=_w_max, key="ws_from")
-        w_to   = wf5.date_input("To",   value=_w_max, min_value=_w_min, max_value=_w_max, key="ws_to")
+        sel_w_vendor = wf1.selectbox("Vendor",   _w_vendors, key="ws_vendor")
+        sel_w_type   = wf2.selectbox("Product",  _w_types,   key="ws_type")
+        w_from = wf3.date_input("From", value=_w_min, min_value=_w_min, max_value=_w_max, key="ws_from")
+        w_to   = wf4.date_input("To",   value=_w_max, min_value=_w_min, max_value=_w_max, key="ws_to")
 
         wview = ws_df.copy()
-        if sel_w_facility != "All":
-            wview = wview[wview["Facility"] == sel_w_facility]
         if sel_w_vendor != "All":
             wview = wview[wview["Vendor"] == sel_w_vendor]
         if sel_w_type != "All":
