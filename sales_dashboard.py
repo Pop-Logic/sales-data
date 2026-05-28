@@ -2322,25 +2322,68 @@ with tab_orders:
         [(m, ts) for m, ts in _month_ts_map.items() if ts is not None],
         key=lambda x: x[1],
     )
-    with st.expander("DEBUG — month columns"):
-        st.write([(m, str(ts)) for m, ts in _month_ts_map.items()])
+
+    _contact_status_map = {}
+    try:
+        _contact_log_for_lapsed = load_contact_log()
+    except Exception:
+        _contact_log_for_lapsed = pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
+    if not _contact_log_for_lapsed.empty:
+        _contact_sort = pd.to_datetime(
+            _contact_log_for_lapsed.get("Saved At", pd.Series(dtype=str)),
+            errors="coerce",
+        )
+        _contact_log_for_lapsed = _contact_log_for_lapsed.assign(_saved_sort=_contact_sort).sort_values("_saved_sort")
+        for _, _contact_row in _contact_log_for_lapsed.iterrows():
+            _lic_key = str(_contact_row.get("License", "")).strip()
+            if not _lic_key:
+                continue
+            _commitment = str(_contact_row.get("Commitment", "")).strip().lower()
+            _has_contact_details = any(
+                str(_contact_row.get(_field, "")).strip()
+                for _field in ["Date Contacted", "Notes", "Initials", "Person Contacted", "Contact Method"]
+            )
+            if _commitment in {"yes", "y", "true", "1"}:
+                _contact_status_map[_lic_key] = "Committed"
+            elif _has_contact_details and _commitment in {"no", "n", "false", "0"}:
+                _contact_status_map[_lic_key] = "Contacted - No Commitment"
+            elif _has_contact_details:
+                _contact_status_map[_lic_key] = "Contacted"
+            else:
+                _contact_status_map[_lic_key] = "Not Contacted"
+
     _lapsed_rows = []
     for _lic in df.index:
-        _last_ts = None
-        for _m, _ts in reversed(_dated_months):
-            if df.loc[_lic, _m] > 0:
-                _last_ts = _ts
-                break
-        if _last_ts is not None:
+        _active_months = []
+        for _m, _ts in _dated_months:
+            _month_revenue = float(df.loc[_lic, _m])
+            if _month_revenue > 0:
+                _active_months.append((_m, _ts, _month_revenue))
+        if _active_months:
+            _last_m, _last_ts, _last_month_revenue = _active_months[-1]
+            _recent_active_revenues = [v for _, _, v in _active_months[-3:]]
+            _monthly_run_rate = (
+                sum(_recent_active_revenues) / len(_recent_active_revenues)
+                if _recent_active_revenues else 0
+            )
             _lapsed_rows.append({
                 "Store": df.loc[_lic, "Store Name"],
                 "License": str(_lic),
                 "Last_Active": _last_ts,
+                "Last_Active_Label": _last_m,
+                "Last_Month_Revenue": _last_month_revenue,
+                "Monthly_Run_Rate": _monthly_run_rate,
+                "Active_Months": len(_active_months),
+                "Contact_Status": _contact_status_map.get(str(_lic), "Not Contacted"),
                 "Revenue": df.loc[_lic, months].sum(),
             })
     _lapsed_totals = pd.DataFrame(
         _lapsed_rows if _lapsed_rows else [],
-        columns=["Store", "License", "Last_Active", "Revenue"],
+        columns=[
+            "Store", "License", "Last_Active", "Last_Active_Label",
+            "Last_Month_Revenue", "Monthly_Run_Rate", "Active_Months",
+            "Contact_Status", "Revenue",
+        ],
     )
     # Search
     store_search = st.text_input("Search stores", placeholder="Store name or license…", key="ord_store_search")
@@ -2385,15 +2428,205 @@ with tab_orders:
     if lapsed_df.empty:
         st.info(f"No stores lapsed within the last {_lapsed_window} days.")
     else:
+        lapsed_df["Last_Active"] = pd.to_datetime(lapsed_df["Last_Active"], errors="coerce")
+        lapsed_df["Days_Inactive"] = (_today - lapsed_df["Last_Active"]).dt.days
+        lapsed_df["Revenue"] = pd.to_numeric(lapsed_df["Revenue"], errors="coerce").fillna(0)
+        lapsed_df["Monthly_Run_Rate"] = pd.to_numeric(
+            lapsed_df["Monthly_Run_Rate"], errors="coerce"
+        ).fillna(0)
+        lapsed_df["Last_Month_Revenue"] = pd.to_numeric(
+            lapsed_df["Last_Month_Revenue"], errors="coerce"
+        ).fillna(0)
+        _bucket_order = ["31-60 days", "61-90 days", "91-180 days", "181+ days"]
+        lapsed_df["Aging_Bucket"] = pd.cut(
+            lapsed_df["Days_Inactive"],
+            bins=[30, 60, 90, 180, float("inf")],
+            labels=_bucket_order,
+            right=True,
+        )
+        _risk_total = lapsed_df["Monthly_Run_Rate"].sum()
+        _top_risk = lapsed_df.sort_values("Monthly_Run_Rate", ascending=False).head(1)
+        _top_risk_store = _top_risk.iloc[0]["Store"] if not _top_risk.empty else "n/a"
+        _top_risk_value = _top_risk.iloc[0]["Monthly_Run_Rate"] if not _top_risk.empty else 0
+
         st.caption(
             f"{len(lapsed_df)} store{'s' if len(lapsed_df) != 1 else ''} — last active month between 30 and {_lapsed_window} days ago, sorted oldest first"
         )
+
+        lm1, lm2, lm3, lm4 = st.columns(4)
+        lm1.metric("Lapsed Stores", f"{len(lapsed_df):,}")
+        lm2.metric("Est. Monthly Risk", fmt_usd(_risk_total))
+        lm3.metric("Avg Days Inactive", f"{lapsed_df['Days_Inactive'].mean():.0f}")
+        lm4.metric("Top Risk Store", str(_top_risk_store)[:28], fmt_usd(_top_risk_value))
+
+        st.markdown("##### Lapse Aging")
+        _bucket_summary = (
+            lapsed_df.groupby("Aging_Bucket", observed=False)
+            .agg(
+                Stores=("License", "nunique"),
+                Est_Monthly_Risk=("Monthly_Run_Rate", "sum"),
+            )
+            .reindex(_bucket_order)
+            .fillna(0)
+            .reset_index()
+            .rename(columns={"Aging_Bucket": "Aging Bucket"})
+        )
+        fig_lapsed_age = go.Figure()
+        fig_lapsed_age.add_trace(go.Bar(
+            x=_bucket_summary["Aging Bucket"],
+            y=_bucket_summary["Stores"],
+            name="Stores",
+            marker_color=BLUE,
+            text=[f"{int(v):,}" for v in _bucket_summary["Stores"]],
+            textposition="outside",
+        ))
+        fig_lapsed_age.add_trace(go.Scatter(
+            x=_bucket_summary["Aging Bucket"],
+            y=_bucket_summary["Est_Monthly_Risk"],
+            name="Est. monthly risk",
+            mode="lines+markers+text",
+            yaxis="y2",
+            line=dict(color="#E8844C", width=3),
+            marker=dict(size=8),
+            text=[fmt_usd(v) if v else "" for v in _bucket_summary["Est_Monthly_Risk"]],
+            textposition="top center",
+        ))
+        fig_lapsed_age.update_layout(
+            height=320,
+            margin=dict(t=10, b=10),
+            plot_bgcolor="white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            yaxis=dict(title="Stores", gridcolor="#eee", rangemode="tozero"),
+            yaxis2=dict(
+                title="Est. monthly risk",
+                overlaying="y",
+                side="right",
+                tickprefix="$",
+                tickformat=",",
+                showgrid=False,
+                rangemode="tozero",
+            ),
+        )
+        st.plotly_chart(fig_lapsed_age, use_container_width=True)
+
+        st.markdown("##### Revenue-at-Risk Pareto")
+        if len(lapsed_df) > 5:
+            _pareto_n = st.slider(
+                "Stores shown",
+                min_value=5,
+                max_value=min(30, len(lapsed_df)),
+                value=min(15, len(lapsed_df)),
+                step=1,
+                key="lapsed_pareto_n",
+            )
+        else:
+            _pareto_n = len(lapsed_df)
+        _pareto_df = (
+            lapsed_df.sort_values("Monthly_Run_Rate", ascending=False)
+            .head(_pareto_n)
+            .copy()
+        )
+        _pareto_df["Risk_Label"] = _pareto_df["Monthly_Run_Rate"].apply(fmt_usd)
+        _pareto_share = pct(_pareto_df["Monthly_Run_Rate"].sum(), _risk_total)
+        st.caption(f"Top {len(_pareto_df)} store{'s' if len(_pareto_df) != 1 else ''} represent {_pareto_share} of estimated monthly lapsed revenue.")
+        fig_lapsed_pareto = px.bar(
+            _pareto_df.sort_values("Monthly_Run_Rate", ascending=True),
+            x="Monthly_Run_Rate",
+            y="Store",
+            orientation="h",
+            color="Contact_Status",
+            color_discrete_map={
+                "Not Contacted": "#7A7F86",
+                "Contacted": BLUE,
+                "Contacted - No Commitment": "#E8844C",
+                "Committed": "#2EAD69",
+            },
+            text="Risk_Label",
+            hover_data={
+                "License": True,
+                "Contact_Status": True,
+                "Days_Inactive": ":,.0f",
+                "Last_Active_Label": True,
+                "Last_Month_Revenue": ":$,.0f",
+                "Revenue": ":$,.0f",
+                "Monthly_Run_Rate": ":$,.0f",
+                "Risk_Label": False,
+            },
+        )
+        fig_lapsed_pareto.update_layout(
+            height=max(320, len(_pareto_df) * 34),
+            margin=dict(t=10, b=10, l=10, r=10),
+            plot_bgcolor="white",
+            xaxis=dict(title="Estimated monthly revenue at risk", tickprefix="$", tickformat=",", gridcolor="#eee"),
+            yaxis=dict(title=None),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        fig_lapsed_pareto.update_traces(textposition="outside", cliponaxis=False)
+        st.plotly_chart(fig_lapsed_pareto, use_container_width=True)
+
+        st.markdown("##### Outreach Priority")
+        _scatter_df = lapsed_df.rename(columns={
+            "Days_Inactive": "Days Inactive",
+            "Monthly_Run_Rate": "Monthly Run Rate",
+            "Revenue": "All-time Revenue",
+            "Last_Active_Label": "Last Active Month",
+            "Last_Month_Revenue": "Last Active Revenue",
+            "Contact_Status": "Contact Status",
+        })
+        fig_lapsed_scatter = px.scatter(
+            _scatter_df,
+            x="Days Inactive",
+            y="Monthly Run Rate",
+            size="All-time Revenue",
+            color="Contact Status",
+            hover_name="Store",
+            color_discrete_map={
+                "Not Contacted": "#7A7F86",
+                "Contacted": BLUE,
+                "Contacted - No Commitment": "#E8844C",
+                "Committed": "#2EAD69",
+            },
+            hover_data={
+                "License": True,
+                "Last Active Month": True,
+                "Last Active Revenue": ":$,.0f",
+                "All-time Revenue": ":$,.0f",
+                "Monthly Run Rate": ":$,.0f",
+                "Days Inactive": ":,.0f",
+                "Contact Status": False,
+            },
+            size_max=44,
+        )
+        fig_lapsed_scatter.update_layout(
+            height=420,
+            margin=dict(t=10, b=10),
+            plot_bgcolor="white",
+            xaxis=dict(title="Days since last active month", gridcolor="#eee"),
+            yaxis=dict(title="Estimated monthly revenue at risk", tickprefix="$", tickformat=",", gridcolor="#eee"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        st.plotly_chart(fig_lapsed_scatter, use_container_width=True)
+
         st.dataframe(
-            lapsed_df.rename(columns={"Last_Active": "Last Active Month", "Revenue": "All-time Revenue"}),
+            lapsed_df.rename(columns={
+                "Last_Active": "Last Active Month",
+                "Revenue": "All-time Revenue",
+                "Monthly_Run_Rate": "Est. Monthly Risk",
+                "Last_Month_Revenue": "Last Active Revenue",
+                "Active_Months": "Active Months",
+                "Contact_Status": "Contact Status",
+                "Days_Inactive": "Days Inactive",
+            })[[
+                "Store", "License", "Last Active Month", "Days Inactive",
+                "Contact Status", "Est. Monthly Risk", "Last Active Revenue",
+                "All-time Revenue", "Active Months",
+            ]],
             use_container_width=True,
             hide_index=True,
             column_config={
                 "All-time Revenue": st.column_config.NumberColumn("All-time Revenue", format="$%.0f"),
+                "Est. Monthly Risk": st.column_config.NumberColumn("Est. Monthly Risk", format="$%.0f"),
+                "Last Active Revenue": st.column_config.NumberColumn("Last Active Revenue", format="$%.0f"),
                 "Last Active Month": st.column_config.DatetimeColumn("Last Active Month", format="MMM YYYY"),
             },
         )
