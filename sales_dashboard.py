@@ -2948,6 +2948,36 @@ with tab_mom:
             .rename(columns={"License #": "License", "Client": "_ord_name"})
         )
         _curr_rev = _curr_rev.merge(_curr_names, on="License", how="left")
+        _mom_brand_colors = {
+            "K. Savage": "#4CE89C",
+            "Mayfield": "#E8844C",
+            "Leisure Land": "#4C9BE8",
+            "Other": "#B7BCC6",
+        }
+        _mom_brand_cols = ["K. Savage", "Mayfield", "Leisure Land"]
+        _mom_extra_brands = sorted(
+            b for b in _curr_paid["Brand"].dropna().unique().tolist()
+            if b not in set(_mom_brand_cols + ["Bulk"])
+        )
+        _mom_brand_cols += _mom_extra_brands
+        if _curr_paid.empty:
+            _curr_brand_rev = pd.DataFrame(columns=["License"] + _mom_brand_cols)
+        else:
+            _curr_brand_rev = (
+                _curr_paid.pivot_table(
+                    index="License #",
+                    columns="Brand",
+                    values="Line Total",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                .reset_index()
+                .rename(columns={"License #": "License"})
+            )
+        _curr_brand_rev["License"] = _curr_brand_rev.get("License", pd.Series(dtype=str)).astype(str)
+        for _brand in _mom_brand_cols:
+            if _brand not in _curr_brand_rev.columns:
+                _curr_brand_rev[_brand] = 0
 
         # Revenue dashboard: last-month column + store name, keyed by license
         _rev = df[[prev_month, "Store Name"]].copy()
@@ -3046,25 +3076,104 @@ with tab_mom:
         movers   = pd.concat([top_up, top_down]).sort_values("$ Change", ascending=True)
 
         if not movers.empty:
-            movers["Color"] = movers["$ Change"].apply(lambda v: "#4CE89C" if v >= 0 else "#E8844C")
-            fig_mom = px.bar(
-                movers,
-                x="$ Change",
-                y="Store Name",
-                orientation="h",
-                color="Color",
-                color_discrete_map="identity",
-                text=movers["$ Change"].apply(fmt_usd),
+            movers_chart = movers.copy()
+            movers_chart["License"] = movers_chart["License"].astype(str)
+            movers_chart = movers_chart.merge(
+                _curr_brand_rev[["License"] + _mom_brand_cols],
+                on="License",
+                how="left",
             )
+            for _brand in _mom_brand_cols:
+                movers_chart[_brand] = pd.to_numeric(movers_chart[_brand], errors="coerce").fillna(0)
+
+            movers_chart["Change Label"] = movers_chart["$ Change"].apply(
+                lambda v: f"Δ {'+' if v >= 0 else ''}{fmt_usd(v)}"
+            )
+            movers_chart["Last Month Label"] = movers_chart["Last Month"].apply(
+                lambda v: f"{prev_month}: {fmt_usd(v)}"
+            )
+            _current_max = movers_chart["Current Month"].max()
+            _last_max = movers_chart["Last Month"].max()
+            _x_max = max(_current_max, _last_max, 1) * 1.35
+
+            fig_mom = go.Figure()
+            for _brand in _mom_brand_cols:
+                _brand_values = movers_chart[_brand]
+                _share_text = []
+                _customdata = []
+                for _, _row in movers_chart.iterrows():
+                    _brand_value = float(_row[_brand])
+                    _current_total = float(_row["Current Month"])
+                    _share = (_brand_value / _current_total * 100) if _current_total else 0
+                    _share_text.append(f"{_share:.0f}%" if _share >= 12 else "")
+                    _customdata.append([
+                        _row["License"],
+                        _row["Current Month"],
+                        _row["Last Month"],
+                        _row["$ Change"],
+                        _share,
+                        _row["Change Label"],
+                    ])
+                fig_mom.add_trace(go.Bar(
+                    x=_brand_values,
+                    y=movers_chart["Store Name"],
+                    name=_brand,
+                    orientation="h",
+                    marker_color=_mom_brand_colors.get(_brand, "#B7BCC6"),
+                    text=_share_text,
+                    textposition="inside",
+                    insidetextanchor="middle",
+                    textfont=dict(color="#111", size=11),
+                    customdata=_customdata,
+                    hovertemplate=(
+                        "<b>%{y}</b><br>"
+                        "License: %{customdata[0]}<br>"
+                        f"{_brand}: " + "%{x:$,.0f}<br>"
+                        "Brand share: %{customdata[4]:.1f}%<br>"
+                        "Current: %{customdata[1]:$,.0f}<br>"
+                        f"{prev_month}: " + "%{customdata[2]:$,.0f}<br>"
+                        "Change: %{customdata[5]}<extra></extra>"
+                    ),
+                ))
+
+            fig_mom.add_trace(go.Scatter(
+                x=movers_chart["Last Month"],
+                y=movers_chart["Store Name"],
+                mode="markers+text",
+                name=f"{prev_month} amount",
+                marker=dict(symbol="diamond", size=9, color="#F7F8FA", line=dict(color="#111", width=1)),
+                text=movers_chart["Last Month Label"],
+                textposition="middle right",
+                textfont=dict(color="#F7F8FA", size=11),
+                hovertemplate=f"<b>%{{y}}</b><br>{prev_month}: %{{x:$,.0f}}<extra></extra>",
+            ))
+            fig_mom.add_trace(go.Scatter(
+                x=movers_chart["Current Month"],
+                y=movers_chart["Store Name"],
+                mode="text",
+                name="$ change",
+                text=movers_chart["Change Label"],
+                textposition="middle left",
+                textfont=dict(color="#F7F8FA", size=11),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
             fig_mom.update_layout(
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 font_color="#e3e3d8",
-                showlegend=False,
-                height=max(300, len(movers) * 28),
-                margin=dict(l=0, r=20, t=10, b=10),
-                xaxis_title="",
+                barmode="stack",
+                height=max(340, len(movers_chart) * 34),
+                margin=dict(l=0, r=110, t=10, b=10),
+                xaxis=dict(
+                    title="Current month revenue by brand; diamond marks last month",
+                    tickprefix="$",
+                    tickformat=",",
+                    gridcolor="rgba(255,255,255,0.14)",
+                    range=[0, _x_max],
+                ),
                 yaxis_title="",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, title=None),
+                hoverlabel=dict(bgcolor="#1C2028", font_color="#F7F8FA"),
             )
-            fig_mom.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_mom, use_container_width=True)
