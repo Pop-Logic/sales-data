@@ -1960,11 +1960,6 @@ with tab_orders:
         )
         .reset_index()
     )
-    lapsed_df = _lapsed_totals[
-        _lapsed_totals["Last_Order"].notna()
-        & (_lapsed_totals["Last_Order"] < _lapsed_cutoff)
-    ].copy().sort_values("Last_Order", ascending=True)
-
     # Search
     store_search = st.text_input("Search stores", placeholder="Store name or license…", key="ord_store_search")
     if store_search:
