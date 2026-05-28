@@ -436,6 +436,115 @@ def last_n_month_cols(months, n=3):
     idx = months.index(anchor)
     return months[max(0, idx - n + 1): idx + 1]
 
+def month_col_to_ts(col):
+    import calendar as _cal
+    for fmt in ("%b %y", "%b %Y", "%B %y", "%B %Y", "%b-%y", "%b-%Y"):
+        try:
+            dt = pd.to_datetime(str(col).strip(), format=fmt)
+            last = _cal.monthrange(dt.year, dt.month)[1]
+            return pd.Timestamp(dt.year, dt.month, last)
+        except Exception:
+            pass
+    return None
+
+def contact_status_by_license(contact_log_df):
+    status_map = {}
+    if contact_log_df is None or contact_log_df.empty:
+        return status_map
+
+    contact_sort = pd.to_datetime(
+        contact_log_df.get("Saved At", pd.Series(dtype=str)),
+        errors="coerce",
+    )
+    contact_log_df = contact_log_df.assign(_saved_sort=contact_sort).sort_values("_saved_sort")
+    for _, row in contact_log_df.iterrows():
+        lic_key = str(row.get("License", "")).strip()
+        if not lic_key:
+            continue
+        commitment = str(row.get("Commitment", "")).strip().lower()
+        has_contact_details = any(
+            str(row.get(field, "")).strip()
+            for field in ["Date Contacted", "Notes", "Initials", "Person Contacted", "Contact Method"]
+        )
+        if commitment in {"yes", "y", "true", "1"}:
+            status_map[lic_key] = "Committed"
+        elif has_contact_details and commitment in {"no", "n", "false", "0"}:
+            status_map[lic_key] = "Contacted - No Commitment"
+        elif has_contact_details:
+            status_map[lic_key] = "Contacted"
+        else:
+            status_map[lic_key] = "Not Contacted"
+    return status_map
+
+def build_lapsed_store_df(df, months, contact_log_df=None):
+    month_ts_map = {m: month_col_to_ts(m) for m in months}
+    dated_months = sorted(
+        [(m, ts) for m, ts in month_ts_map.items() if ts is not None],
+        key=lambda x: x[1],
+    )
+    contact_status_map = contact_status_by_license(contact_log_df)
+
+    rows = []
+    for lic in df.index:
+        active_months = []
+        for month, ts in dated_months:
+            month_revenue = float(df.loc[lic, month])
+            if month_revenue > 0:
+                active_months.append((month, ts, month_revenue))
+        if not active_months:
+            continue
+
+        last_month, last_ts, last_month_revenue = active_months[-1]
+        recent_active_revenues = [v for _, _, v in active_months[-3:]]
+        monthly_run_rate = (
+            sum(recent_active_revenues) / len(recent_active_revenues)
+            if recent_active_revenues else 0
+        )
+        rows.append({
+            "Store": df.loc[lic, "Store Name"],
+            "License": str(lic),
+            "Last_Active": last_ts,
+            "Last_Active_Label": last_month,
+            "Last_Month_Revenue": last_month_revenue,
+            "Monthly_Run_Rate": monthly_run_rate,
+            "Active_Months": len(active_months),
+            "Contact_Status": contact_status_map.get(str(lic), "Not Contacted"),
+            "Revenue": df.loc[lic, months].sum(),
+        })
+    return pd.DataFrame(
+        rows if rows else [],
+        columns=[
+            "Store", "License", "Last_Active", "Last_Active_Label",
+            "Last_Month_Revenue", "Monthly_Run_Rate", "Active_Months",
+            "Contact_Status", "Revenue",
+        ],
+    )
+
+def filter_lapsed_store_df(lapsed_totals, days=180, today=None):
+    if lapsed_totals is None or lapsed_totals.empty:
+        return pd.DataFrame(columns=list(lapsed_totals.columns) + ["Days_Inactive"] if lapsed_totals is not None else [])
+
+    today = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.now().normalize()
+    window_start = today - pd.Timedelta(days=int(days))
+    lapse_cutoff = today - pd.Timedelta(days=30)
+    lapsed_df = lapsed_totals[
+        lapsed_totals["Last_Active"].notna()
+        & (lapsed_totals["Last_Active"] >= window_start)
+        & (lapsed_totals["Last_Active"] < lapse_cutoff)
+    ].copy()
+    if lapsed_df.empty:
+        lapsed_df["Days_Inactive"] = []
+        return lapsed_df
+
+    lapsed_df["Last_Active"] = pd.to_datetime(lapsed_df["Last_Active"], errors="coerce")
+    lapsed_df["Days_Inactive"] = (today - lapsed_df["Last_Active"]).dt.days
+    for col in ["Revenue", "Monthly_Run_Rate", "Last_Month_Revenue"]:
+        lapsed_df[col] = pd.to_numeric(lapsed_df[col], errors="coerce").fillna(0)
+    return lapsed_df.sort_values(
+        ["Monthly_Run_Rate", "Days_Inactive", "Revenue"],
+        ascending=[False, False, False],
+    )
+
 SORT_OPTIONS = ["Highest first", "Lowest first", "Store name", "License #"]
 
 def sort_share_rows(share_df, revenue_col, sort_by):
@@ -1807,16 +1916,76 @@ with tab_contact:
     contact_month = find_last_month_col(months)
     today_date = datetime.now().date()
 
-    cf_view = st.radio("Show", ["Top 30 Stores", "All Stores"], horizontal=True, key="cf_view_mode")
+    try:
+        _saved_log = load_contact_log()
+    except Exception as e:
+        st.error(f"Could not load saved contact entries: {e}")
+        _saved_log = pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
+
+    cf_view = st.radio(
+        "Show",
+        ["Top 30 Stores", "Lapsed Priority", "All Stores"],
+        horizontal=True,
+        key="cf_view_mode",
+    )
 
     all_lics_sorted = df[contact_month].sort_values(ascending=False).index.tolist()
     top30_lics = all_lics_sorted[:30]
-    cf_pool = top30_lics if cf_view == "Top 30 Stores" else all_lics_sorted
+    cf_display_by_lic = {}
+    cf_log_revenue_by_lic = {}
 
     if cf_view == "Top 30 Stores":
+        cf_pool = top30_lics
         st.caption(f"Top 30 stores by **{contact_month}** revenue · Ranked highest to lowest")
+    elif cf_view == "Lapsed Priority":
+        lapsed_c1, lapsed_c2 = st.columns([1, 1])
+        cf_lapsed_window = lapsed_c1.number_input(
+            "Lapsed within the last N days",
+            min_value=31,
+            max_value=1095,
+            value=180,
+            step=1,
+            key="cf_lapsed_days",
+            help="Stores whose last active month ended between 30 and N days ago.",
+        )
+        cf_lapsed_totals = build_lapsed_store_df(df, months, _saved_log)
+        cf_lapsed_df = filter_lapsed_store_df(cf_lapsed_totals, cf_lapsed_window)
+        if cf_lapsed_df.empty:
+            cf_pool = []
+            lapsed_c2.caption("No lapsed stores in this window.")
+            st.info(f"No stores lapsed within the last {cf_lapsed_window} days.")
+        else:
+            cf_lapsed_count = lapsed_c2.number_input(
+                "Stores shown",
+                min_value=1,
+                max_value=len(cf_lapsed_df),
+                value=min(30, len(cf_lapsed_df)),
+                step=1,
+                key="cf_lapsed_count",
+            )
+            cf_lapsed_df = cf_lapsed_df.head(int(cf_lapsed_count))
+            cf_pool = cf_lapsed_df["License"].astype(str).tolist()
+            for _, _lapsed_row in cf_lapsed_df.iterrows():
+                _lic = str(_lapsed_row["License"])
+                _risk = float(_lapsed_row["Monthly_Run_Rate"])
+                _days = int(_lapsed_row["Days_Inactive"])
+                _last_active = str(_lapsed_row["Last_Active_Label"])
+                cf_display_by_lic[_lic] = (
+                    f"{fmt_usd(_risk)}/mo risk · {_days} days inactive · last active {_last_active}"
+                )
+                cf_log_revenue_by_lic[_lic] = f"{fmt_usd(_risk)}/mo risk"
+            st.caption(
+                f"Top {len(cf_pool)} lapsed store{'s' if len(cf_pool) != 1 else ''} by estimated monthly revenue at risk."
+            )
     else:
+        cf_pool = all_lics_sorted
         st.caption(f"All {len(all_lics_sorted)} stores by **{contact_month}** revenue · Ranked highest to lowest")
+
+    for _lic in cf_pool:
+        if _lic not in cf_display_by_lic:
+            cf_display_by_lic[_lic] = fmt_usd(df.loc[_lic, contact_month])
+        if _lic not in cf_log_revenue_by_lic:
+            cf_log_revenue_by_lic[_lic] = fmt_usd(df.loc[_lic, contact_month])
 
     AMOUNT_OPTIONS = [
         "", "$500–$1,000", "$1,000–$2,500", "$2,500–$5,000",
@@ -1828,12 +1997,7 @@ with tab_contact:
 
     METHOD_OPTIONS = ["", "In-person", "Phone", "Email"]
 
-    # Load saved entries for this month to pre-populate widgets
-    try:
-        _saved_log = load_contact_log()
-    except Exception as e:
-        st.error(f"Could not load saved contact entries: {e}")
-        _saved_log = pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
+    # Saved entries for this month pre-populate widgets.
     _saved_map: dict = {}
     if not _saved_log.empty:
         _contact_month_key = canonical_month_label(contact_month)
@@ -1862,7 +2026,7 @@ with tab_contact:
 
     for rank, lic in enumerate(display_lics, 1):
         store_name = df.loc[lic, "Store Name"]
-        revenue = fmt_usd(df.loc[lic, contact_month])
+        revenue = cf_display_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month]))
         has_saved = lic in _saved_map
         label = f"{'✅ ' if has_saved else ''}#{rank}  {store_name}  ·  {lic}  ·  {revenue}"
         with st.expander(label):
@@ -1927,7 +2091,7 @@ with tab_contact:
                     "license":           lic,
                     "store_name":        df.loc[lic, "Store Name"],
                     "contact_month":     contact_month,
-                    "revenue":           fmt_usd(df.loc[lic, contact_month]),
+                    "revenue":           cf_log_revenue_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month])),
                     "date_contacted":    str(st.session_state.get(f"cf_{lic}_date", today_date)),
                     "initials":          initials,
                     "person_contacted":  person,
@@ -1954,7 +2118,7 @@ with tab_contact:
             "License":           lic,
             "Store Name":        df.loc[lic, "Store Name"],
             "Month":             contact_month,
-            "Revenue":           fmt_usd(df.loc[lic, contact_month]),
+            "Revenue":           cf_log_revenue_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month])),
             "Date Contacted":    str(st.session_state.get(f"cf_{lic}_date", today_date)),
             "Initials":          st.session_state.get(f"cf_{lic}_initials", ""),
             "Person Contacted":  st.session_state.get(f"cf_{lic}_person", ""),
@@ -1967,7 +2131,7 @@ with tab_contact:
     dl_col.download_button(
         "⬇ Download as CSV",
         data=pd.DataFrame(_csv_rows).to_csv(index=False),
-        file_name=f"store-contacts-{slugify(contact_month)}.csv",
+        file_name=f"store-contacts-{slugify(cf_view)}-{slugify(contact_month)}.csv",
         mime="text/csv",
         use_container_width=True,
     )
@@ -2314,85 +2478,11 @@ with tab_orders:
     store_table = store_table.sort_values("Last_Order", ascending=False)
 
     # Lapsed stores — derived from monthly sheet data (full history back to Jan 2024)
-    import calendar as _cal
-    def _month_col_to_ts(col):
-        for fmt in ("%b %y", "%b %Y", "%B %y", "%B %Y", "%b-%y", "%b-%Y"):
-            try:
-                dt = pd.to_datetime(col.strip(), format=fmt)
-                last = _cal.monthrange(dt.year, dt.month)[1]
-                return pd.Timestamp(dt.year, dt.month, last)
-            except Exception:
-                pass
-        return None
-
-    _month_ts_map = {m: _month_col_to_ts(m) for m in months}
-    _dated_months = sorted(
-        [(m, ts) for m, ts in _month_ts_map.items() if ts is not None],
-        key=lambda x: x[1],
-    )
-
-    _contact_status_map = {}
     try:
         _contact_log_for_lapsed = load_contact_log()
     except Exception:
         _contact_log_for_lapsed = pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
-    if not _contact_log_for_lapsed.empty:
-        _contact_sort = pd.to_datetime(
-            _contact_log_for_lapsed.get("Saved At", pd.Series(dtype=str)),
-            errors="coerce",
-        )
-        _contact_log_for_lapsed = _contact_log_for_lapsed.assign(_saved_sort=_contact_sort).sort_values("_saved_sort")
-        for _, _contact_row in _contact_log_for_lapsed.iterrows():
-            _lic_key = str(_contact_row.get("License", "")).strip()
-            if not _lic_key:
-                continue
-            _commitment = str(_contact_row.get("Commitment", "")).strip().lower()
-            _has_contact_details = any(
-                str(_contact_row.get(_field, "")).strip()
-                for _field in ["Date Contacted", "Notes", "Initials", "Person Contacted", "Contact Method"]
-            )
-            if _commitment in {"yes", "y", "true", "1"}:
-                _contact_status_map[_lic_key] = "Committed"
-            elif _has_contact_details and _commitment in {"no", "n", "false", "0"}:
-                _contact_status_map[_lic_key] = "Contacted - No Commitment"
-            elif _has_contact_details:
-                _contact_status_map[_lic_key] = "Contacted"
-            else:
-                _contact_status_map[_lic_key] = "Not Contacted"
-
-    _lapsed_rows = []
-    for _lic in df.index:
-        _active_months = []
-        for _m, _ts in _dated_months:
-            _month_revenue = float(df.loc[_lic, _m])
-            if _month_revenue > 0:
-                _active_months.append((_m, _ts, _month_revenue))
-        if _active_months:
-            _last_m, _last_ts, _last_month_revenue = _active_months[-1]
-            _recent_active_revenues = [v for _, _, v in _active_months[-3:]]
-            _monthly_run_rate = (
-                sum(_recent_active_revenues) / len(_recent_active_revenues)
-                if _recent_active_revenues else 0
-            )
-            _lapsed_rows.append({
-                "Store": df.loc[_lic, "Store Name"],
-                "License": str(_lic),
-                "Last_Active": _last_ts,
-                "Last_Active_Label": _last_m,
-                "Last_Month_Revenue": _last_month_revenue,
-                "Monthly_Run_Rate": _monthly_run_rate,
-                "Active_Months": len(_active_months),
-                "Contact_Status": _contact_status_map.get(str(_lic), "Not Contacted"),
-                "Revenue": df.loc[_lic, months].sum(),
-            })
-    _lapsed_totals = pd.DataFrame(
-        _lapsed_rows if _lapsed_rows else [],
-        columns=[
-            "Store", "License", "Last_Active", "Last_Active_Label",
-            "Last_Month_Revenue", "Monthly_Run_Rate", "Active_Months",
-            "Contact_Status", "Revenue",
-        ],
-    )
+    _lapsed_totals = build_lapsed_store_df(df, months, _contact_log_for_lapsed)
     # Search
     store_search = st.text_input("Search stores", placeholder="Store name or license…", key="ord_store_search")
     if store_search:
@@ -2425,13 +2515,7 @@ with tab_orders:
         help="Show stores whose last active month ended between 30 and N days ago."
     )
     _today = pd.Timestamp.now().normalize()
-    _window_start = _today - pd.Timedelta(days=int(_lapsed_window))
-    _lapse_cutoff = _today - pd.Timedelta(days=30)
-    lapsed_df = _lapsed_totals[
-        _lapsed_totals["Last_Active"].notna()
-        & (_lapsed_totals["Last_Active"] >= _window_start)
-        & (_lapsed_totals["Last_Active"] < _lapse_cutoff)
-    ].copy().sort_values("Last_Active", ascending=True)
+    lapsed_df = filter_lapsed_store_df(_lapsed_totals, _lapsed_window, _today)
 
     if lapsed_df.empty:
         st.info(f"No stores lapsed within the last {_lapsed_window} days.")
@@ -2458,7 +2542,7 @@ with tab_orders:
         _top_risk_value = _top_risk.iloc[0]["Monthly_Run_Rate"] if not _top_risk.empty else 0
 
         st.caption(
-            f"{len(lapsed_df)} store{'s' if len(lapsed_df) != 1 else ''} — last active month between 30 and {_lapsed_window} days ago, sorted oldest first"
+            f"{len(lapsed_df)} store{'s' if len(lapsed_df) != 1 else ''} — last active month between 30 and {_lapsed_window} days ago, prioritized by estimated monthly revenue at risk"
         )
 
         lm1, lm2, lm3, lm4 = st.columns(4)
