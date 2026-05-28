@@ -1949,16 +1949,40 @@ with tab_orders:
             store_table[brand] = 0
     store_table = store_table.sort_values("Last_Order", ascending=False)
 
-    # Lapsed stores — use full unfiltered dataset so date picker doesn't hide them
-    _all_paid_df = ord_df[ord_df["Line Total"] > 0]
-    _lapsed_totals = (
-        _all_paid_df.groupby(["Client", "License #"])
-        .agg(
-            Total_Revenue=("Line Total", "sum"),
-            Orders=("Order #", "nunique"),
-            Last_Order=("Submitted Date", "max"),
-        )
-        .reset_index()
+    # Lapsed stores — derived from monthly sheet data (full history back to Jan 2024)
+    import calendar as _cal
+    def _month_col_to_ts(col):
+        for fmt in ("%b %y", "%b %Y", "%B %y", "%B %Y", "%b-%y", "%b-%Y"):
+            try:
+                dt = pd.to_datetime(col.strip(), format=fmt)
+                last = _cal.monthrange(dt.year, dt.month)[1]
+                return pd.Timestamp(dt.year, dt.month, last)
+            except Exception:
+                pass
+        return None
+
+    _month_ts_map = {m: _month_col_to_ts(m) for m in months}
+    _dated_months = sorted(
+        [(m, ts) for m, ts in _month_ts_map.items() if ts is not None],
+        key=lambda x: x[1],
+    )
+    _lapsed_rows = []
+    for _lic in df.index:
+        _last_ts = None
+        for _m, _ts in reversed(_dated_months):
+            if df.loc[_lic, _m] > 0:
+                _last_ts = _ts
+                break
+        if _last_ts is not None:
+            _lapsed_rows.append({
+                "Store": df.loc[_lic, "Store Name"],
+                "License": str(_lic),
+                "Last_Active": _last_ts,
+                "Revenue": df.loc[_lic, months].sum(),
+            })
+    _lapsed_totals = pd.DataFrame(
+        _lapsed_rows if _lapsed_rows else [],
+        columns=["Store", "License", "Last_Active", "Revenue"],
     )
     # Search
     store_search = st.text_input("Search stores", placeholder="Store name or license…", key="ord_store_search")
@@ -1995,28 +2019,24 @@ with tab_orders:
     _window_start = _today - pd.Timedelta(days=int(_lapsed_window))
     _lapse_cutoff = _today - pd.Timedelta(days=30)
     lapsed_df = _lapsed_totals[
-        _lapsed_totals["Last_Order"].notna()
-        & (_lapsed_totals["Last_Order"] >= _window_start)
-        & (_lapsed_totals["Last_Order"] < _lapse_cutoff)
-    ].copy().sort_values("Last_Order", ascending=True)
+        _lapsed_totals["Last_Active"].notna()
+        & (_lapsed_totals["Last_Active"] >= _window_start)
+        & (_lapsed_totals["Last_Active"] < _lapse_cutoff)
+    ].copy().sort_values("Last_Active", ascending=True)
 
     if lapsed_df.empty:
         st.info(f"No lapsed stores found in the last {_lapsed_window} days.")
     else:
         st.caption(
-            f"{len(lapsed_df)} store{'s' if len(lapsed_df) != 1 else ''} — last order between 30 and {_lapsed_window} days ago, sorted oldest first"
+            f"{len(lapsed_df)} store{'s' if len(lapsed_df) != 1 else ''} — last active month ended between 30 and {_lapsed_window} days ago, sorted oldest first"
         )
-        disp_lapsed = lapsed_df.rename(columns={
-            "Client": "Store", "License #": "License",
-            "Total_Revenue": "Revenue", "Last_Order": "Last Order",
-        })[["Store", "License", "Orders", "Last Order", "Revenue"]]
         st.dataframe(
-            disp_lapsed,
+            lapsed_df.rename(columns={"Last_Active": "Last Active Month", "Revenue": "All-time Revenue"}),
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Revenue": st.column_config.NumberColumn("All-time Revenue", format="$%.0f"),
-                "Last Order": st.column_config.DatetimeColumn("Last Order", format="MM/DD/YYYY"),
+                "All-time Revenue": st.column_config.NumberColumn("All-time Revenue", format="$%.0f"),
+                "Last Active Month": st.column_config.DatetimeColumn("Last Active Month", format="MMM YYYY"),
             },
         )
 
