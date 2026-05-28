@@ -1986,21 +1986,26 @@ with tab_orders:
     )
 
     st.markdown("#### Lapsed Stores")
-    _lapsed_days = st.number_input(
-        "No purchase in the last N days", min_value=1, max_value=365,
-        value=30, step=1, key="lapsed_days"
+    _lapse_threshold = 30  # days inactive to be considered lapsed
+    _lapsed_window = st.number_input(
+        "Look-back window (days)", min_value=_lapse_threshold + 1, max_value=365,
+        value=90, step=1, key="lapsed_days",
+        help=f"Show stores whose last order was between {_lapse_threshold} and N days ago — recently lapsed, not long-gone."
     )
-    _lapsed_cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=int(_lapsed_days))
+    _today = pd.Timestamp.now().normalize()
+    _window_start = _today - pd.Timedelta(days=int(_lapsed_window))
+    _lapse_cutoff = _today - pd.Timedelta(days=_lapse_threshold)
     lapsed_df = _lapsed_totals[
         _lapsed_totals["Last_Order"].notna()
-        & (_lapsed_totals["Last_Order"] < _lapsed_cutoff)
+        & (_lapsed_totals["Last_Order"] >= _window_start)
+        & (_lapsed_totals["Last_Order"] < _lapse_cutoff)
     ].copy().sort_values("Last_Order", ascending=True)
 
     if lapsed_df.empty:
-        st.info(f"No lapsed stores — all stores have placed an order within the last {_lapsed_days} days.")
+        st.info(f"No stores lapsed in the last {_lapsed_window} days.")
     else:
         st.caption(
-            f"{len(lapsed_df)} store{'s' if len(lapsed_df) != 1 else ''} with no purchase in the last {_lapsed_days} days — sorted by longest lapsed first"
+            f"{len(lapsed_df)} store{'s' if len(lapsed_df) != 1 else ''} — last order between {_lapse_threshold} and {_lapsed_window} days ago, sorted oldest first"
         )
         disp_lapsed = lapsed_df.rename(columns={
             "Client": "Store", "License #": "License",
