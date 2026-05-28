@@ -62,6 +62,13 @@ DATA_DIR = Path("Data")
 DB_PATH = DATA_DIR / "sales_dashboard.sqlite3"
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1kY5e6SXd7eQ7GJx-jg6M1R60WCCZ9I_25Eb7ZmuDKHw/edit?usp=sharing"
 DEFAULT_SHEET_GID = "0"
+CONTACT_LOG_WORKSHEET = "Contact Log"
+CONTACT_LOG_COLUMNS = [
+    "License", "Store Name", "Month", "Revenue",
+    "Date Contacted", "Commitment", "Cadence",
+    "Committed Amount", "Notes", "Initials",
+    "Person Contacted", "Contact Method", "Saved At",
+]
 TOTAL_PATTERN = re.compile(
     r"^(total|totals|sum|grand\s*total|ytd|year\s*to\s*date|annual|avg|average|subtotal)s?$",
     re.IGNORECASE,
@@ -178,6 +185,39 @@ def canonical_month_label(label):
         return str(label or "").strip()
     month_num, year = parsed
     return f"{MONTH_ABBR[month_num]} {year}"
+
+def sheet_id_from_url(sheet_url):
+    parsed = urlparse(str(sheet_url or ""))
+    match = SHEET_ID_PATTERN.search(parsed.path)
+    return match.group(1) if match else ""
+
+def secret_value(key, default=""):
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+def service_account_info():
+    for key in ("gcp_service_account", "google_service_account"):
+        try:
+            if key in st.secrets:
+                info = dict(st.secrets[key])
+                if "private_key" in info:
+                    info["private_key"] = str(info["private_key"]).replace("\\n", "\n")
+                return info
+        except Exception:
+            pass
+    return None
+
+def contact_sheet_configured():
+    return service_account_info() is not None
+
+def contact_sheet_id():
+    configured = secret_value("contact_log_spreadsheet_id") or secret_value("contact_log_sheet_id")
+    return configured or sheet_id_from_url(DEFAULT_SHEET_URL)
+
+def contact_worksheet_name():
+    return secret_value("contact_log_worksheet", CONTACT_LOG_WORKSHEET) or CONTACT_LOG_WORKSHEET
 
 def is_totals_col(header, values, other_cols):
     header_text = str(header).strip()
@@ -554,8 +594,120 @@ def delete_saved_dataset(dataset_id):
     with sqlite3.connect(storage_path()) as conn:
         conn.execute("DELETE FROM saved_datasets WHERE id = ?", (dataset_id,))
 
-def upsert_contact_log_rows(rows: list[dict]):
-    """Insert or replace contact log entries (unique per license+month)."""
+def _clean_cell(value):
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+def _contact_row_from_save_dict(row, saved_at):
+    return {
+        "License": _clean_cell(row.get("license")),
+        "Store Name": _clean_cell(row.get("store_name")),
+        "Month": canonical_month_label(row.get("contact_month")),
+        "Revenue": _clean_cell(row.get("revenue")),
+        "Date Contacted": _clean_cell(row.get("date_contacted")),
+        "Commitment": _clean_cell(row.get("commitment_made")),
+        "Cadence": _clean_cell(row.get("committed_cadence")),
+        "Committed Amount": _clean_cell(row.get("committed_amount")),
+        "Notes": _clean_cell(row.get("notes")),
+        "Initials": _clean_cell(row.get("initials")),
+        "Person Contacted": _clean_cell(row.get("person_contacted")),
+        "Contact Method": _clean_cell(row.get("contact_method")),
+        "Saved At": saved_at,
+    }
+
+def _normalize_contact_df(df):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
+
+    aliases = {
+        "License": ["License", "license"],
+        "Store Name": ["Store Name", "store_name", "Client", "Store"],
+        "Month": ["Month", "contact_month"],
+        "Revenue": ["Revenue", "revenue"],
+        "Date Contacted": ["Date Contacted", "date_contacted"],
+        "Commitment": ["Commitment", "Commitment Made", "commitment_made"],
+        "Cadence": ["Cadence", "Committed Cadence", "committed_cadence"],
+        "Committed Amount": ["Committed Amount", "Committed $ Amount", "Amount", "committed_amount"],
+        "Notes": ["Notes", "notes"],
+        "Initials": ["Initials", "initials"],
+        "Person Contacted": ["Person Contacted", "person_contacted"],
+        "Contact Method": ["Contact Method", "contact_method"],
+        "Saved At": ["Saved At", "saved_at"],
+    }
+
+    out = pd.DataFrame()
+    source_cols = {str(c).strip(): c for c in df.columns}
+    for target, source_names in aliases.items():
+        source = next((source_cols[name] for name in source_names if name in source_cols), None)
+        out[target] = df[source] if source is not None else ""
+
+    out = out.fillna("").astype(str)
+    out["License"] = out["License"].str.strip()
+    out["Store Name"] = out["Store Name"].str.strip()
+    out["Month"] = out["Month"].apply(canonical_month_label)
+    commitment_values = {
+        "y": "Yes", "yes": "Yes", "true": "Yes", "1": "Yes",
+        "n": "No", "no": "No", "false": "No", "0": "No",
+    }
+    out["Commitment"] = out["Commitment"].str.strip().apply(
+        lambda v: commitment_values.get(str(v).lower(), str(v).strip())
+    )
+    out = out[(out["License"] != "") & (out["Store Name"] != "")]
+    return out[CONTACT_LOG_COLUMNS]
+
+def _contact_df_to_save_rows(df):
+    normalized = _normalize_contact_df(df)
+    rows = []
+    for _, row in normalized.iterrows():
+        rows.append({
+            "license": row["License"],
+            "store_name": row["Store Name"],
+            "contact_month": row["Month"],
+            "revenue": row["Revenue"],
+            "date_contacted": row["Date Contacted"],
+            "commitment_made": row["Commitment"],
+            "committed_cadence": row["Cadence"],
+            "committed_amount": row["Committed Amount"],
+            "notes": row["Notes"],
+            "initials": row["Initials"],
+            "person_contacted": row["Person Contacted"],
+            "contact_method": row["Contact Method"],
+        })
+    return rows
+
+def _meaningful_contact_rows(df):
+    normalized = _normalize_contact_df(df)
+    if normalized.empty:
+        return []
+    meaningful = (
+        normalized["Commitment"].str.lower().eq("yes")
+        | normalized["Cadence"].str.strip().ne("")
+        | normalized["Committed Amount"].str.strip().ne("")
+        | normalized["Notes"].str.strip().ne("")
+        | normalized["Initials"].str.strip().ne("")
+        | normalized["Person Contacted"].str.strip().ne("")
+        | normalized["Contact Method"].str.strip().ne("")
+    )
+    return _contact_df_to_save_rows(normalized[meaningful])
+
+def _contact_log_from_sqlite() -> pd.DataFrame:
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT license, store_name, contact_month, revenue,
+                   date_contacted, commitment_made, committed_cadence,
+                   committed_amount, notes, initials, person_contacted,
+                   contact_method, saved_at
+            FROM contact_log
+            ORDER BY saved_at DESC
+        """).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
+    return _normalize_contact_df(pd.DataFrame([dict(r) for r in rows]))
+
+def _upsert_contact_log_sqlite(rows: list[dict]):
     init_storage()
     now = datetime.now().isoformat(timespec="seconds")
     with sqlite3.connect(storage_path()) as conn:
@@ -586,36 +738,99 @@ def upsert_contact_log_rows(rows: list[dict]):
             for r in rows
         ])
 
+def _contact_sheet_client():
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+    except ImportError as exc:
+        raise RuntimeError("Google Sheets contact logging requires gspread and google-auth.") from exc
+
+    info = service_account_info()
+    if not info:
+        raise RuntimeError("Google Sheets contact logging is not configured in Streamlit secrets.")
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
+
+def _worksheet_update(worksheet, values):
+    try:
+        worksheet.update(values=values, range_name="A1", value_input_option="USER_ENTERED")
+    except TypeError:
+        worksheet.update("A1", values, value_input_option="USER_ENTERED")
+
+@st.cache_resource(show_spinner=False)
+def _contact_worksheet():
+    client = _contact_sheet_client()
+    spreadsheet = client.open_by_key(contact_sheet_id())
+    title = contact_worksheet_name()
+    try:
+        worksheet = spreadsheet.worksheet(title)
+    except Exception:
+        worksheet = spreadsheet.add_worksheet(title=title, rows=500, cols=len(CONTACT_LOG_COLUMNS))
+    values = worksheet.get_all_values()
+    if not values:
+        _worksheet_update(worksheet, [CONTACT_LOG_COLUMNS])
+    return worksheet
+
+def _contact_log_from_sheet() -> pd.DataFrame:
+    worksheet = _contact_worksheet()
+    values = worksheet.get_all_values()
+    if not values or len(values) == 1:
+        return pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
+    return _normalize_contact_df(pd.DataFrame(values[1:], columns=values[0]))
+
+def _write_contact_log_sheet(df):
+    worksheet = _contact_worksheet()
+    normalized = _normalize_contact_df(df)
+    rows = normalized.fillna("").astype(str).values.tolist()
+    values = [CONTACT_LOG_COLUMNS] + rows
+    old_row_count = len(worksheet.get_all_values())
+    if old_row_count > len(values):
+        values.extend([[""] * len(CONTACT_LOG_COLUMNS) for _ in range(old_row_count - len(values))])
+    _worksheet_update(worksheet, values)
+
+def _upsert_contact_log_sheet(rows: list[dict]):
+    now = datetime.now().isoformat(timespec="seconds")
+    existing = _contact_log_from_sheet()
+    incoming = pd.DataFrame([_contact_row_from_save_dict(r, now) for r in rows], columns=CONTACT_LOG_COLUMNS)
+    combined = pd.concat([existing, incoming], ignore_index=True)
+    combined["Month"] = combined["Month"].apply(canonical_month_label)
+    combined["_key"] = combined["License"].astype(str) + "||" + combined["Month"].astype(str)
+    combined = combined.drop_duplicates("_key", keep="last").drop(columns=["_key"])
+    combined = combined.sort_values("Saved At", ascending=False)
+    _write_contact_log_sheet(combined)
+
+def contact_log_backend_label():
+    if contact_sheet_configured():
+        return f"Google Sheets · {contact_worksheet_name()}"
+    return "Local SQLite fallback"
+
+def upsert_contact_log_rows(rows: list[dict]):
+    """Insert or replace contact log entries, unique per license+month."""
+    if contact_sheet_configured():
+        return _upsert_contact_log_sheet(rows)
+    return _upsert_contact_log_sqlite(rows)
+
 def load_contact_log() -> pd.DataFrame:
-    init_storage()
-    with sqlite3.connect(storage_path()) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT license, store_name, contact_month, revenue,
-                   date_contacted, commitment_made, committed_cadence,
-                   committed_amount, notes, initials, person_contacted,
-                   contact_method, saved_at
-            FROM contact_log
-            ORDER BY saved_at DESC
-        """).fetchall()
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame([dict(r) for r in rows], columns=[
-        "license", "store_name", "contact_month", "revenue",
-        "date_contacted", "commitment_made", "committed_cadence",
-        "committed_amount", "notes", "initials", "person_contacted",
-        "contact_method", "saved_at",
-    ]).rename(columns={
-        "license": "License", "store_name": "Store Name",
-        "contact_month": "Month", "revenue": "Revenue",
-        "date_contacted": "Date Contacted", "commitment_made": "Commitment",
-        "committed_cadence": "Cadence",
-        "committed_amount": "Committed Amount", "notes": "Notes",
-        "initials": "Initials", "person_contacted": "Person Contacted",
-        "contact_method": "Contact Method", "saved_at": "Saved At",
-    })
+    if contact_sheet_configured():
+        return _contact_log_from_sheet()
+    return _contact_log_from_sqlite()
 
 def delete_contact_log_entry(license_id: str, month: str):
+    if contact_sheet_configured():
+        current = _contact_log_from_sheet()
+        if current.empty:
+            return
+        key_month = canonical_month_label(month)
+        keep = ~(
+            (current["License"].astype(str) == str(license_id))
+            & (current["Month"].apply(canonical_month_label) == key_month)
+        )
+        _write_contact_log_sheet(current[keep])
+        return
     init_storage()
     with sqlite3.connect(storage_path()) as conn:
         conn.execute(
@@ -624,6 +839,9 @@ def delete_contact_log_entry(license_id: str, month: str):
         )
 
 def clear_contact_log():
+    if contact_sheet_configured():
+        _write_contact_log_sheet(pd.DataFrame(columns=CONTACT_LOG_COLUMNS))
+        return
     init_storage()
     with sqlite3.connect(storage_path()) as conn:
         conn.execute("DELETE FROM contact_log")
@@ -1260,7 +1478,7 @@ with st.sidebar:
             st.error(f"Could not read order file: {_oe}")
 
 # ── Parse ──────────────────────────────────────────────────────────────────────
-df, months, stripped = None, [], []
+df, months, stripped, rev_exact_dup_ids = None, [], [], []
 if raw_input.strip():
     try:
         df, months, stripped, rev_exact_dup_ids = parse_input(raw_input)
@@ -1603,7 +1821,11 @@ with tab_contact:
     METHOD_OPTIONS = ["", "In-person", "Phone", "Email"]
 
     # Load saved entries for this month to pre-populate widgets
-    _saved_log = load_contact_log()
+    try:
+        _saved_log = load_contact_log()
+    except Exception as e:
+        st.error(f"Could not load saved contact entries: {e}")
+        _saved_log = pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
     _saved_map: dict = {}
     if not _saved_log.empty:
         _contact_month_key = canonical_month_label(contact_month)
@@ -1675,16 +1897,22 @@ with tab_contact:
 
     if save_col.button("💾 Save to Team Log", use_container_width=True, type="primary"):
         rows_to_save = []
-        for lic in top30_lics:
+        for lic in cf_pool:
             commitment = st.session_state.get(f"cf_{lic}_commitment", "No")
             cadence    = st.session_state.get(f"cf_{lic}_cadence", "")
             amount     = st.session_state.get(f"cf_{lic}_amount", "")
             notes      = st.session_state.get(f"cf_{lic}_notes", "")
+            initials   = st.session_state.get(f"cf_{lic}_initials", "")
+            person     = st.session_state.get(f"cf_{lic}_person", "")
+            method     = st.session_state.get(f"cf_{lic}_method", "")
             has_entry  = (
                 commitment == "Yes"
                 or bool(str(cadence or "").strip())
                 or bool(str(amount or "").strip())
                 or bool(str(notes or "").strip())
+                or bool(str(initials or "").strip())
+                or bool(str(person or "").strip())
+                or bool(str(method or "").strip())
             )
             if has_entry:
                 rows_to_save.append({
@@ -1693,23 +1921,27 @@ with tab_contact:
                     "contact_month":     contact_month,
                     "revenue":           fmt_usd(df.loc[lic, contact_month]),
                     "date_contacted":    str(st.session_state.get(f"cf_{lic}_date", today_date)),
-                    "initials":          st.session_state.get(f"cf_{lic}_initials", ""),
-                    "person_contacted":  st.session_state.get(f"cf_{lic}_person", ""),
-                    "contact_method":    st.session_state.get(f"cf_{lic}_method", ""),
+                    "initials":          initials,
+                    "person_contacted":  person,
+                    "contact_method":    method,
                     "commitment_made":   commitment,
                     "committed_cadence": cadence,
                     "committed_amount":  amount,
                     "notes":             notes,
                 })
         if rows_to_save:
-            upsert_contact_log_rows(rows_to_save)
-            st.success(f"Saved {len(rows_to_save)} entr{'y' if len(rows_to_save)==1 else 'ies'} to team log.")
+            try:
+                upsert_contact_log_rows(rows_to_save)
+            except Exception as e:
+                st.error(f"Could not save contact log: {e}")
+            else:
+                st.success(f"Saved {len(rows_to_save)} entr{'y' if len(rows_to_save)==1 else 'ies'} to team log.")
         else:
             st.info("No entries to save — fill in at least one field per store.")
 
     # Build CSV from current widget state
     _csv_rows = []
-    for lic in top30_lics:
+    for lic in cf_pool:
         _csv_rows.append({
             "License":           lic,
             "Store Name":        df.loc[lic, "Store Name"],
@@ -1733,7 +1965,7 @@ with tab_contact:
     )
 
     if reset_col.button("Reset", use_container_width=True):
-        for lic in top30_lics:
+        for lic in cf_pool:
             for field in ("date", "initials", "person", "method",
                           "commitment", "cadence", "amount", "notes"):
                 st.session_state.pop(f"cf_{lic}_{field}", None)
@@ -1743,8 +1975,37 @@ with tab_contact:
     st.divider()
     st.subheader("Team Contact Log")
     st.caption("All saved contact entries across all months, visible to the entire team.")
+    st.caption(f"Storage: **{contact_log_backend_label()}**")
+    if not contact_sheet_configured():
+        st.warning("Contact log is using local SQLite fallback. On Streamlit Cloud this is not durable; configure Google Sheets secrets before relying on it.")
 
-    log_df = load_contact_log()
+    with st.expander("Restore contact log from CSV"):
+        restore_file = st.file_uploader(
+            "Upload team-contact-log.csv or store-contacts CSV",
+            type=["csv"],
+            key="contact_log_restore_upload",
+        )
+        if st.button("Import CSV to Team Log", use_container_width=True, key="contact_log_restore_btn"):
+            if restore_file is None:
+                st.warning("Choose a CSV file first.")
+            else:
+                try:
+                    restore_df = pd.read_csv(restore_file)
+                    restore_rows = _meaningful_contact_rows(restore_df)
+                    if not restore_rows:
+                        st.warning("No meaningful contact entries found in that CSV.")
+                    else:
+                        upsert_contact_log_rows(restore_rows)
+                        st.success(f"Imported {len(restore_rows)} contact entr{'y' if len(restore_rows)==1 else 'ies'}.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Could not import contact CSV: {e}")
+
+    try:
+        log_df = load_contact_log()
+    except Exception as e:
+        st.error(f"Could not load team contact log: {e}")
+        log_df = pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
     if log_df.empty:
         st.info("No entries saved yet. Fill in the form above and click **Save to Team Log**.")
     else:
@@ -1780,8 +2041,12 @@ with tab_contact:
             use_container_width=True,
         )
         if clear_col.button("Clear All", use_container_width=True):
-            clear_contact_log()
-            st.rerun()
+            try:
+                clear_contact_log()
+            except Exception as e:
+                st.error(f"Could not clear contact log: {e}")
+            else:
+                st.rerun()
 
         # ── Edit / Delete individual entry ────────────────────────────────────
         st.divider()
@@ -1838,26 +2103,34 @@ with tab_contact:
 
             save_ed_col, del_ed_col = st.columns([1, 1])
             if save_ed_col.button("Save Changes", type="primary", use_container_width=True, key="log_ed_save"):
-                upsert_contact_log_rows([{
-                    "license":           sel_row["License"],
-                    "store_name":        sel_row["Store Name"],
-                    "contact_month":     sel_row["Month"],
-                    "revenue":           sel_row.get("Revenue"),
-                    "date_contacted":    ed_date.strftime("%Y-%m-%d"),
-                    "commitment_made":   ed_commit,
-                    "committed_cadence": ed_cadence,
-                    "committed_amount":  ed_amount,
-                    "notes":             ed_notes,
-                    "initials":          ed_initials,
-                    "person_contacted":  ed_person,
-                    "contact_method":    ed_method,
-                }])
-                st.success("Entry updated.")
-                st.rerun()
+                try:
+                    upsert_contact_log_rows([{
+                        "license":           sel_row["License"],
+                        "store_name":        sel_row["Store Name"],
+                        "contact_month":     sel_row["Month"],
+                        "revenue":           sel_row.get("Revenue"),
+                        "date_contacted":    ed_date.strftime("%Y-%m-%d"),
+                        "commitment_made":   ed_commit,
+                        "committed_cadence": ed_cadence,
+                        "committed_amount":  ed_amount,
+                        "notes":             ed_notes,
+                        "initials":          ed_initials,
+                        "person_contacted":  ed_person,
+                        "contact_method":    ed_method,
+                    }])
+                except Exception as e:
+                    st.error(f"Could not update entry: {e}")
+                else:
+                    st.success("Entry updated.")
+                    st.rerun()
             if del_ed_col.button("Delete Entry", type="secondary", use_container_width=True, key="log_ed_delete"):
-                delete_contact_log_entry(sel_row["License"], sel_row["Month"])
-                st.success(f"Deleted entry for {sel_row['Store Name']} · {sel_row['Month']}.")
-                st.rerun()
+                try:
+                    delete_contact_log_entry(sel_row["License"], sel_row["Month"])
+                except Exception as e:
+                    st.error(f"Could not delete entry: {e}")
+                else:
+                    st.success(f"Deleted entry for {sel_row['Store Name']} · {sel_row['Month']}.")
+                    st.rerun()
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Order Activity                                            ║
