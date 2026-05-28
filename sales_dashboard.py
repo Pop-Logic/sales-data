@@ -1291,8 +1291,16 @@ def build_share_by_store_pdf(df, month, sort_by, top_lics=None, threshold=None, 
 st.markdown(f"""
 <style>
   .metric-card {{background:#f0f6ff;border-radius:8px;padding:12px 16px;margin-bottom:4px}}
-  .metric-label {{font-size:11px;color:#666;margin:0}}
+  .metric-label {{font-size:11px;color:#111;margin:0}}
   .metric-value {{font-size:22px;font-weight:600;color:#111;margin:0}}
+  [data-testid="stMetric"] label,
+  [data-testid="stMetric"] label p,
+  [data-testid="stWidgetLabel"],
+  [data-testid="stWidgetLabel"] label,
+  [data-testid="stWidgetLabel"] p,
+  [data-testid="stWidgetLabel"] span {{
+    color:#111 !important;
+  }}
   [data-testid="stMetric"] label {{font-size:12px !important}}
 </style>
 """, unsafe_allow_html=True)
