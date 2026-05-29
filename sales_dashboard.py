@@ -2148,6 +2148,25 @@ with tab_contact:
             return _date_or_default(custom_date, base_date)
         return None
 
+    def _set_resolved_alert_date(lic, interval, alert_date):
+        key = f"cf_{lic}_alert_resolved_date"
+        if interval and alert_date:
+            st.session_state[key] = alert_date.isoformat()
+            return alert_date
+        st.session_state.pop(key, None)
+        return None
+
+    def _current_alert_date(lic, interval, base_date):
+        resolved = st.session_state.get(f"cf_{lic}_alert_resolved_date")
+        alert_date = _date_or_default(resolved, None) if resolved else None
+        if alert_date:
+            return alert_date
+        return _alert_date_for(
+            interval,
+            base_date,
+            st.session_state.get(f"cf_{lic}_alert_date"),
+        )
+
     # Search filter
     contact_search = st.text_input(
         "Search stores", placeholder="Store name or license…", key="contact_search"
@@ -2237,6 +2256,7 @@ with tab_contact:
                 alert_cols[2].warning("Select DK or CH initials to route the alert.")
             else:
                 alert_cols[2].caption("No follow-up alert scheduled.")
+            _set_resolved_alert_date(lic, alert_interval, next_alert_date)
 
             st.text_area("Notes", value=_saved(lic, "Notes"),
                          height=120, key=f"cf_{lic}_notes")
@@ -2257,8 +2277,7 @@ with tab_contact:
             method     = st.session_state.get(f"cf_{lic}_method", "")
             alert_interval = st.session_state.get(f"cf_{lic}_alert_interval", "")
             contacted_date = st.session_state.get(f"cf_{lic}_date", today_date)
-            alert_custom_date = st.session_state.get(f"cf_{lic}_alert_date")
-            alert_date = _alert_date_for(alert_interval, contacted_date, alert_custom_date)
+            alert_date = _current_alert_date(lic, alert_interval, contacted_date)
             alert_recipient = ALERT_RECIPIENTS.get(initials, "") if alert_interval else ""
             alert_cc = ALERT_CC if alert_recipient else ""
             if alert_interval and not alert_recipient:
@@ -2309,10 +2328,10 @@ with tab_contact:
     _csv_rows = []
     for lic in cf_pool:
         _csv_alert_interval = st.session_state.get(f"cf_{lic}_alert_interval", "")
-        _csv_alert_date = _alert_date_for(
+        _csv_alert_date = _current_alert_date(
+            lic,
             _csv_alert_interval,
             st.session_state.get(f"cf_{lic}_date", today_date),
-            st.session_state.get(f"cf_{lic}_alert_date"),
         )
         _csv_alert_recipient = (
             ALERT_RECIPIENTS.get(st.session_state.get(f"cf_{lic}_initials", ""), "")
@@ -2348,7 +2367,7 @@ with tab_contact:
         for lic in cf_pool:
             for field in ("date", "initials", "person", "method",
                           "commitment", "cadence", "amount", "alert_interval",
-                          "alert_date", "alert_date_display", "notes"):
+                          "alert_date", "alert_date_display", "alert_resolved_date", "notes"):
                 st.session_state.pop(f"cf_{lic}_{field}", None)
         st.rerun()
 
