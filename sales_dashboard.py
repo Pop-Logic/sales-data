@@ -2835,11 +2835,70 @@ with tab_orders:
             released_view.get("Units", 0), errors="coerce"
         ).fillna(0)
         released_view = released_view[released_view["_Sales"] > 0].copy()
+        release_date_filter_applied = False
 
         if released_view.empty:
             release_totals_col.caption("No manifested sales")
             st.info("No manifested sales in the current filters.")
         else:
+            manifest_date_col = first_existing_column(released_view, MANIFEST_DATE_COLUMNS)
+            if manifest_date_col:
+                released_view["_Release Date"] = pd.to_datetime(
+                    released_view[manifest_date_col], errors="coerce"
+                )
+            else:
+                released_view["_Release Date"] = pd.NaT
+            if "Submitted Date" in released_view.columns:
+                released_view["_Release Date"] = released_view["_Release Date"].fillna(
+                    released_view["Submitted Date"]
+                )
+
+            release_dates = released_view["_Release Date"].dropna()
+            if release_dates.empty:
+                release_from_default = min(date_from, date_to)
+                release_to_default = max(date_from, date_to)
+            else:
+                release_from_default = release_dates.min().date()
+                release_to_default = release_dates.max().date()
+            for release_key, release_default in (
+                ("released_from_date", release_from_default),
+                ("released_to_date", release_to_default),
+            ):
+                existing_release_date = st.session_state.get(release_key)
+                try:
+                    outside_range = (
+                        existing_release_date is not None
+                        and (
+                            existing_release_date < release_from_default
+                            or existing_release_date > release_to_default
+                        )
+                    )
+                except TypeError:
+                    outside_range = True
+                if outside_range:
+                    st.session_state[release_key] = release_default
+            rel_f1, rel_f2, _ = st.columns([1, 1, 3])
+            release_from = rel_f1.date_input(
+                "Released from",
+                value=release_from_default,
+                min_value=release_from_default,
+                max_value=release_to_default,
+                key="released_from_date",
+            )
+            release_to = rel_f2.date_input(
+                "Released to",
+                value=release_to_default,
+                min_value=release_from_default,
+                max_value=release_to_default,
+                key="released_to_date",
+            )
+            release_start, release_end = min(release_from, release_to), max(release_from, release_to)
+            released_view = released_view[
+                released_view["_Release Date"].dt.date.between(release_start, release_end)
+            ].copy()
+            release_date_filter_applied = True
+
+        if not released_view.empty:
             brand_totals = released_view.groupby("Brand")["_Sales"].sum()
             preferred_brand_order = BRANDS + ["Bulk", "Other"]
             ordered_brands = [
@@ -2859,17 +2918,6 @@ with tab_orders:
                 + "</div>",
                 unsafe_allow_html=True,
             )
-            manifest_date_col = first_existing_column(released_view, MANIFEST_DATE_COLUMNS)
-            if manifest_date_col:
-                released_view["_Release Date"] = pd.to_datetime(
-                    released_view[manifest_date_col], errors="coerce"
-                )
-            else:
-                released_view["_Release Date"] = pd.NaT
-            if "Submitted Date" in released_view.columns:
-                released_view["_Release Date"] = released_view["_Release Date"].fillna(
-                    released_view["Submitted Date"]
-                )
 
             released_summary = (
                 released_view.groupby(["_Release Date", "Client", "License #", "Brand"], dropna=False)
@@ -2909,6 +2957,9 @@ with tab_orders:
                 f"{len(released_summary)} release row{'s' if len(released_summary) != 1 else ''} · "
                 f"{fmt_usd(released_summary['Sales'].sum())} manifested sales"
             )
+        elif release_date_filter_applied:
+            release_totals_col.caption("No manifested sales in release date range")
+            st.info("No manifested sales in the selected release date range.")
 
     st.markdown("#### Lapsed Stores")
     _lapsed_window = st.number_input(
