@@ -1030,9 +1030,13 @@ def contact_log_backend_label():
 def upsert_contact_log_rows(rows: list[dict]):
     """Insert or replace contact log entries, unique per license+month."""
     if contact_sheet_configured():
-        return _upsert_contact_log_sheet(rows)
-    return _upsert_contact_log_sqlite(rows)
+        result = _upsert_contact_log_sheet(rows)
+    else:
+        result = _upsert_contact_log_sqlite(rows)
+    load_contact_log.clear()
+    return result
 
+@st.cache_data(ttl=60, show_spinner=False)
 def load_contact_log() -> pd.DataFrame:
     if contact_sheet_configured():
         return _contact_log_from_sheet()
@@ -1049,6 +1053,7 @@ def delete_contact_log_entry(license_id: str, month: str):
             & (current["Month"].apply(canonical_month_label) == key_month)
         )
         _write_contact_log_sheet(current[keep])
+        load_contact_log.clear()
         return
     init_storage()
     with sqlite3.connect(storage_path()) as conn:
@@ -1056,14 +1061,17 @@ def delete_contact_log_entry(license_id: str, month: str):
             "DELETE FROM contact_log WHERE license = ? AND contact_month = ?",
             (license_id, month)
         )
+    load_contact_log.clear()
 
 def clear_contact_log():
     if contact_sheet_configured():
         _write_contact_log_sheet(pd.DataFrame(columns=CONTACT_LOG_COLUMNS))
+        load_contact_log.clear()
         return
     init_storage()
     with sqlite3.connect(storage_path()) as conn:
         conn.execute("DELETE FROM contact_log")
+    load_contact_log.clear()
 
 # ── Chart helpers (return PNG BytesIO for embedding in PDF) ───────────────────
 
