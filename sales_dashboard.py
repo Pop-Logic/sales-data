@@ -2818,12 +2818,6 @@ with tab_orders:
         released_view = released_source.copy()
         if status_filter != "All" and "Status" in released_view.columns:
             released_view = released_view[released_view["Status"] == status_filter]
-        if "Submitted Date" in released_view.columns:
-            released_view = released_view[
-                released_view["Submitted Date"].dt.date.between(
-                    min(date_from, date_to), max(date_from, date_to)
-                )
-            ]
         released_view["_Manifest Reference"] = released_view[manifest_col].apply(clean_reference)
         released_view = released_view[
             released_view["_Manifest Reference"].astype(str).str.strip().ne("")
@@ -2879,14 +2873,14 @@ with tab_orders:
                     st.session_state[release_key] = release_default
             rel_f1, rel_f2, _ = st.columns([1, 1, 3])
             release_from = rel_f1.date_input(
-                "Released from",
+                "Release Date From",
                 value=release_from_default,
                 min_value=release_from_default,
                 max_value=release_to_default,
                 key="released_from_date",
             )
             release_to = rel_f2.date_input(
-                "Released to",
+                "Release Date To",
                 value=release_to_default,
                 min_value=release_from_default,
                 max_value=release_to_default,
