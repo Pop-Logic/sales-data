@@ -2187,92 +2187,84 @@ with tab_contact:
         or _q in lic.lower()
     ]
 
-    for rank, lic in enumerate(display_lics, 1):
-        store_name = df.loc[lic, "Store Name"]
-        revenue = cf_display_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month]))
-        has_saved = lic in _saved_map
-        label = f"{'✅ ' if has_saved else ''}#{rank}  {store_name}  ·  {lic}  ·  {revenue}"
-        with st.expander(label):
-            _date_default = today_date
-            _date_str = _saved(lic, "Date Contacted")
-            if _date_str:
-                try:
-                    _date_default = datetime.strptime(str(_date_str)[:10], "%Y-%m-%d").date()
-                except Exception:
-                    pass
+    save_clicked = False
+    with st.form("store_contact_form", clear_on_submit=False):
+        for rank, lic in enumerate(display_lics, 1):
+            store_name = df.loc[lic, "Store Name"]
+            revenue = cf_display_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month]))
+            has_saved = lic in _saved_map
+            label = f"{'✅ ' if has_saved else ''}#{rank}  {store_name}  ·  {lic}  ·  {revenue}"
+            with st.expander(label):
+                _date_default = today_date
+                _date_str = _saved(lic, "Date Contacted")
+                if _date_str:
+                    try:
+                        _date_default = datetime.strptime(str(_date_str)[:10], "%Y-%m-%d").date()
+                    except Exception:
+                        pass
 
-            r1a, r1b, r1c, r1d = st.columns(4)
-            r1a.date_input("Date Contacted", value=_date_default,
-                           format="MM/DD/YYYY", key=f"cf_{lic}_date")
-            cur_initials = r1b.selectbox("Initials", INITIALS_OPTIONS,
-                                         index=_sel_idx(INITIALS_OPTIONS, _saved(lic, "Initials")),
-                                         key=f"cf_{lic}_initials")
-            r1c.text_input("Person Contacted", value=_saved(lic, "Person Contacted"),
-                           key=f"cf_{lic}_person")
-            r1d.selectbox("Contact Method", METHOD_OPTIONS,
-                          index=_sel_idx(METHOD_OPTIONS, _saved(lic, "Contact Method")),
-                          key=f"cf_{lic}_method")
+                r1a, r1b, r1c, r1d = st.columns(4)
+                r1a.date_input("Date Contacted", value=_date_default,
+                               format="MM/DD/YYYY", key=f"cf_{lic}_date")
+                cur_initials = r1b.selectbox("Initials", INITIALS_OPTIONS,
+                                             index=_sel_idx(INITIALS_OPTIONS, _saved(lic, "Initials")),
+                                             key=f"cf_{lic}_initials")
+                r1c.text_input("Person Contacted", value=_saved(lic, "Person Contacted"),
+                               key=f"cf_{lic}_person")
+                r1d.selectbox("Contact Method", METHOD_OPTIONS,
+                              index=_sel_idx(METHOD_OPTIONS, _saved(lic, "Contact Method")),
+                              key=f"cf_{lic}_method")
 
-            r2a, r2b, r2c = st.columns(3)
-            r2a.selectbox("Commitment Made", ["No", "Yes"],
-                          index=_sel_idx(["No", "Yes"], _saved(lic, "Commitment", "No")),
-                          key=f"cf_{lic}_commitment")
-            r2b.selectbox("Committed Cadence", CADENCE_OPTIONS,
-                          index=_sel_idx(CADENCE_OPTIONS, _saved(lic, "Cadence")),
-                          key=f"cf_{lic}_cadence")
-            r2c.selectbox("Committed Amount", AMOUNT_OPTIONS,
-                          index=_sel_idx(AMOUNT_OPTIONS, _saved(lic, "Committed Amount")),
-                          key=f"cf_{lic}_amount")
+                r2a, r2b, r2c = st.columns(3)
+                r2a.selectbox("Commitment Made", ["No", "Yes"],
+                              index=_sel_idx(["No", "Yes"], _saved(lic, "Commitment", "No")),
+                              key=f"cf_{lic}_commitment")
+                r2b.selectbox("Committed Cadence", CADENCE_OPTIONS,
+                              index=_sel_idx(CADENCE_OPTIONS, _saved(lic, "Cadence")),
+                              key=f"cf_{lic}_cadence")
+                r2c.selectbox("Committed Amount", AMOUNT_OPTIONS,
+                              index=_sel_idx(AMOUNT_OPTIONS, _saved(lic, "Committed Amount")),
+                              key=f"cf_{lic}_amount")
 
-            _saved_alert_interval = _saved(lic, "Next Outreach")
-            _saved_alert_date = _date_or_default(_saved(lic, "Next Outreach Date"), today_date + timedelta(days=14))
-            alert_cols = st.columns([1, 1, 2])
-            alert_interval = alert_cols[0].selectbox(
-                "Next Outreach Alert",
-                ALERT_OPTIONS,
-                index=_sel_idx(ALERT_OPTIONS, _saved_alert_interval),
-                key=f"cf_{lic}_alert_interval",
-            )
-            _contacted_for_alert = st.session_state.get(f"cf_{lic}_date", _date_default)
-            if alert_interval == "Other":
-                next_alert_date = alert_cols[1].date_input(
-                    "Next Outreach Date",
+                _saved_alert_interval = _saved(lic, "Next Outreach")
+                _saved_alert_date = _date_or_default(_saved(lic, "Next Outreach Date"), today_date + timedelta(days=14))
+                alert_cols = st.columns([1, 1, 2])
+                alert_interval = alert_cols[0].selectbox(
+                    "Next Outreach Alert",
+                    ALERT_OPTIONS,
+                    index=_sel_idx(ALERT_OPTIONS, _saved_alert_interval),
+                    key=f"cf_{lic}_alert_interval",
+                )
+                _contacted_for_alert = st.session_state.get(f"cf_{lic}_date", _date_default)
+                custom_alert_date = alert_cols[1].date_input(
+                    "Custom Outreach Date",
                     value=_saved_alert_date,
                     format="MM/DD/YYYY",
                     key=f"cf_{lic}_alert_date",
+                    help="Used when Next Outreach Alert is Other.",
                 )
-            else:
-                next_alert_date = _alert_date_for(alert_interval, _contacted_for_alert)
-                if next_alert_date:
-                    alert_cols[1].text_input(
-                        "Next Outreach Date",
-                        value=next_alert_date.strftime("%m/%d/%Y"),
-                        disabled=True,
-                        key=f"cf_{lic}_alert_date_display",
-                    )
+                next_alert_date = _alert_date_for(alert_interval, _contacted_for_alert, custom_alert_date)
+                alert_recipient = ALERT_RECIPIENTS.get(cur_initials, "")
+                if alert_interval and alert_recipient:
+                    alert_cols[2].caption(f"Monday digest to {alert_recipient}; CC {ALERT_CC}")
+                elif alert_interval:
+                    alert_cols[2].warning("Select DK or CH initials to route the alert.")
                 else:
-                    alert_cols[1].text_input(
-                        "Next Outreach Date",
-                        value="",
-                        disabled=True,
-                        key=f"cf_{lic}_alert_date_display",
-                    )
-            alert_recipient = ALERT_RECIPIENTS.get(cur_initials, "")
-            if alert_interval and alert_recipient:
-                alert_cols[2].caption(f"Monday digest to {alert_recipient}; CC {ALERT_CC}")
-            elif alert_interval:
-                alert_cols[2].warning("Select DK or CH initials to route the alert.")
-            else:
-                alert_cols[2].caption("No follow-up alert scheduled.")
-            _set_resolved_alert_date(lic, alert_interval, next_alert_date)
+                    alert_cols[2].caption("No follow-up alert scheduled.")
+                _set_resolved_alert_date(lic, alert_interval, next_alert_date)
 
-            st.text_area("Notes", value=_saved(lic, "Notes"),
-                         height=120, key=f"cf_{lic}_notes")
+                st.text_area("Notes", value=_saved(lic, "Notes"),
+                             height=120, key=f"cf_{lic}_notes")
 
-    st.divider()
-    save_col, dl_col, reset_col = st.columns([2, 2, 1])
+        st.divider()
+        save_col, _ = st.columns([2, 3])
+        save_clicked = save_col.form_submit_button(
+            "💾 Save to Team Log",
+            use_container_width=True,
+            type="primary",
+        )
 
-    if save_col.button("💾 Save to Team Log", use_container_width=True, type="primary"):
+    if save_clicked:
         rows_to_save = []
         alert_missing_recipients = []
         for lic in cf_pool:
@@ -2363,6 +2355,7 @@ with tab_contact:
             "Alert CC":          ALERT_CC if _csv_alert_recipient else "",
             "Notes":             st.session_state.get(f"cf_{lic}_notes", ""),
         })
+    dl_col, reset_col = st.columns([2, 1])
     dl_col.download_button(
         "⬇ Download as CSV",
         data=pd.DataFrame(_csv_rows).to_csv(index=False),
