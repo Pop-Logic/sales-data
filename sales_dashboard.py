@@ -887,16 +887,28 @@ def _contact_sheet_client():
 
     user_info = oauth_info()
     if user_info:
+        token_uri = str(user_info.get("token_uri", "https://oauth2.googleapis.com/token")).strip()
+        if token_uri != "https://oauth2.googleapis.com/token":
+            raise RuntimeError(
+                "Invalid google_oauth.token_uri. Use exactly "
+                "'https://oauth2.googleapis.com/token' or remove token_uri from Streamlit secrets."
+            )
         creds = OAuthCredentials(
             token=user_info.get("access_token") or user_info.get("token"),
             refresh_token=user_info["refresh_token"],
-            token_uri=user_info.get("token_uri", "https://oauth2.googleapis.com/token"),
+            token_uri=token_uri,
             client_id=user_info["client_id"],
             client_secret=user_info["client_secret"],
             scopes=scopes,
         )
         if not creds.valid:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as exc:
+                raise RuntimeError(
+                    "Could not refresh Google OAuth credentials. Check google_oauth.client_id, "
+                    "client_secret, refresh_token, and token_uri in Streamlit secrets."
+                ) from exc
         return gspread.authorize(creds)
 
     raise RuntimeError("Google Sheets contact logging is not configured in Streamlit secrets.")

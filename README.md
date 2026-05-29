@@ -39,4 +39,4 @@ refresh_token = "..."
 token_uri = "https://oauth2.googleapis.com/token"
 ```
 
-Do not store a short-lived `Authorization: Bearer ...` access token; it expires quickly. If both auth methods are configured, the service account is used first. If neither method is configured, the app falls back to local SQLite, which is not durable on Streamlit Cloud.
+The `token_uri` value must be exactly `https://oauth2.googleapis.com/token`; do not use the OAuth Playground URL there. Do not store a short-lived `Authorization: Bearer ...` access token; it expires quickly. If both auth methods are configured, the service account is used first. If neither method is configured, the app falls back to local SQLite, which is not durable on Streamlit Cloud.
