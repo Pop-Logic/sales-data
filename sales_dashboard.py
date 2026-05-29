@@ -1540,7 +1540,7 @@ st.markdown(f"""
 
 # ── Sidebar: data input ────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Data Input")
+    st.header("Monthly Store Data Input")
     st.caption("Paste tab-separated data copied from Excel or Google Sheets. Column A = license, Column B = store name. Totals/Sum/YTD columns are auto-detected and removed.")
 
     sample = "\n".join([
