@@ -2175,6 +2175,51 @@ with tab_contact:
             st.session_state.get(f"cf_{lic}_alert_date"),
         )
 
+    def _contact_row_for_lic(lic):
+        commitment = st.session_state.get(f"cf_{lic}_commitment", "No")
+        cadence = st.session_state.get(f"cf_{lic}_cadence", "")
+        amount = st.session_state.get(f"cf_{lic}_amount", "")
+        notes = st.session_state.get(f"cf_{lic}_notes", "")
+        initials = st.session_state.get(f"cf_{lic}_initials", "")
+        person = st.session_state.get(f"cf_{lic}_person", "")
+        method = st.session_state.get(f"cf_{lic}_method", "")
+        alert_interval = st.session_state.get(f"cf_{lic}_alert_interval", "")
+        contacted_date = st.session_state.get(f"cf_{lic}_date", today_date)
+        alert_date = _current_alert_date(lic, alert_interval, contacted_date)
+        alert_recipient = ALERT_RECIPIENTS.get(initials, "") if alert_interval else ""
+        alert_cc = ALERT_CC if alert_recipient else ""
+        has_entry = (
+            commitment == "Yes"
+            or bool(str(cadence or "").strip())
+            or bool(str(amount or "").strip())
+            or bool(str(notes or "").strip())
+            or bool(str(initials or "").strip())
+            or bool(str(person or "").strip())
+            or bool(str(method or "").strip())
+            or bool(str(alert_interval or "").strip())
+        )
+        if not has_entry:
+            return None, bool(alert_interval and not alert_recipient)
+        return {
+            "license":           lic,
+            "store_name":        df.loc[lic, "Store Name"],
+            "contact_month":     contact_month,
+            "revenue":           cf_log_revenue_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month])),
+            "date_contacted":    str(contacted_date),
+            "initials":          initials,
+            "person_contacted":  person,
+            "contact_method":    method,
+            "commitment_made":   commitment,
+            "committed_cadence": cadence,
+            "committed_amount":  amount,
+            "notes":             notes,
+            "next_outreach":     alert_interval,
+            "next_outreach_date": alert_date.isoformat() if alert_date else "",
+            "alert_recipient":   alert_recipient,
+            "alert_cc":          alert_cc,
+            "alert_sent_week":   _saved(lic, "Alert Sent Week"),
+        }, bool(alert_interval and not alert_recipient)
+
     # Search filter
     contact_search = st.text_input(
         "Search stores", placeholder="Store name or license…", key="contact_search"
@@ -2187,14 +2232,13 @@ with tab_contact:
         or _q in lic.lower()
     ]
 
-    save_clicked = False
-    with st.form("store_contact_form", clear_on_submit=False):
-        for rank, lic in enumerate(display_lics, 1):
-            store_name = df.loc[lic, "Store Name"]
-            revenue = cf_display_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month]))
-            has_saved = lic in _saved_map
-            label = f"{'✅ ' if has_saved else ''}#{rank}  {store_name}  ·  {lic}  ·  {revenue}"
-            with st.expander(label):
+    for rank, lic in enumerate(display_lics, 1):
+        store_name = df.loc[lic, "Store Name"]
+        revenue = cf_display_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month]))
+        has_saved = lic in _saved_map
+        label = f"{'✅ ' if has_saved else ''}#{rank}  {store_name}  ·  {lic}  ·  {revenue}"
+        with st.expander(label):
+            with st.form(f"store_contact_form_{lic}", clear_on_submit=False):
                 _date_default = today_date
                 _date_str = _saved(lic, "Date Contacted")
                 if _date_str:
@@ -2244,85 +2288,30 @@ with tab_contact:
                     help="Used when Next Outreach Alert is Other.",
                 )
                 next_alert_date = _alert_date_for(alert_interval, _contacted_for_alert, custom_alert_date)
-                alert_recipient = ALERT_RECIPIENTS.get(cur_initials, "")
-                if alert_interval and alert_recipient:
-                    alert_cols[2].caption(f"Monday digest to {alert_recipient}; CC {ALERT_CC}")
-                elif alert_interval:
-                    alert_cols[2].warning("Select DK or CH initials to route the alert.")
-                else:
-                    alert_cols[2].caption("No follow-up alert scheduled.")
+                alert_cols[2].caption("Weekly digest routes from DK/CH initials when saved.")
                 _set_resolved_alert_date(lic, alert_interval, next_alert_date)
 
                 st.text_area("Notes", value=_saved(lic, "Notes"),
                              height=120, key=f"cf_{lic}_notes")
 
-        st.divider()
-        save_col, _ = st.columns([2, 3])
-        save_clicked = save_col.form_submit_button(
-            "💾 Save to Team Log",
-            use_container_width=True,
-            type="primary",
-        )
-
-    if save_clicked:
-        rows_to_save = []
-        alert_missing_recipients = []
-        for lic in cf_pool:
-            commitment = st.session_state.get(f"cf_{lic}_commitment", "No")
-            cadence    = st.session_state.get(f"cf_{lic}_cadence", "")
-            amount     = st.session_state.get(f"cf_{lic}_amount", "")
-            notes      = st.session_state.get(f"cf_{lic}_notes", "")
-            initials   = st.session_state.get(f"cf_{lic}_initials", "")
-            person     = st.session_state.get(f"cf_{lic}_person", "")
-            method     = st.session_state.get(f"cf_{lic}_method", "")
-            alert_interval = st.session_state.get(f"cf_{lic}_alert_interval", "")
-            contacted_date = st.session_state.get(f"cf_{lic}_date", today_date)
-            alert_date = _current_alert_date(lic, alert_interval, contacted_date)
-            alert_recipient = ALERT_RECIPIENTS.get(initials, "") if alert_interval else ""
-            alert_cc = ALERT_CC if alert_recipient else ""
-            if alert_interval and not alert_recipient:
-                alert_missing_recipients.append(df.loc[lic, "Store Name"])
-            has_entry  = (
-                commitment == "Yes"
-                or bool(str(cadence or "").strip())
-                or bool(str(amount or "").strip())
-                or bool(str(notes or "").strip())
-                or bool(str(initials or "").strip())
-                or bool(str(person or "").strip())
-                or bool(str(method or "").strip())
-                or bool(str(alert_interval or "").strip())
-            )
-            if has_entry:
-                rows_to_save.append({
-                    "license":           lic,
-                    "store_name":        df.loc[lic, "Store Name"],
-                    "contact_month":     contact_month,
-                    "revenue":           cf_log_revenue_by_lic.get(lic, fmt_usd(df.loc[lic, contact_month])),
-                    "date_contacted":    str(st.session_state.get(f"cf_{lic}_date", today_date)),
-                    "initials":          initials,
-                    "person_contacted":  person,
-                    "contact_method":    method,
-                    "commitment_made":   commitment,
-                    "committed_cadence": cadence,
-                    "committed_amount":  amount,
-                    "notes":             notes,
-                    "next_outreach":     alert_interval,
-                    "next_outreach_date": alert_date.isoformat() if alert_date else "",
-                    "alert_recipient":   alert_recipient,
-                    "alert_cc":          alert_cc,
-                    "alert_sent_week":   _saved(lic, "Alert Sent Week"),
-                })
-        if rows_to_save:
-            try:
-                upsert_contact_log_rows(rows_to_save)
-            except Exception as e:
-                st.error(f"Could not save contact log: {e}")
-            else:
-                st.success(f"Saved {len(rows_to_save)} entr{'y' if len(rows_to_save)==1 else 'ies'} to team log.")
-                if alert_missing_recipients:
-                    st.warning("Some alerts were not routed because initials were missing or not DK/CH.")
-        else:
-            st.info("No entries to save — fill in at least one field per store.")
+                save_this_store = st.form_submit_button(
+                    "💾 Save This Store",
+                    use_container_width=True,
+                    type="primary",
+                )
+            if save_this_store:
+                row_to_save, alert_missing_recipient = _contact_row_for_lic(lic)
+                if row_to_save:
+                    try:
+                        upsert_contact_log_rows([row_to_save])
+                    except Exception as e:
+                        st.error(f"Could not save contact log: {e}")
+                    else:
+                        st.success(f"Saved {store_name} to team log.")
+                        if alert_missing_recipient:
+                            st.warning("Alert was not routed because initials were missing or not DK/CH.")
+                else:
+                    st.info("No entry to save for this store.")
 
     # Build CSV from current widget state
     _csv_rows = []
