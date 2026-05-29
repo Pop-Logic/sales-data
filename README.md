@@ -5,7 +5,7 @@ Balaclava Sales Dashboard
 
 The sales data loads from the shared Google Sheet automatically. The Store Contact Form can also write its team contact log back to Google Sheets when Streamlit secrets are configured.
 
-Add these secrets in Streamlit Cloud:
+Preferred option: add these service-account secrets in Streamlit Cloud:
 
 ```toml
 contact_log_spreadsheet_id = "1kY5e6SXd7eQ7GJx-jg6M1R60WCCZ9I_25Eb7ZmuDKHw"
@@ -24,4 +24,19 @@ auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 client_x509_cert_url = "..."
 ```
 
-Share the Google spreadsheet with the service account `client_email` as an Editor. If these secrets are missing, the app falls back to local SQLite, which is not durable on Streamlit Cloud.
+Share the Google spreadsheet with the service account `client_email` as an Editor.
+
+Alternative option: if a service account JSON is not available, use OAuth refresh-token secrets instead:
+
+```toml
+contact_log_spreadsheet_id = "1kY5e6SXd7eQ7GJx-jg6M1R60WCCZ9I_25Eb7ZmuDKHw"
+contact_log_worksheet = "Contact Log"
+
+[google_oauth]
+client_id = "..."
+client_secret = "..."
+refresh_token = "..."
+token_uri = "https://oauth2.googleapis.com/token"
+```
+
+Do not store a short-lived `Authorization: Bearer ...` access token; it expires quickly. If both auth methods are configured, the service account is used first. If neither method is configured, the app falls back to local SQLite, which is not durable on Streamlit Cloud.

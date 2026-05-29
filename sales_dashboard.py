@@ -209,8 +209,27 @@ def service_account_info():
             pass
     return None
 
+def oauth_info():
+    for key in ("google_oauth", "gcp_oauth"):
+        try:
+            if key in st.secrets:
+                info = dict(st.secrets[key])
+                required = ("client_id", "client_secret", "refresh_token")
+                if all(str(info.get(k, "")).strip() for k in required):
+                    return info
+        except Exception:
+            pass
+    return None
+
+def contact_auth_mode():
+    if service_account_info() is not None:
+        return "service_account"
+    if oauth_info() is not None:
+        return "oauth"
+    return None
+
 def contact_sheet_configured():
-    return service_account_info() is not None
+    return contact_auth_mode() is not None
 
 def contact_sheet_id():
     configured = secret_value("contact_log_spreadsheet_id") or secret_value("contact_log_sheet_id")
@@ -850,19 +869,37 @@ def _upsert_contact_log_sqlite(rows: list[dict]):
 def _contact_sheet_client():
     try:
         import gspread
-        from google.oauth2.service_account import Credentials
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials as OAuthCredentials
+        from google.oauth2.service_account import Credentials as ServiceAccountCredentials
     except ImportError as exc:
         raise RuntimeError("Google Sheets contact logging requires gspread and google-auth.") from exc
 
-    info = service_account_info()
-    if not info:
-        raise RuntimeError("Google Sheets contact logging is not configured in Streamlit secrets.")
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    return gspread.authorize(creds)
+
+    service_info = service_account_info()
+    if service_info:
+        creds = ServiceAccountCredentials.from_service_account_info(service_info, scopes=scopes)
+        return gspread.authorize(creds)
+
+    user_info = oauth_info()
+    if user_info:
+        creds = OAuthCredentials(
+            token=user_info.get("access_token") or user_info.get("token"),
+            refresh_token=user_info["refresh_token"],
+            token_uri=user_info.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=user_info["client_id"],
+            client_secret=user_info["client_secret"],
+            scopes=scopes,
+        )
+        if not creds.valid:
+            creds.refresh(Request())
+        return gspread.authorize(creds)
+
+    raise RuntimeError("Google Sheets contact logging is not configured in Streamlit secrets.")
 
 def _worksheet_update(worksheet, values):
     try:
@@ -913,8 +950,11 @@ def _upsert_contact_log_sheet(rows: list[dict]):
     _write_contact_log_sheet(combined)
 
 def contact_log_backend_label():
-    if contact_sheet_configured():
-        return f"Google Sheets · {contact_worksheet_name()}"
+    mode = contact_auth_mode()
+    if mode == "service_account":
+        return f"Google Sheets · {contact_worksheet_name()} · service account"
+    if mode == "oauth":
+        return f"Google Sheets · {contact_worksheet_name()} · OAuth"
     return "Local SQLite fallback"
 
 def upsert_contact_log_rows(rows: list[dict]):
