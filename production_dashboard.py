@@ -122,11 +122,13 @@ def render_ppg_over_time_chart(source_df: pd.DataFrame, key_prefix: str):
         return
 
     trend_df["Product"] = trend_df["Product"].replace("nan", pd.NA)
-    trend_df["Transfer Day"] = pd.to_datetime(
+    transfer_dates = pd.to_datetime(
         trend_df["Transfer Date"],
         errors="coerce",
-    ).dt.date
-    trend_df = trend_df.dropna(subset=["Product", "Transfer Day"])
+    )
+    trend_df["Transfer Day"] = transfer_dates.dt.date
+    trend_df["Transfer Month"] = transfer_dates.dt.to_period("M").dt.to_timestamp()
+    trend_df = trend_df.dropna(subset=["Product", "Transfer Day", "Transfer Month"])
     if trend_df.empty:
         st.caption("PPG trend unavailable — Transfer Date not parsed.")
         return
@@ -177,12 +179,12 @@ def render_ppg_over_time_chart(source_df: pd.DataFrame, key_prefix: str):
         return
 
     trend = (
-        filtered.groupby(["Transfer Day", "Product"], as_index=False)
+        filtered.groupby(["Transfer Month", "Product"], as_index=False)
         .agg(Revenue=("Total", "sum"), Grams=("Units", "sum"))
     )
     trend = trend[trend["Grams"] > 0].copy()
     trend["$/gram"] = trend["Revenue"] / trend["Grams"]
-    trend["Date"] = pd.to_datetime(trend["Transfer Day"])
+    trend["Date"] = pd.to_datetime(trend["Transfer Month"])
     trend = trend.sort_values(["Date", "Product"])
 
     fig = px.line(
@@ -202,8 +204,9 @@ def render_ppg_over_time_chart(source_df: pd.DataFrame, key_prefix: str):
         legend_title="Material",
     )
     fig.update_yaxes(tickprefix="$")
+    fig.update_xaxes(tickformat="%b %Y")
     fig.update_traces(
-        hovertemplate="%{x|%b %d, %Y}<br>%{fullData.name}: $%{y:.2f}/g"
+        hovertemplate="%{x|%b %Y}<br>%{fullData.name}: $%{y:.2f}/g"
         "<br>Revenue: $%{customdata[0]:,.0f}"
         "<br>Grams: %{customdata[1]:,.0f}<extra></extra>"
     )
