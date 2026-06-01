@@ -193,6 +193,17 @@ def store_match_key(value):
         return ""
     return re.sub(r"[^A-Z0-9]", "", text)
 
+def related_match_key(left, right, min_len=5):
+    left = str(left or "")
+    right = str(right or "")
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if min(len(left), len(right)) < min_len:
+        return False
+    return left in right or right in left
+
 def normalize_year(year_text):
     year = int(year_text)
     if year < 100:
@@ -2201,12 +2212,16 @@ with tab_contact:
     _saved_map_by_store: dict = {}
     _logged_lics: set = set()
     _logged_stores: set = set()
+    _logged_lic_list: list = []
+    _logged_store_list: list = []
     if not _saved_log.empty:
         _saved_log = _saved_log.copy()
         _saved_log["_saved_sort"] = pd.to_datetime(_saved_log["Saved At"], errors="coerce")
         _saved_log = _saved_log.sort_values("_saved_sort")
         _logged_lics = {k for k in _saved_log["License"].apply(_lic_key) if k}
         _logged_stores = {k for k in _saved_log["Store Name"].apply(store_match_key) if k}
+        _logged_lic_list = sorted(_logged_lics, key=len, reverse=True)
+        _logged_store_list = sorted(_logged_stores, key=len, reverse=True)
         _contact_month_key = canonical_month_label(contact_month)
         _saved_month_keys = _saved_log["Month"].apply(canonical_month_label)
         for _, _r in _saved_log[_saved_month_keys == _contact_month_key].iterrows():
@@ -2225,7 +2240,14 @@ with tab_contact:
         )
 
     def _has_logged_contact(lic):
-        return _lic_key(lic) in _logged_lics or _store_key_for_lic(lic) in _logged_stores
+        lic_key = _lic_key(lic)
+        store_key = _store_key_for_lic(lic)
+        return (
+            lic_key in _logged_lics
+            or store_key in _logged_stores
+            or any(related_match_key(lic_key, saved_key, min_len=5) for saved_key in _logged_lic_list)
+            or any(related_match_key(store_key, saved_key, min_len=8) for saved_key in _logged_store_list)
+        )
 
     def _saved(lic, field, default=""):
         v = _saved_entry(lic).get(field, default)
