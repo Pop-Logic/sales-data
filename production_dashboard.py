@@ -121,6 +121,32 @@ def save_setting(key: str, value: str):
     con.commit()
     con.close()
 
+PROD_CONFIG_KEYS = {
+    "sheet_url": ("production_sheet_url", "prod_sheet_url", "PRODUCTION_SHEET_URL"),
+    "gid_b13": ("production_gid_b13", "prod_gid_b13", "PRODUCTION_GID_B13"),
+    "gid_b9": ("production_gid_b9", "prod_gid_b9", "PRODUCTION_GID_B9"),
+    "gid_assign": ("production_gid_assign", "prod_gid_assign", "PRODUCTION_GID_ASSIGN"),
+}
+
+def _config_secret_or_env(key: str, default: str = "") -> str:
+    for candidate in PROD_CONFIG_KEYS.get(key, ()):
+        try:
+            value = st.secrets.get(candidate, "")
+            if str(value).strip():
+                return str(value).strip()
+        except Exception:
+            pass
+        value = os.environ.get(candidate)
+        if value and value.strip():
+            return value.strip()
+    return default
+
+def saved_or_configured_setting(settings: dict, key: str, default: str = "") -> str:
+    saved = str(settings.get(key, "") or "").strip()
+    if saved:
+        return saved
+    return _config_secret_or_env(key, default)
+
 # ── Data loading ──────────────────────────────────────────────────────────────
 def load_assignments_from_sheet(url: str, gid: str) -> dict:
     """Load strain→brand mapping from a two-column sheet tab (Strain, Brand)."""
@@ -193,6 +219,10 @@ def parse_tab(raw: pd.DataFrame, facility: str) -> pd.DataFrame:
 
 # ── Sidebar — Data Source ─────────────────────────────────────────────────────
 _saved = load_settings()
+_default_sheet_url = saved_or_configured_setting(_saved, "sheet_url")
+_default_gid_b13 = saved_or_configured_setting(_saved, "gid_b13", "0")
+_default_gid_b9 = saved_or_configured_setting(_saved, "gid_b9")
+_default_gid_assign = saved_or_configured_setting(_saved, "gid_assign")
 
 with st.sidebar:
     st.header("Data Source")
@@ -202,14 +232,14 @@ with st.sidebar:
     )
     sheet_url = st.text_input(
         "Google Sheet URL",
-        value=_saved.get("sheet_url", ""),
+        value=_default_sheet_url,
         placeholder="https://docs.google.com/spreadsheets/d/…",
         key="prod_url",
     )
     col_a, col_b = st.columns(2)
-    gid_b13      = col_a.text_input("Block 13 GID",    value=_saved.get("gid_b13",      "0"), key="prod_gid_b13")
-    gid_b9       = col_b.text_input("B-9 GID",         value=_saved.get("gid_b9",       ""),  key="prod_gid_b9")
-    gid_assign   = st.text_input(   "Assignments GID",  value=_saved.get("gid_assign",   ""),
+    gid_b13      = col_a.text_input("Block 13 GID",    value=_default_gid_b13, key="prod_gid_b13")
+    gid_b9       = col_b.text_input("B-9 GID",         value=_default_gid_b9,  key="prod_gid_b9")
+    gid_assign   = st.text_input(   "Assignments GID",  value=_default_gid_assign,
                                     placeholder="GID of a tab with Strain and Brand columns",
                                     key="prod_gid_assign")
 
