@@ -170,6 +170,21 @@ def clean_reference(value):
         return str(int(number))
     return text
 
+def license_match_key(value):
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip().upper()
+    if text.lower() in {"", "nan", "none"}:
+        return ""
+    if re.fullmatch(r"\d+\.0+", text):
+        text = text.split(".", 1)[0]
+    text = re.sub(r"^(LICENSE|LIC)\s*#?\s*", "", text)
+    text = re.sub(r"[^A-Z0-9]", "", text)
+    text = re.sub(r"^(LICENSE|LIC)", "", text)
+    if text.isdigit():
+        return text.lstrip("0") or "0"
+    return text
+
 def normalize_year(year_text):
     year = int(year_text)
     if year < 100:
@@ -523,7 +538,7 @@ def contact_status_by_license(contact_log_df):
     )
     contact_log_df = contact_log_df.assign(_saved_sort=contact_sort).sort_values("_saved_sort")
     for _, row in contact_log_df.iterrows():
-        lic_key = str(row.get("License", "")).strip()
+        lic_key = license_match_key(row.get("License", ""))
         if not lic_key:
             continue
         commitment = str(row.get("Commitment", "")).strip().lower()
@@ -573,7 +588,7 @@ def build_lapsed_store_df(df, months, contact_log_df=None):
             "Last_Month_Revenue": last_month_revenue,
             "Monthly_Run_Rate": monthly_run_rate,
             "Active_Months": len(active_months),
-            "Contact_Status": contact_status_map.get(str(lic), "Not Contacted"),
+            "Contact_Status": contact_status_map.get(license_match_key(lic), "Not Contacted"),
             "Revenue": df.loc[lic, months].sum(),
         })
     return pd.DataFrame(
@@ -2165,7 +2180,7 @@ with tab_contact:
         st.warning(st.session_state.pop("contact_log_warning"))
 
     def _lic_key(lic):
-        return str(lic or "").strip()
+        return license_match_key(lic)
 
     # Saved entries for this month pre-populate widgets.
     _saved_map: dict = {}
@@ -3568,7 +3583,7 @@ with tab_mom:
             movers_chart = movers.copy()
             movers_chart["License"] = movers_chart["License"].astype(str)
             movers_chart["Contact Status"] = movers_chart["License"].apply(
-                lambda lic: _mom_contact_status.get(str(lic), "Not Contacted")
+                lambda lic: _mom_contact_status.get(license_match_key(lic), "Not Contacted")
             )
             movers_chart["Store Label"] = movers_chart.apply(
                 lambda r: (
