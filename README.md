@@ -51,3 +51,13 @@ The contact form stores next-outreach reminder fields in the `Contact Log` works
 4. Run `createWeeklyOutreachDigestTrigger` once and approve permissions.
 
 The trigger runs every Monday morning and sends one digest per recipient for stores whose `Next Outreach Date` falls within that Monday-Sunday week. DK routes to `danny@balaclavabrands.com`, CH routes to `chris@balaclavabrands.com`, and all alerts CC `geoff@ksavagesupply.com` and `roger@ksavagesupply.com`.
+
+## Territory map
+
+The Territory Map tab accepts a store-location CSV/XLSX upload or a Google Sheet with these columns:
+
+```text
+License, Store Name, Address, City, State, Zip, Latitude, Longitude
+```
+
+Optional columns are `Google Place ID`, `Geocoded At`, and `Geocode Status`. Add `google_maps_api_key` to Streamlit secrets to geocode missing coordinates. Add `google_maps_browser_key` to render the tab with Google Maps in the browser; otherwise the app falls back to an OpenStreetMap-backed Plotly map for already-supplied coordinates.

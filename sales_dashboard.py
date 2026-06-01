@@ -1,8 +1,12 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
+import hashlib
+import json
+import math
 import re
 import os
 import sqlite3
@@ -78,6 +82,19 @@ ALERT_RECIPIENTS = {
 }
 ALERT_CC = "geoff@ksavagesupply.com, roger@ksavagesupply.com"
 ALERT_OPTIONS = ["", "2 Weeks", "4 Weeks", "Other"]
+TERRITORY_BRANDS = ["K. Savage", "Mayfield", "Leisure Land"]
+TERRITORY_LOCATION_COLUMNS = [
+    "License", "Store Name", "Address", "City", "State", "Zip",
+    "Latitude", "Longitude", "Google Place ID", "Geocoded At", "Geocode Status",
+]
+TERRITORY_MAP_COLORS = {
+    "Pitch Mayfield": "#7C5CFF",
+    "Carries Mayfield": "#E8844C",
+    "Carries K. Savage": "#2EAD69",
+    "K. Savage blocked": "#D84A4A",
+    "No recent brand": "#6E7781",
+    "Needs location": "#A8ADB3",
+}
 TOTAL_PATTERN = re.compile(
     r"^(total|totals|sum|grand\s*total|ytd|year\s*to\s*date|annual|avg|average|subtotal)s?$",
     re.IGNORECASE,
@@ -794,6 +811,23 @@ def init_storage():
                 value TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS store_locations (
+                license_key TEXT PRIMARY KEY,
+                license TEXT NOT NULL,
+                store_name TEXT,
+                address TEXT,
+                city TEXT,
+                state TEXT,
+                zip TEXT,
+                latitude REAL,
+                longitude REAL,
+                google_place_id TEXT,
+                geocoded_at TEXT,
+                geocode_status TEXT,
+                updated_at TEXT NOT NULL
+            )
+        """)
 
 def get_setting(key: str, default: str = "") -> str:
     init_storage()
@@ -808,6 +842,525 @@ def set_setting(key: str, value: str):
             "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+
+def _territory_clean_cell(value):
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"", "nan", "none"} else text
+
+def _first_source_col(df, aliases):
+    source_cols = {str(c).strip().lower(): c for c in getattr(df, "columns", [])}
+    for alias in aliases:
+        found = source_cols.get(str(alias).strip().lower())
+        if found is not None:
+            return found
+    return None
+
+def _coerce_coord(value):
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "none"}:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+def normalize_store_locations(raw_df):
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=TERRITORY_LOCATION_COLUMNS)
+
+    aliases = {
+        "License": ["License", "License #", "license", "license_number"],
+        "Store Name": ["Store Name", "Store", "Client", "Retailer", "Account", "Business Name"],
+        "Address": ["Address", "Street Address", "Address 1", "Line 1", "Street"],
+        "City": ["City", "Town"],
+        "State": ["State", "Province", "Region"],
+        "Zip": ["Zip", "ZIP", "Zip Code", "Postal Code"],
+        "Latitude": ["Latitude", "Lat", "lat"],
+        "Longitude": ["Longitude", "Lng", "Lon", "Long", "longitude", "lng", "lon"],
+        "Google Place ID": ["Google Place ID", "Place ID", "place_id", "google_place_id"],
+        "Geocoded At": ["Geocoded At", "geocoded_at"],
+        "Geocode Status": ["Geocode Status", "geocode_status", "Status"],
+    }
+
+    out = pd.DataFrame(index=raw_df.index)
+    for target, source_names in aliases.items():
+        source = _first_source_col(raw_df, source_names)
+        out[target] = raw_df[source] if source is not None else ""
+
+    for col in TERRITORY_LOCATION_COLUMNS:
+        if col not in {"Latitude", "Longitude"}:
+            out[col] = out[col].apply(_territory_clean_cell)
+    out["Latitude"] = out["Latitude"].apply(_coerce_coord)
+    out["Longitude"] = out["Longitude"].apply(_coerce_coord)
+    out["License"] = out["License"].apply(clean_reference)
+    out["Store Name"] = out["Store Name"].where(out["Store Name"].str.strip().ne(""), out["License"])
+    out["_license_key"] = out["License"].apply(license_match_key)
+    out = out[out["_license_key"].ne("")]
+    out = out.drop_duplicates("_license_key", keep="last").drop(columns=["_license_key"])
+    return out[TERRITORY_LOCATION_COLUMNS].reset_index(drop=True)
+
+def read_store_location_file(file_obj):
+    name = getattr(file_obj, "name", "")
+    if name.lower().endswith(".csv"):
+        raw = pd.read_csv(file_obj)
+    else:
+        raw = pd.read_excel(file_obj, engine="openpyxl")
+    return normalize_store_locations(raw)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_location_sheet_as_df(sheet_url, gid="0"):
+    from io import StringIO as _StringIO
+    csv_url = google_sheet_csv_url(sheet_url, gid)
+    text = _fetch_sheet_csv(csv_url)
+    raw = pd.read_csv(_StringIO(text)).dropna(how="all").dropna(axis=1, how="all")
+    if raw.empty:
+        raise ValueError("The location sheet is empty.")
+    return normalize_store_locations(raw), raw.shape
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_store_locations():
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        cutoff = (datetime.now() - timedelta(days=30)).isoformat(timespec="seconds")
+        conn.execute("""
+            UPDATE store_locations
+            SET latitude = NULL,
+                longitude = NULL,
+                geocode_status = 'Google geocode expired; refresh required'
+            WHERE COALESCE(google_place_id, '') <> ''
+              AND COALESCE(geocoded_at, '') <> ''
+              AND geocoded_at < ?
+        """, (cutoff,))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT license, store_name, address, city, state, zip,
+                   latitude, longitude, google_place_id, geocoded_at, geocode_status
+            FROM store_locations
+            ORDER BY store_name COLLATE NOCASE, license
+        """).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=TERRITORY_LOCATION_COLUMNS)
+    frame = pd.DataFrame([dict(row) for row in rows]).rename(columns={
+        "license": "License",
+        "store_name": "Store Name",
+        "address": "Address",
+        "city": "City",
+        "state": "State",
+        "zip": "Zip",
+        "latitude": "Latitude",
+        "longitude": "Longitude",
+        "google_place_id": "Google Place ID",
+        "geocoded_at": "Geocoded At",
+        "geocode_status": "Geocode Status",
+    })
+    return normalize_store_locations(frame)
+
+def save_store_locations(locations_df):
+    normalized = normalize_store_locations(locations_df)
+    now = datetime.now().isoformat(timespec="seconds")
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        conn.execute("DELETE FROM store_locations")
+        conn.executemany("""
+            INSERT INTO store_locations
+                (license_key, license, store_name, address, city, state, zip,
+                 latitude, longitude, google_place_id, geocoded_at, geocode_status, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            (
+                license_match_key(row["License"]), row["License"], row["Store Name"],
+                row["Address"], row["City"], row["State"], row["Zip"],
+                row["Latitude"], row["Longitude"], row["Google Place ID"],
+                row["Geocoded At"], row["Geocode Status"], now,
+            )
+            for _, row in normalized.iterrows()
+        ])
+    load_store_locations.clear()
+    return len(normalized)
+
+def clear_store_locations():
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        conn.execute("DELETE FROM store_locations")
+    load_store_locations.clear()
+
+def google_maps_server_key():
+    return (
+        secret_value("google_maps_api_key")
+        or secret_value("GOOGLE_MAPS_API_KEY")
+        or secret_value("google_maps_server_key")
+    )
+
+def google_maps_browser_key():
+    return (
+        secret_value("google_maps_browser_key")
+        or secret_value("GOOGLE_MAPS_BROWSER_KEY")
+        or google_maps_server_key()
+    )
+
+def location_address_query(row):
+    parts = [row.get("Address", ""), row.get("City", ""), row.get("State", ""), row.get("Zip", "")]
+    return ", ".join([str(p).strip() for p in parts if str(p).strip()])
+
+def geocode_store_locations(locations_df, api_key, limit=25):
+    import requests as _req
+
+    updated = normalize_store_locations(locations_df).copy()
+    limit = int(limit or 0)
+    successes = 0
+    attempted = 0
+    for idx, row in updated.iterrows():
+        if attempted >= limit:
+            break
+        if pd.notna(row.get("Latitude")) and pd.notna(row.get("Longitude")):
+            continue
+        address = location_address_query(row)
+        if not row.get("Address") or not address:
+            updated.at[idx, "Geocode Status"] = "Missing street address"
+            continue
+
+        attempted += 1
+        try:
+            resp = _req.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                params={"address": address, "key": api_key},
+                timeout=15,
+            )
+            data = resp.json()
+        except Exception as exc:
+            updated.at[idx, "Geocode Status"] = f"Request failed: {exc}"
+            continue
+
+        status = data.get("status", "UNKNOWN")
+        if status == "OK" and data.get("results"):
+            result = data["results"][0]
+            loc = result.get("geometry", {}).get("location", {})
+            updated.at[idx, "Latitude"] = _coerce_coord(loc.get("lat"))
+            updated.at[idx, "Longitude"] = _coerce_coord(loc.get("lng"))
+            updated.at[idx, "Google Place ID"] = result.get("place_id", "")
+            updated.at[idx, "Geocoded At"] = datetime.now().isoformat(timespec="seconds")
+            updated.at[idx, "Geocode Status"] = "OK"
+            successes += 1
+        else:
+            updated.at[idx, "Geocode Status"] = status
+    return updated, {"attempted": attempted, "successes": successes}
+
+def build_revenue_store_profile(df, months):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["License Key", "License", "Revenue Store", "Revenue Total", "Latest Month Revenue"])
+    profile = df.reset_index()[["License", "Store Name"]].copy()
+    profile["License"] = profile["License"].apply(clean_reference)
+    profile["License Key"] = profile["License"].apply(license_match_key)
+    profile = profile.rename(columns={"Store Name": "Revenue Store"})
+    profile["Revenue Total"] = df[months].sum(axis=1).values if months else 0
+    latest_month = find_latest_populated_month_col(df, months) if months else None
+    profile["Latest Month Revenue"] = df[latest_month].values if latest_month else 0
+    return profile
+
+def build_brand_store_profile(order_df, active_days=120):
+    columns = [
+        "License Key", "Order Store", "Orders", "Last Order", "Total Units", "Brand Revenue"
+    ] + TERRITORY_BRANDS
+    if order_df is None or order_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    odf = order_df.copy()
+    required = {"License #", "Client", "Brand", "Line Total", "Units", "Order #", "Submitted Date"}
+    if not required.issubset(set(odf.columns)):
+        return pd.DataFrame(columns=columns)
+
+    odf = odf[odf["Brand"].isin(TERRITORY_BRANDS)].copy()
+    odf["Line Total"] = pd.to_numeric(odf["Line Total"], errors="coerce").fillna(0)
+    odf["Units"] = pd.to_numeric(odf["Units"], errors="coerce").fillna(0)
+    odf["Submitted Date"] = pd.to_datetime(odf["Submitted Date"], errors="coerce")
+    odf = odf[(odf["Line Total"] > 0) & odf["Submitted Date"].notna()]
+    if odf.empty:
+        return pd.DataFrame(columns=columns)
+
+    as_of = odf["Submitted Date"].max()
+    cutoff = as_of - pd.Timedelta(days=int(active_days))
+    odf = odf[odf["Submitted Date"] >= cutoff].copy()
+    if odf.empty:
+        return pd.DataFrame(columns=columns)
+
+    odf["License"] = odf["License #"].apply(clean_reference)
+    odf["License Key"] = odf["License"].apply(license_match_key)
+    odf = odf[odf["License Key"].ne("")]
+    brand_pivot = (
+        odf.pivot_table(
+            index="License Key", columns="Brand", values="Line Total",
+            aggfunc="sum", fill_value=0,
+        )
+        .reset_index()
+    )
+    brand_pivot.columns.name = None
+    for brand in TERRITORY_BRANDS:
+        if brand not in brand_pivot.columns:
+            brand_pivot[brand] = 0
+
+    totals = (
+        odf.groupby("License Key")
+        .agg(
+            Orders=("Order #", "nunique"),
+            Last_Order=("Submitted Date", "max"),
+            Total_Units=("Units", "sum"),
+            Brand_Revenue=("Line Total", "sum"),
+        )
+        .reset_index()
+    )
+    names = (
+        odf.sort_values("Submitted Date")
+        .drop_duplicates("License Key", keep="last")[["License Key", "Client"]]
+        .rename(columns={"Client": "Order Store"})
+    )
+    out = totals.merge(names, on="License Key", how="left").merge(brand_pivot, on="License Key", how="left")
+    out = out.rename(columns={
+        "Last_Order": "Last Order",
+        "Total_Units": "Total Units",
+        "Brand_Revenue": "Brand Revenue",
+    })
+    return out[columns]
+
+def build_territory_store_table(locations_df, revenue_df, months, order_df, active_days):
+    locations = normalize_store_locations(locations_df)
+    if locations.empty:
+        return pd.DataFrame()
+    locations = locations.copy()
+    locations["License Key"] = locations["License"].apply(license_match_key)
+    revenue_profile = build_revenue_store_profile(revenue_df, months)
+    brand_profile = build_brand_store_profile(order_df, active_days)
+
+    stores = locations.merge(revenue_profile, on="License Key", how="left", suffixes=("", "_Revenue"))
+    stores = stores.merge(brand_profile, on="License Key", how="left")
+    stores["License"] = stores["License"].combine_first(stores.get("License_Revenue", ""))
+    store_names = stores["Store Name"].fillna("").astype(str)
+    if "Revenue Store" in stores:
+        store_names = store_names.where(store_names.str.strip().ne(""), stores["Revenue Store"].fillna("").astype(str))
+    if "Order Store" in stores:
+        store_names = store_names.where(store_names.str.strip().ne(""), stores["Order Store"].fillna("").astype(str))
+    stores["Store Name"] = store_names.where(store_names.str.strip().ne(""), stores["License"].astype(str))
+    for brand in TERRITORY_BRANDS:
+        stores[brand] = pd.to_numeric(stores.get(brand, 0), errors="coerce").fillna(0)
+        stores[f"Carries {brand}"] = stores[brand] > 0
+    stores["Orders"] = pd.to_numeric(stores.get("Orders", 0), errors="coerce").fillna(0).astype(int)
+    stores["Total Units"] = pd.to_numeric(stores.get("Total Units", 0), errors="coerce").fillna(0)
+    stores["Brand Revenue"] = pd.to_numeric(stores.get("Brand Revenue", 0), errors="coerce").fillna(0)
+    stores["Revenue Total"] = pd.to_numeric(stores.get("Revenue Total", 0), errors="coerce").fillna(0)
+    stores["Latest Month Revenue"] = pd.to_numeric(stores.get("Latest Month Revenue", 0), errors="coerce").fillna(0)
+    stores["Active Brands"] = stores.apply(
+        lambda r: ", ".join([brand for brand in TERRITORY_BRANDS if r.get(f"Carries {brand}", False)]) or "None",
+        axis=1,
+    )
+    return stores
+
+def haversine_miles(lat1, lon1, lat2, lon2):
+    radius = 3958.7613
+    phi1 = math.radians(float(lat1))
+    phi2 = math.radians(float(lat2))
+    dphi = math.radians(float(lat2) - float(lat1))
+    dlambda = math.radians(float(lon2) - float(lon1))
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def territory_recommendation(row):
+    if pd.isna(row.get("Latitude")) or pd.isna(row.get("Longitude")):
+        return "Needs location"
+    if row.get("Carries Mayfield", False):
+        return "Mayfield placed"
+    if row.get("Nearby K. Savage", 0) > 0 and row.get("Nearby Mayfield", 0) == 0:
+        return "Pitch Mayfield"
+    if row.get("Nearby K. Savage", 0) > 0 and not row.get("Carries K. Savage", False):
+        return "K. Savage blocked"
+    if row.get("Carries K. Savage", False):
+        return "Maintain K. Savage"
+    return "Open lane"
+
+def territory_map_category(row):
+    rec = row.get("Recommendation", "")
+    if rec == "Pitch Mayfield":
+        return "Pitch Mayfield"
+    if row.get("Carries Mayfield", False):
+        return "Carries Mayfield"
+    if row.get("Carries K. Savage", False):
+        return "Carries K. Savage"
+    if rec == "K. Savage blocked":
+        return "K. Savage blocked"
+    if rec == "Needs location":
+        return "Needs location"
+    return "No recent brand"
+
+def enrich_territory_proximity(stores_df, radius_miles):
+    if stores_df is None or stores_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    stores = stores_df.copy().reset_index(drop=True)
+    stores["Nearby Stores"] = 0
+    stores["Nearby K. Savage"] = 0
+    stores["Nearby Mayfield"] = 0
+    stores["Nearest Store"] = ""
+    stores["Nearest Distance"] = None
+    neighbor_details = {idx: [] for idx in stores.index}
+    pair_rows = []
+
+    valid = stores[stores["Latitude"].notna() & stores["Longitude"].notna()]
+    valid_indices = valid.index.tolist()
+    for pos, i in enumerate(valid_indices):
+        left = stores.loc[i]
+        for j in valid_indices[pos + 1:]:
+            right = stores.loc[j]
+            distance = haversine_miles(left["Latitude"], left["Longitude"], right["Latitude"], right["Longitude"])
+            if distance > radius_miles:
+                continue
+
+            left_brands = left["Active Brands"]
+            right_brands = right["Active Brands"]
+            pair_rows.append({
+                "Store A": left["Store Name"],
+                "License A": left["License"],
+                "Brands A": left_brands,
+                "Store B": right["Store Name"],
+                "License B": right["License"],
+                "Brands B": right_brands,
+                "Distance (mi)": distance,
+            })
+
+            for target_idx, neighbor in ((i, right), (j, left)):
+                stores.at[target_idx, "Nearby Stores"] += 1
+                if neighbor.get("Carries K. Savage", False):
+                    stores.at[target_idx, "Nearby K. Savage"] += 1
+                if neighbor.get("Carries Mayfield", False):
+                    stores.at[target_idx, "Nearby Mayfield"] += 1
+                current_nearest = stores.at[target_idx, "Nearest Distance"]
+                if current_nearest is None or distance < current_nearest:
+                    stores.at[target_idx, "Nearest Distance"] = distance
+                    stores.at[target_idx, "Nearest Store"] = neighbor["Store Name"]
+                neighbor_details[target_idx].append(
+                    f"{neighbor['Store Name']} ({distance:.2f} mi; {neighbor['Active Brands']})"
+                )
+
+    stores["Nearby Detail"] = stores.index.map(
+        lambda idx: "; ".join(neighbor_details[idx][:4]) if neighbor_details[idx] else ""
+    )
+    stores["Recommendation"] = stores.apply(territory_recommendation, axis=1)
+    stores["Map Category"] = stores.apply(territory_map_category, axis=1)
+    pairs = pd.DataFrame(pair_rows).sort_values("Distance (mi)") if pair_rows else pd.DataFrame(
+        columns=["Store A", "License A", "Brands A", "Store B", "License B", "Brands B", "Distance (mi)"]
+    )
+    return stores, pairs
+
+def render_google_territory_map(map_df, height=540):
+    key = google_maps_browser_key()
+    if not key:
+        return False
+    points = []
+    for _, row in map_df.dropna(subset=["Latitude", "Longitude"]).iterrows():
+        points.append({
+            "lat": float(row["Latitude"]),
+            "lng": float(row["Longitude"]),
+            "store": str(row.get("Store Name", "")),
+            "license": str(row.get("License", "")),
+            "brands": str(row.get("Active Brands", "")),
+            "recommendation": str(row.get("Recommendation", "")),
+            "nearby": str(row.get("Nearby Detail", "")),
+            "color": TERRITORY_MAP_COLORS.get(row.get("Map Category"), "#6E7781"),
+        })
+    if not points:
+        return False
+
+    html = f"""
+    <div id="territory-map" style="height:{height}px;width:100%;border-radius:6px;overflow:hidden"></div>
+    <script>
+      const territoryPoints = {json.dumps(points)};
+      const esc = (value) => String(value ?? "")
+        .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+      function initTerritoryMap() {{
+        const map = new google.maps.Map(document.getElementById("territory-map"), {{
+          center: {{lat: territoryPoints[0].lat, lng: territoryPoints[0].lng}},
+          zoom: 11,
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: true
+        }});
+        const bounds = new google.maps.LatLngBounds();
+        const info = new google.maps.InfoWindow();
+        territoryPoints.forEach((point) => {{
+          const marker = new google.maps.Marker({{
+            position: {{lat: point.lat, lng: point.lng}},
+            map,
+            title: point.store,
+            icon: {{
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 8,
+              fillColor: point.color,
+              fillOpacity: 0.95,
+              strokeColor: "#ffffff",
+              strokeWeight: 2
+            }}
+          }});
+          marker.addListener("click", () => {{
+            info.setContent(`
+              <div style="font-family:Arial,sans-serif;max-width:280px">
+                <div style="font-weight:700;margin-bottom:4px">${{esc(point.store)}}</div>
+                <div>License: ${{esc(point.license)}}</div>
+                <div>Brands: ${{esc(point.brands)}}</div>
+                <div>Recommendation: <b>${{esc(point.recommendation)}}</b></div>
+                ${{point.nearby ? `<div style="margin-top:6px">Nearby: ${{esc(point.nearby)}}</div>` : ""}}
+              </div>
+            `);
+            info.open(map, marker);
+          }});
+          bounds.extend(marker.getPosition());
+        }});
+        if (territoryPoints.length > 1) {{
+          map.fitBounds(bounds, 60);
+        }} else {{
+          map.setZoom(14);
+        }}
+      }}
+      window.initTerritoryMap = initTerritoryMap;
+    </script>
+    <script async defer src="https://maps.googleapis.com/maps/api/js?key={key}&callback=initTerritoryMap"></script>
+    """
+    components.html(html, height=height + 8)
+    return True
+
+def render_plotly_territory_map(map_df):
+    plotted = map_df.dropna(subset=["Latitude", "Longitude"]).copy()
+    if plotted.empty:
+        return False
+    fig = px.scatter_mapbox(
+        plotted,
+        lat="Latitude",
+        lon="Longitude",
+        color="Map Category",
+        color_discrete_map=TERRITORY_MAP_COLORS,
+        hover_name="Store Name",
+        hover_data={
+            "License": True,
+            "Active Brands": True,
+            "Recommendation": True,
+            "Nearby K. Savage": True,
+            "Nearby Mayfield": True,
+            "Latitude": False,
+            "Longitude": False,
+            "Map Category": False,
+        },
+        zoom=10,
+        height=540,
+    )
+    fig.update_traces(marker=dict(size=11, opacity=0.9))
+    fig.update_layout(
+        mapbox_style="open-street-map",
+        margin=dict(l=0, r=0, t=0, b=0),
+        legend_title=None,
+    )
+    st.plotly_chart(fig, width="stretch")
+    return True
 
 def list_saved_datasets():
     init_storage()
@@ -1879,9 +2432,10 @@ window_months = [m for m in _ss_window if m in months] or _default_window
 w_top_lics, _ = compute_pareto(df, window_months, threshold)
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_contact, tab_sales, tab_orders, tab_mom = st.tabs([
+tab_contact, tab_sales, tab_territory, tab_orders, tab_mom = st.tabs([
     "📋 Store Contact Form",
     "📊 Sales by Store",
+    "🗺️ Territory Map",
     "📦 Order Activity",
     "📅 Month over Month",
 ])
@@ -2760,6 +3314,269 @@ with tab_contact:
                 else:
                     st.success(f"Deleted entry for {sel_row['Store Name']} · {sel_row['Month']}.")
                     st.rerun()
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  TAB — Territory Map                                             ║
+# ╚══════════════════════════════════════════════════════════════════╝
+with tab_territory:
+    st.subheader("Territory Map")
+    if st.session_state.get("territory_notice"):
+        st.success(st.session_state.pop("territory_notice"))
+    if st.session_state.get("territory_warning"):
+        st.warning(st.session_state.pop("territory_warning"))
+
+    locations = load_store_locations()
+    coord_ready = (
+        locations["Latitude"].notna() & locations["Longitude"].notna()
+        if not locations.empty else pd.Series(dtype=bool)
+    )
+
+    with st.expander("Location Data", expanded=locations.empty):
+        template_df = pd.DataFrame([{
+            "License": "LIC-001",
+            "Store Name": "Example Retailer",
+            "Address": "123 Main St",
+            "City": "Seattle",
+            "State": "WA",
+            "Zip": "98101",
+            "Latitude": "",
+            "Longitude": "",
+        }])
+        st.download_button(
+            "Download Location Template",
+            data=template_df.to_csv(index=False).encode("utf-8"),
+            file_name="store_locations_template.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+        upload_col, sheet_col = st.columns(2)
+        with upload_col:
+            loc_file = st.file_uploader(
+                "Upload Locations",
+                type=["csv", "xlsx"],
+                key="territory_location_upload",
+                help="Expected columns: License, Store Name, Address, City, State, Zip, Latitude, Longitude.",
+            )
+            if loc_file is not None:
+                upload_id = hashlib.md5(loc_file.getvalue()).hexdigest()
+                if st.session_state.get("territory_location_upload_id") != upload_id:
+                    try:
+                        uploaded_locations = read_store_location_file(loc_file)
+                        saved_count = save_store_locations(uploaded_locations)
+                    except Exception as exc:
+                        st.error(f"Could not read location file: {exc}")
+                    else:
+                        st.session_state["territory_location_upload_id"] = upload_id
+                        st.session_state["territory_notice"] = f"Saved {saved_count} store location rows."
+                        st.rerun()
+
+        with sheet_col:
+            loc_sheet_url = st.text_input(
+                "Location Sheet URL",
+                value=get_setting("location_sheet_url", ""),
+                key="territory_location_sheet_url",
+                placeholder="https://docs.google.com/spreadsheets/d/...",
+            )
+            loc_sheet_gid = st.text_input(
+                "Location Worksheet gid",
+                value=get_setting("location_sheet_gid", "0"),
+                key="territory_location_sheet_gid",
+            )
+            if st.button("Load Location Sheet", width="stretch", key="territory_load_location_sheet"):
+                if not loc_sheet_url.strip():
+                    st.warning("Enter a location sheet URL.")
+                else:
+                    try:
+                        sheet_locations, sheet_shape = load_location_sheet_as_df(
+                            loc_sheet_url.strip(), loc_sheet_gid.strip() or "0"
+                        )
+                        saved_count = save_store_locations(sheet_locations)
+                        set_setting("location_sheet_url", loc_sheet_url.strip())
+                        set_setting("location_sheet_gid", loc_sheet_gid.strip() or "0")
+                    except Exception as exc:
+                        st.error(f"Could not load location sheet: {exc}")
+                    else:
+                        st.session_state["territory_notice"] = (
+                            f"Loaded {saved_count} locations from {sheet_shape[0]} rows."
+                        )
+                        st.rerun()
+
+        if not locations.empty:
+            st.caption(f"Saved locations: {len(locations):,} stores · {int(coord_ready.sum()):,} mapped")
+            if st.button("Clear Saved Locations", type="secondary", width="stretch", key="territory_clear_locations"):
+                clear_store_locations()
+                st.session_state.pop("territory_location_upload_id", None)
+                st.session_state["territory_notice"] = "Cleared saved store locations."
+                st.rerun()
+
+    locations = load_store_locations()
+    if locations.empty:
+        st.info("Load a store location CSV or Google Sheet to enable the territory map.")
+    else:
+        coord_ready = locations["Latitude"].notna() & locations["Longitude"].notna()
+        api_key = google_maps_server_key()
+        missing_geocode = locations[
+            (~coord_ready)
+            & locations["Address"].astype(str).str.strip().ne("")
+        ]
+        with st.expander("Geocode Missing Coordinates", expanded=False):
+            if api_key:
+                stale_count = locations["Geocode Status"].astype(str).str.contains("expired", case=False, na=False).sum()
+                st.caption(
+                    f"{len(missing_geocode):,} address row(s) are missing coordinates. "
+                    f"{stale_count:,} Google-geocoded row(s) need refresh after the 30-day cache window."
+                )
+                geocode_limit = st.number_input(
+                    "Max addresses to geocode now",
+                    min_value=1,
+                    max_value=max(1, min(250, len(missing_geocode))),
+                    value=max(1, min(25, len(missing_geocode))) if len(missing_geocode) else 1,
+                    step=1,
+                    key="territory_geocode_limit",
+                )
+                if st.button(
+                    "Geocode Missing Addresses",
+                    type="primary",
+                    width="stretch",
+                    key="territory_geocode_btn",
+                    disabled=len(missing_geocode) == 0,
+                ):
+                    updated_locations, summary = geocode_store_locations(locations, api_key, geocode_limit)
+                    save_store_locations(updated_locations)
+                    st.session_state["territory_notice"] = (
+                        f"Geocoded {summary['successes']} of {summary['attempted']} attempted address rows."
+                    )
+                    st.rerun()
+            else:
+                st.caption("Add `google_maps_api_key` to Streamlit secrets to geocode missing addresses.")
+
+        ord_df = st.session_state.get("order_df")
+        if ord_df is None:
+            st.warning("Order data is not loaded, so brand-carrying recommendations cannot be calculated yet.")
+
+        control_cols = st.columns([1, 1, 1, 2])
+        radius_miles = control_cols[0].selectbox(
+            "Radius",
+            options=[0.25, 0.5, 1.0],
+            format_func=lambda v: f"{v:g} mi",
+            key="territory_radius",
+        )
+        active_days = control_cols[1].number_input(
+            "Brand Window",
+            min_value=30,
+            max_value=365,
+            value=120,
+            step=30,
+            key="territory_active_days",
+            help="Paid orders inside this many days from the latest order date count as active brand placement.",
+        )
+        include_missing = control_cols[2].checkbox("Missing Locations", value=False, key="territory_include_missing")
+        search_term = control_cols[3].text_input(
+            "Search",
+            placeholder="Store name, license, city...",
+            key="territory_search",
+        )
+
+        stores = build_territory_store_table(locations, df, months, ord_df, active_days)
+        stores, nearby_pairs = enrich_territory_proximity(stores, radius_miles)
+
+        m1, m2, m3, m4 = st.columns(4)
+        pitch_count = int((stores["Recommendation"] == "Pitch Mayfield").sum())
+        conflict_count = int(((stores["Nearby K. Savage"] > 0) & (~stores["Carries K. Savage"])).sum())
+        m1.metric("Mapped Stores", f"{int((stores['Latitude'].notna() & stores['Longitude'].notna()).sum()):,}")
+        m2.metric("Pitch Mayfield", f"{pitch_count:,}")
+        m3.metric("K. Savage Conflicts", f"{conflict_count:,}")
+        m4.metric("Nearby Pairs", f"{len(nearby_pairs):,}")
+
+        filter_cols = st.columns([1, 1, 2])
+        rec_options = ["All"] + sorted(stores["Recommendation"].dropna().unique().tolist())
+        rec_filter = filter_cols[0].selectbox("Recommendation", rec_options, key="territory_rec_filter")
+        brand_filter = filter_cols[1].selectbox("Brand", ["All"] + TERRITORY_BRANDS, key="territory_brand_filter")
+        use_google_map = filter_cols[2].checkbox(
+            "Use Google Maps",
+            value=bool(google_maps_browser_key()),
+            disabled=not bool(google_maps_browser_key()),
+            key="territory_use_google_map",
+            help="Uses `google_maps_browser_key` when present; otherwise falls back to the geocoding key.",
+        )
+
+        filtered_stores = stores.copy()
+        if rec_filter != "All":
+            filtered_stores = filtered_stores[filtered_stores["Recommendation"] == rec_filter]
+        if brand_filter != "All":
+            brand_mask = filtered_stores[f"Carries {brand_filter}"]
+            if brand_filter == "Mayfield":
+                brand_mask = brand_mask | filtered_stores["Recommendation"].eq("Pitch Mayfield")
+            filtered_stores = filtered_stores[brand_mask]
+        if search_term.strip():
+            q = search_term.strip().lower()
+            filtered_stores = filtered_stores[
+                filtered_stores["Store Name"].astype(str).str.lower().str.contains(q, na=False)
+                | filtered_stores["License"].astype(str).str.lower().str.contains(q, na=False)
+                | filtered_stores["City"].astype(str).str.lower().str.contains(q, na=False)
+            ]
+        if not include_missing:
+            filtered_stores = filtered_stores[
+                filtered_stores["Latitude"].notna() & filtered_stores["Longitude"].notna()
+            ]
+
+        mapped_filtered = filtered_stores[
+            filtered_stores["Latitude"].notna() & filtered_stores["Longitude"].notna()
+        ]
+        if mapped_filtered.empty:
+            st.info("No mapped stores match the current filters.")
+        else:
+            rendered_google = render_google_territory_map(mapped_filtered) if use_google_map else False
+            if not rendered_google:
+                render_plotly_territory_map(mapped_filtered)
+
+        st.subheader("Placement Signals")
+        table_cols = [
+            "Recommendation", "Store Name", "License", "City", "Active Brands",
+            "Nearby K. Savage", "Nearby Mayfield", "Nearest Store", "Nearest Distance",
+            "Nearby Detail", "K. Savage", "Mayfield", "Leisure Land",
+            "Orders", "Last Order", "Brand Revenue", "Revenue Total",
+        ]
+        display_cols = [col for col in table_cols if col in filtered_stores.columns]
+        display_stores = filtered_stores[display_cols].sort_values(
+            ["Recommendation", "Nearby K. Savage", "Brand Revenue"],
+            ascending=[True, False, False],
+        )
+        st.dataframe(
+            display_stores,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Nearest Distance": st.column_config.NumberColumn("Nearest Distance", format="%.2f mi"),
+                "K. Savage": st.column_config.NumberColumn("K. Savage", format="$%.0f"),
+                "Mayfield": st.column_config.NumberColumn("Mayfield", format="$%.0f"),
+                "Leisure Land": st.column_config.NumberColumn("Leisure Land", format="$%.0f"),
+                "Brand Revenue": st.column_config.NumberColumn("Brand Revenue", format="$%.0f"),
+                "Revenue Total": st.column_config.NumberColumn("Revenue Total", format="$%.0f"),
+                "Last Order": st.column_config.DatetimeColumn("Last Order", format="MM/DD/YYYY"),
+            },
+        )
+        st.download_button(
+            "Download Territory Signals",
+            data=stores.to_csv(index=False).encode("utf-8"),
+            file_name="territory_signals.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+        with st.expander("Nearby Store Pairs"):
+            if nearby_pairs.empty:
+                st.caption("No store pairs found inside the selected radius.")
+            else:
+                st.dataframe(
+                    nearby_pairs,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Distance (mi)": st.column_config.NumberColumn("Distance", format="%.2f mi"),
+                    },
+                )
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Order Activity                                            ║
