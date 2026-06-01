@@ -648,9 +648,16 @@ brand_df["Brand"] = brand_df["Strain"].map(strain_map).where(
 named_df = brand_df
 ws_df = display_df[~display_df["Vendor"].apply(is_brand_vendor)].copy()
 ws_df["Brand"] = "Wholesale"
+combined_df = pd.concat(
+    [
+        named_df.assign(**{"Sale Type": "Brand Sales"}),
+        ws_df.assign(**{"Sale Type": "Wholesale"}),
+    ],
+    ignore_index=True,
+)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_brand, tab_wholesale = st.tabs(["🏷️ Brand Sales", "🏪 Wholesale"])
+tab_brand, tab_wholesale, tab_both = st.tabs(["🏷️ Brand Sales", "🏪 Wholesale", "📊 Both"])
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Brand Sales                                               ║
@@ -954,3 +961,169 @@ with tab_wholesale:
             )
             fig_vol.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_vol, use_container_width=True)
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  TAB — Both                                                      ║
+# ╚══════════════════════════════════════════════════════════════════╝
+with tab_both:
+    if combined_df.empty:
+        st.info("No Brand Sales or Wholesale records found.")
+    else:
+        # ── Filters ───────────────────────────────────────────────────────────
+        cf1, cf2, cf3, cf4 = st.columns([2, 2, 1, 1])
+        _c_sale_types = ["All"] + sorted(combined_df["Sale Type"].dropna().unique().tolist())
+        _c_types = ["All"] + sorted(combined_df["Product"].dropna().replace("nan", pd.NA).dropna().unique().tolist())
+        _c_dates = combined_df["Transfer Date"].dropna()
+        _c_min = _c_dates.min().date() if not _c_dates.empty else datetime.now().date()
+        _c_max = _c_dates.max().date() if not _c_dates.empty else datetime.now().date()
+
+        sel_c_sale_type = cf1.selectbox("Sale Type", _c_sale_types, key="both_sale_type")
+        sel_c_type = cf2.selectbox("Product", _c_types, key="both_type")
+        c_from = cf3.date_input("From", value=_c_min, key="both_from")
+        c_to = cf4.date_input("To", value=_c_max, key="both_to")
+
+        cview = combined_df.copy()
+        if sel_c_sale_type != "All":
+            cview = cview[cview["Sale Type"] == sel_c_sale_type]
+        if sel_c_type != "All":
+            cview = cview[cview["Product"] == sel_c_type]
+        c_start, c_end = sorted([c_from, c_to])
+        _c_in_range = cview["Transfer Date"].dt.date.between(c_start, c_end).fillna(True)
+        cview = cview[_c_in_range]
+
+        cview_g = cview[cview["Units UOM"] == "Grams"]
+
+        # ── KPIs ──────────────────────────────────────────────────────────────
+        c_rev = cview["Total"].sum()
+        c_grams = cview_g["Units"].sum()
+        c_ppg = (cview_g["Total"].sum() / c_grams) if c_grams > 0 else 0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total Revenue", fmt_usd(c_rev))
+        k2.metric("Total Volume", fmt_g(c_grams))
+        k3.metric("Avg $/gram", f"${c_ppg:.2f}")
+        k4.metric("Vendors", cview["Vendor"].nunique())
+        render_material_ppg_metrics(cview_g)
+
+        st.divider()
+
+        # ── Combined strain summary table ─────────────────────────────────────
+        st.subheader("Combined Strain Summary")
+        _cf1, _cf2, _cf3, _cf4 = st.columns([2, 2, 2, 2])
+        _ctbl_sale_types = ["All"] + sorted(cview["Sale Type"].dropna().unique().tolist())
+        _ctbl_brands = ["All"] + sorted(cview["Brand"].dropna().unique().tolist())
+        _ctbl_products = ["All"] + sorted(cview["Product"].dropna().replace("nan", pd.NA).dropna().unique().tolist())
+        _ctbl_strains = ["All"] + sorted(cview["Strain"].dropna().unique().tolist())
+
+        _ctbl_sale_type = _cf1.selectbox("Sale Type", _ctbl_sale_types, key="both_tbl_sale_type")
+        _ctbl_brand = _cf2.selectbox("Brand", _ctbl_brands, key="both_tbl_brand")
+        _ctbl_product = _cf3.selectbox("Product", _ctbl_products, key="both_tbl_product")
+        _ctbl_strain = _cf4.selectbox("Strain", _ctbl_strains, key="both_tbl_strain")
+
+        _ctview = cview.copy()
+        if _ctbl_sale_type != "All": _ctview = _ctview[_ctview["Sale Type"] == _ctbl_sale_type]
+        if _ctbl_brand != "All": _ctview = _ctview[_ctview["Brand"] == _ctbl_brand]
+        if _ctbl_product != "All": _ctview = _ctview[_ctview["Product"] == _ctbl_product]
+        if _ctbl_strain != "All": _ctview = _ctview[_ctview["Strain"] == _ctbl_strain]
+
+        c_strain_tbl = (
+            _ctview.groupby(["Sale Type", "Brand", "Vendor", "Product", "Strain", "Units UOM"])
+            .agg(Units=("Units", "sum"), Revenue=("Total", "sum"))
+            .reset_index()
+        )
+        c_strain_tbl["$/gram"] = c_strain_tbl.apply(
+            lambda r: round(r["Revenue"] / r["Units"], 2)
+            if r["Units UOM"] == "Grams" and r["Units"] > 0 else pd.NA,
+            axis=1,
+        )
+        c_strain_tbl = c_strain_tbl.sort_values("Revenue", ascending=False)
+
+        st.dataframe(
+            c_strain_tbl,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Revenue": st.column_config.NumberColumn("Revenue", format="$%.0f"),
+                "Units": st.column_config.NumberColumn("Units", format="%.0f"),
+                "$/gram": st.column_config.NumberColumn("$/gram", format="$%.2f"),
+            },
+        )
+
+        st.divider()
+
+        # ── Revenue by strain chart ────────────────────────────────────────────
+        st.subheader("Revenue by Strain")
+        c_strain_chart = (
+            cview_g.groupby(["Strain", "Brand"])["Total"]
+            .sum().reset_index()
+            .sort_values("Total", ascending=True)
+        )
+        if not c_strain_chart.empty:
+            fig_c_s = px.bar(
+                c_strain_chart,
+                x="Total", y="Strain", color="Brand",
+                orientation="h",
+                color_discrete_map=BRAND_COLORS,
+                text=c_strain_chart["Total"].apply(fmt_usd),
+            )
+            fig_c_s.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e3e3d8", showlegend=True, legend_title="Brand",
+                height=max(350, len(c_strain_chart) * 24),
+                margin=dict(l=0, r=60, t=10, b=10),
+                xaxis_title="", yaxis_title="",
+            )
+            fig_c_s.update_traces(textposition="outside", cliponaxis=False)
+            st.plotly_chart(fig_c_s, use_container_width=True)
+
+        st.divider()
+
+        # ── $/gram by strain ───────────────────────────────────────────────────
+        st.subheader("$/gram by Strain")
+        c_ppg_data = (
+            cview_g.groupby(["Strain", "Brand", "Product"])
+            .apply(lambda g: g["Total"].sum() / g["Units"].sum() if g["Units"].sum() > 0 else 0)
+            .reset_index(name="$/gram")
+        )
+        if not c_ppg_data.empty:
+            fig_c_ppg = ppg_band_chart(c_ppg_data, product_col="Product", brand_col="Brand")
+            if fig_c_ppg is not None:
+                st.plotly_chart(fig_c_ppg, use_container_width=True)
+
+        st.divider()
+
+        # ── $/gram over time ──────────────────────────────────────────────────
+        st.subheader("PPG Over Time")
+        ctrend = combined_df.copy()
+        if sel_c_sale_type != "All":
+            ctrend = ctrend[ctrend["Sale Type"] == sel_c_sale_type]
+        render_ppg_over_time_chart(ctrend, "both")
+
+        st.divider()
+
+        # ── Monthly revenue trend ──────────────────────────────────────────────
+        st.subheader("Monthly Revenue")
+        c_monthly = (
+            cview_g[cview_g["Month"].str.match(r"\d{4}-\d{2}")]
+            .groupby(["Month", "Brand"])["Total"]
+            .sum().reset_index()
+            .sort_values("Month")
+        )
+        if not c_monthly.empty:
+            fig_c_m = px.bar(
+                c_monthly, x="Month", y="Total", color="Brand",
+                barmode="group",
+                color_discrete_map=BRAND_COLORS,
+                text=c_monthly["Total"].apply(fmt_usd),
+            )
+            fig_c_m.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e3e3d8", height=350,
+                margin=dict(l=0, r=20, t=10, b=10),
+                xaxis_title="", yaxis_title="Revenue ($)",
+                legend_title="Brand",
+            )
+            fig_c_m.update_traces(textposition="outside", cliponaxis=False)
+            st.plotly_chart(fig_c_m, use_container_width=True)
+        else:
+            st.caption("Monthly trend unavailable — Transfer Date not parsed.")
