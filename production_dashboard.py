@@ -44,8 +44,9 @@ if _password:
 BRAND_VENDORS   = {"Minglewood Brands", "SALISH SEA INDUSTRIES L.L.C."}
 EXCLUDE_VENDORS = {"CONFIDENCE ANALYTICS"}
 
-BRANDS_PROD       = ["K. Savage", "Mayfield", "Leisure Land", "Clout King", "Wholesale"]
 BRANDS_NAMED      = ["K. Savage", "Mayfield", "Leisure Land", "Clout King"]  # shown in Brand Sales tab
+BRANDS_PROD       = BRANDS_NAMED
+BRAND_VENDOR_KEYS = {v.casefold() for v in BRAND_VENDORS}
 
 BRAND_COLORS = {
     "K. Savage":   "#4CE89C",
@@ -77,6 +78,9 @@ def fmt_usd(v):
 def fmt_g(v):
     if v is None or (isinstance(v, float) and pd.isna(v)): return "0 g"
     return f"{v:,.0f} g"
+
+def is_brand_vendor(vendor) -> bool:
+    return str(vendor or "").strip().casefold() in BRAND_VENDOR_KEYS
 
 def _shade_hex(hex_color: str, factor: float) -> str:
     """factor < 1 darkens toward black; factor > 1 lightens toward white."""
@@ -392,9 +396,10 @@ all_df = all_df[~all_df["Vendor"].isin(EXCLUDE_VENDORS)]
 all_df["Product"] = all_df["Product"].map(PRODUCT_ALIASES).fillna(all_df["Product"])
 
 # ── Sidebar — Brand Assignments ───────────────────────────────────────────────
-# All strains except explicitly excluded vendors
+# Brand assignments label brand-vendor rows by named brand. Non-brand vendors
+# are classified as Wholesale regardless of strain assignment.
 _brand_strains = sorted(
-    all_df[~all_df["Vendor"].isin(EXCLUDE_VENDORS)]["Strain"]
+    all_df[all_df["Vendor"].apply(is_brand_vendor)]["Strain"]
     .dropna()
     .unique()
     .tolist()
@@ -507,17 +512,15 @@ st.divider()
 # Apply facility filter for display
 display_df = all_df if sel_facility == "Both" else all_df[all_df["Facility"] == sel_facility]
 
-# Brand Sales = any row whose strain is assigned to a brand (not excluded)
-_assigned_strains = set(strain_map.keys())
-brand_df = display_df[
-    display_df["Strain"].isin(_assigned_strains) &
-    ~display_df["Vendor"].isin(EXCLUDE_VENDORS)
-].copy()
-brand_df["Brand"] = brand_df["Strain"].map(strain_map)
-
-# Split brand_df into named brands vs wholesale
-named_df = brand_df[brand_df["Brand"].isin(BRANDS_NAMED)]
-ws_df    = brand_df[brand_df["Brand"] == "Wholesale"]
+# Brand Sales = rows sold to brand vendors. Wholesale = all other vendors.
+brand_df = display_df[display_df["Vendor"].apply(is_brand_vendor)].copy()
+brand_df["Brand"] = brand_df["Strain"].map(strain_map).where(
+    lambda s: s.isin(BRANDS_NAMED),
+    "Unassigned",
+)
+named_df = brand_df
+ws_df = display_df[~display_df["Vendor"].apply(is_brand_vendor)].copy()
+ws_df["Brand"] = "Wholesale"
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_brand, tab_wholesale = st.tabs(["🏷️ Brand Sales", "🏪 Wholesale"])
@@ -527,7 +530,7 @@ tab_brand, tab_wholesale = st.tabs(["🏷️ Brand Sales", "🏪 Wholesale"])
 # ╚══════════════════════════════════════════════════════════════════╝
 with tab_brand:
     if named_df.empty:
-        st.info("No Brand Sales records found. Assign strains to a named brand in the sidebar.")
+        st.info("No Brand Sales records found for Minglewood Brands or Salish Sea Industries.")
     else:
         # ── Filters ───────────────────────────────────────────────────────────
         bf1, bf2, bf3, bf4 = st.columns([2, 2, 1, 1])
@@ -617,7 +620,7 @@ with tab_brand:
                 st.markdown(
                     f"| Stage | Rows |\n|---|---|\n"
                     f"| Raw (display_df) | {len(_d1)} |\n"
-                    f"| After assignment filter (brand_df) | {len(_d2)} |\n"
+                    f"| Brand-vendor rows (brand_df) | {len(_d2)} |\n"
                     f"| After tab filters (bview) | {len(_d3)} |\n"
                     f"| After table filters (_tview) | {len(_d4)} |"
                 )
@@ -703,7 +706,7 @@ with tab_brand:
 # ╚══════════════════════════════════════════════════════════════════╝
 with tab_wholesale:
     if ws_df.empty:
-        st.info("No Wholesale records found. Assign strains to 'Wholesale' in the sidebar Brand Assignments.")
+        st.info("No Wholesale records found for non-brand vendors.")
     else:
         # ── Filters ───────────────────────────────────────────────────────────
         wf1, wf2, wf3, wf4 = st.columns([2, 2, 1, 1])
