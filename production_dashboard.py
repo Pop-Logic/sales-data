@@ -210,7 +210,7 @@ def render_ppg_over_time_chart(source_df: pd.DataFrame, key_prefix: str):
         "<br>Revenue: $%{customdata[0]:,.0f}"
         "<br>Grams: %{customdata[1]:,.0f}<extra></extra>"
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 def is_brand_vendor(vendor) -> bool:
     return str(vendor or "").strip().casefold() in BRAND_VENDOR_KEYS
@@ -493,7 +493,7 @@ with st.sidebar:
                                     placeholder="GID of a tab with Strain and Brand columns",
                                     key="prod_gid_assign")
 
-    if st.button("Load / Refresh", type="primary", use_container_width=True):
+    if st.button("Load / Refresh", type="primary", width="stretch"):
         if sheet_url.strip():
             save_setting("sheet_url",  sheet_url.strip())
             save_setting("gid_b13",    gid_b13.strip())
@@ -571,7 +571,7 @@ with st.sidebar:
             data=_export_df.to_csv(index=False),
             file_name="strain_assignments.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
     _upload = st.file_uploader(
@@ -629,7 +629,7 @@ with st.sidebar:
             )
             st.warning(f"Conflict: strain assigned to multiple brands — {conflict_lines}")
 
-        if st.button("Save Assignments", use_container_width=True, disabled=bool(_conflicts)):
+        if st.button("Save Assignments", width="stretch", disabled=bool(_conflicts)):
             save_strain_map(_new_assignments)
             strain_map = _new_assignments
             st.success("Saved.")
@@ -746,7 +746,7 @@ with tab_brand:
 
         st.dataframe(
             strain_tbl,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Revenue":  st.column_config.NumberColumn("Revenue",  format="$%.0f"),
@@ -774,7 +774,7 @@ with tab_brand:
                 )
                 st.caption(f"Active tab filters — Brand: `{sel_b_brand}` · Product: `{sel_b_type}` · Table brand: `{_tbl_brand}` · Table product: `{_tbl_product}` · Table strain: `{_tbl_strain}`")
                 if not _d2.empty:
-                    st.dataframe(_d2[_dcols + ["Brand"]], use_container_width=True, hide_index=True)
+                    st.dataframe(_d2[_dcols + ["Brand"]], width="stretch", hide_index=True)
                 else:
                     _close = [k for k in strain_map if _diag_q.lower() in k.lower()]
                     st.warning(f"strain_map keys matching '{_diag_q}': {_close or 'none — not assigned'}")
@@ -804,7 +804,7 @@ with tab_brand:
                 xaxis_title="", yaxis_title="",
             )
             fig_s.update_traces(textposition="outside", cliponaxis=False)
-            st.plotly_chart(fig_s, use_container_width=True)
+            st.plotly_chart(fig_s, width="stretch")
 
         st.divider()
 
@@ -818,7 +818,7 @@ with tab_brand:
         if not ppg_data.empty:
             fig_ppg = ppg_band_chart(ppg_data, product_col="Product", brand_col="Brand")
             if fig_ppg is not None:
-                st.plotly_chart(fig_ppg, use_container_width=True)
+                st.plotly_chart(fig_ppg, width="stretch")
 
         st.divider()
 
@@ -854,7 +854,7 @@ with tab_brand:
                 legend_title="Brand",
             )
             fig_m.update_traces(textposition="outside", cliponaxis=False)
-            st.plotly_chart(fig_m, use_container_width=True)
+            st.plotly_chart(fig_m, width="stretch")
         else:
             st.caption("Monthly trend unavailable — Transfer Date not parsed.")
 
@@ -918,7 +918,7 @@ with tab_wholesale:
 
         st.dataframe(
             w_strain_tbl,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Revenue": st.column_config.NumberColumn("Revenue", format="$%.0f"),
@@ -939,7 +939,7 @@ with tab_wholesale:
         if not w_ppg_data.empty:
             fig_wppg = ppg_band_chart(w_ppg_data, product_col="Product")
             if fig_wppg is not None:
-                st.plotly_chart(fig_wppg, use_container_width=True)
+                st.plotly_chart(fig_wppg, width="stretch")
 
         st.divider()
 
@@ -973,7 +973,7 @@ with tab_wholesale:
                 xaxis_title="Grams", yaxis_title="",
             )
             fig_vol.update_traces(textposition="outside", cliponaxis=False)
-            st.plotly_chart(fig_vol, use_container_width=True)
+            st.plotly_chart(fig_vol, width="stretch")
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Both                                                      ║
@@ -1053,7 +1053,7 @@ with tab_both:
 
         st.dataframe(
             c_strain_tbl,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Revenue": st.column_config.NumberColumn("Revenue", format="$%.0f"),
@@ -1087,7 +1087,7 @@ with tab_both:
                 xaxis_title="", yaxis_title="",
             )
             fig_c_s.update_traces(textposition="outside", cliponaxis=False)
-            st.plotly_chart(fig_c_s, use_container_width=True)
+            st.plotly_chart(fig_c_s, width="stretch")
 
         st.divider()
 
@@ -1101,7 +1101,7 @@ with tab_both:
         if not c_ppg_data.empty:
             fig_c_ppg = ppg_band_chart(c_ppg_data, product_col="Product", brand_col="Brand")
             if fig_c_ppg is not None:
-                st.plotly_chart(fig_c_ppg, use_container_width=True)
+                st.plotly_chart(fig_c_ppg, width="stretch")
 
         st.divider()
 
@@ -1137,6 +1137,6 @@ with tab_both:
                 legend_title="Brand",
             )
             fig_c_m.update_traces(textposition="outside", cliponaxis=False)
-            st.plotly_chart(fig_c_m, use_container_width=True)
+            st.plotly_chart(fig_c_m, width="stretch")
         else:
             st.caption("Monthly trend unavailable — Transfer Date not parsed.")

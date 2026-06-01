@@ -1647,7 +1647,7 @@ with st.sidebar:
         st.error(f"Automatic Google Sheet load failed: {st.session_state.default_sheet_error}")
     elif st.session_state.get("data_source_label"):
         st.caption(st.session_state.data_source_label)
-    if st.button("Refresh Google Sheet", use_container_width=True):
+    if st.button("Refresh Google Sheet", width="stretch"):
         try:
             sheet_shape = load_sheet_into_session(DEFAULT_SHEET_URL, DEFAULT_SHEET_GID, clear_cache=True)
         except Exception as e:
@@ -1660,7 +1660,7 @@ with st.sidebar:
     with st.expander("Use a different sheet"):
         sheet_url = st.text_input("Sheet URL", value=DEFAULT_SHEET_URL)
         sheet_gid = st.text_input("Worksheet gid", value=DEFAULT_SHEET_GID, help="Use the gid from the sheet tab URL. Leave 0 for the first sheet.")
-        if st.button("Load alternate sheet", use_container_width=True):
+        if st.button("Load alternate sheet", width="stretch"):
             try:
                 sheet_shape = load_sheet_into_session(sheet_url, sheet_gid, clear_cache=True)
             except Exception as e:
@@ -1678,14 +1678,14 @@ with st.sidebar:
         }
         selected_saved = st.selectbox("Dataset", list(saved_options.keys()), key="saved_dataset")
         load_col, delete_col = st.columns(2)
-        if load_col.button("Load", use_container_width=True):
+        if load_col.button("Load", width="stretch"):
             loaded_text = get_saved_dataset(saved_options[selected_saved])
             if loaded_text:
                 st.session_state.raw_input = loaded_text
                 st.session_state.data_source_label = f"Saved dataset · {selected_saved.split(' · ')[0]}"
                 st.session_state.storage_notice = f"Loaded {selected_saved.split(' · ')[0]}."
                 st.rerun()
-        if delete_col.button("Delete", use_container_width=True):
+        if delete_col.button("Delete", width="stretch"):
             delete_saved_dataset(saved_options[selected_saved])
             st.session_state.storage_notice = f"Deleted {selected_saved.split(' · ')[0]}."
             st.rerun()
@@ -1738,7 +1738,7 @@ with st.sidebar:
         st.caption(st.session_state.get("order_data_label", f"✅ {len(_odf)} lines · {_odf['Order #'].nunique()} orders"))
         _saved_url = get_setting("order_sheet_url")
         if _saved_url:
-            if st.button("Refresh Order Sheet", use_container_width=True):
+            if st.button("Refresh Order Sheet", width="stretch"):
                 try:
                     _shape = load_order_sheet_into_session(
                         _saved_url, get_setting("order_sheet_gid", "0"), clear_cache=True
@@ -1748,7 +1748,7 @@ with st.sidebar:
                     st.rerun()
                 except Exception as _e:
                     st.error(f"Could not refresh: {_e}")
-        if st.button("Clear order data", use_container_width=True):
+        if st.button("Clear order data", width="stretch"):
             del st.session_state["order_df"]
             st.session_state.pop("order_data_label", None)
             st.rerun()
@@ -1761,7 +1761,7 @@ with st.sidebar:
                                   placeholder="https://docs.google.com/spreadsheets/d/…")
         _new_gid = st.text_input("Worksheet gid", value=_cur_gid, key="order_sheet_gid_input",
                                   help="gid from the sheet tab URL; 0 for first sheet")
-        if st.button("Load & save as default", use_container_width=True, key="load_order_sheet"):
+        if st.button("Load & save as default", width="stretch", key="load_order_sheet"):
             if not _new_url.strip():
                 st.warning("Enter a sheet URL.")
             else:
@@ -1774,7 +1774,7 @@ with st.sidebar:
                     st.rerun()
                 except Exception as _e:
                     st.error(f"Could not load sheet: {_e}")
-        if _cur_url and st.button("Remove default sheet", use_container_width=True, key="remove_order_sheet"):
+        if _cur_url and st.button("Remove default sheet", width="stretch", key="remove_order_sheet"):
             set_setting("order_sheet_url", "")
             st.rerun()
 
@@ -1905,7 +1905,7 @@ with tab_sales:
                 return ["font-weight:600; color:#1558b0"] * len(pareto_df.columns)
             return [""] * len(pareto_df.columns)
 
-        st.dataframe(pareto_df.style.apply(highlight_in, axis=1), use_container_width=True, hide_index=True)
+        st.dataframe(pareto_df.style.apply(highlight_in, axis=1), width="stretch", hide_index=True)
 
         remaining_pct = max(0, 100 - act_pct) if w_grand else 0.0
         st.caption(f"Remaining {len(all_lics)-len(w_top_lics)} store{'s' if len(all_lics)-len(w_top_lics)!=1 else ''} account for {remaining_pct:.1f}% of total revenue · window: {', '.join(window_months)}")
@@ -1953,7 +1953,7 @@ with tab_sales:
         if _ord_df_ref is not None:
             _ord_lics = set(_ord_df_ref["License #"].dropna().astype(str))
             disp2.insert(3, "Order", disp2["License"].apply(lambda l: "✅" if str(l) in _ord_lics else ""))
-        st.dataframe(disp2, use_container_width=True, hide_index=True)
+        st.dataframe(disp2, width="stretch", hide_index=True)
 
         st.subheader("Revenue share")
         if grp_rev_range > 0 and not share_df2.empty:
@@ -1963,7 +1963,7 @@ with tab_sales:
             )
             fig_pie2.update_traces(textposition="inside", textinfo="percent+label")
             fig_pie2.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig_pie2, use_container_width=True)
+            st.plotly_chart(fig_pie2, width="stretch")
         else:
             st.info("No revenue for the selected period.")
 
@@ -1986,7 +1986,7 @@ with tab_sales:
         fig_bar2.update_layout(barmode="group", yaxis_tickformat="$,.0f", height=300,
             margin=dict(t=10, b=10), plot_bgcolor="white", yaxis=dict(gridcolor="#eee"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02))
-        st.plotly_chart(fig_bar2, use_container_width=True)
+        st.plotly_chart(fig_bar2, width="stretch")
 
         mt2 = pd.DataFrame({
             "Month": months,
@@ -1994,7 +1994,7 @@ with tab_sales:
             "All Stores": [fmt_usd(all_m[m]) for m in months],
             "Group Share": [pct(grp_m[m], all_m[m]) for m in months],
         })
-        st.dataframe(mt2, use_container_width=True, hide_index=True)
+        st.dataframe(mt2, width="stretch", hide_index=True)
 
         st.divider()
 
@@ -2015,7 +2015,7 @@ with tab_sales:
             fig_line2.update_layout(yaxis_tickformat="$,.0f", height=300, margin=dict(t=10, b=10),
                 plot_bgcolor="white", yaxis=dict(gridcolor="#eee"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02))
-            st.plotly_chart(fig_line2, use_container_width=True)
+            st.plotly_chart(fig_line2, width="stretch")
 
         st.divider()
         pdf_buf2 = build_pdf(df, months, top_lics=w_top_lics, threshold=threshold, report_date=report_date)
@@ -2046,7 +2046,7 @@ with tab_sales:
             display.columns = ["Store Name", "License", "Revenue", "Share %"]
             display["Revenue"] = display["Revenue"].apply(fmt_usd)
             display["Share %"] = display["Share %"].apply(lambda x: f"{x:.1f}%")
-            st.dataframe(display, use_container_width=True, hide_index=True)
+            st.dataframe(display, width="stretch", hide_index=True)
 
         with col_right:
             st.subheader("Revenue share")
@@ -2055,7 +2055,7 @@ with tab_sales:
                     color_discrete_sequence=px.colors.qualitative.Set2, hole=0.4)
                 fig_pie.update_traces(textposition="inside", textinfo="percent+label")
                 fig_pie.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.plotly_chart(fig_pie, width="stretch")
             else:
                 st.info("No revenue for the selected month.")
 
@@ -2071,14 +2071,14 @@ with tab_sales:
             marker_color=BLUE, text=[fmt_usd(month_totals[m]) for m in months], textposition="outside"))
         fig_bar.update_layout(yaxis_tickformat="$,.0f", margin=dict(t=20, b=20), height=320,
             plot_bgcolor="white", yaxis=dict(gridcolor="#eee"))
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width="stretch")
 
         mt = pd.DataFrame({
             "Month": months,
             "Total": [fmt_usd(month_totals[m]) for m in months],
             "vs Avg": [("+" if month_totals[m] >= avg_month else "") + fmt_usd(month_totals[m] - avg_month) for m in months],
         })
-        st.dataframe(mt, use_container_width=True, hide_index=True)
+        st.dataframe(mt, width="stretch", hide_index=True)
 
         st.divider()
 
@@ -2098,7 +2098,7 @@ with tab_sales:
             fig_line.update_layout(yaxis_tickformat="$,.0f", height=320, margin=dict(t=10, b=10),
                 plot_bgcolor="white", yaxis=dict(gridcolor="#eee"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02))
-            st.plotly_chart(fig_line, use_container_width=True)
+            st.plotly_chart(fig_line, width="stretch")
 
         st.divider()
         pdf_buf = build_pdf(df, months, report_date=report_date)
@@ -2372,8 +2372,8 @@ with tab_contact:
             _logged_sample["License Key"] = _logged_sample["License"].apply(_lic_key)
             _logged_sample["Store Key"] = _logged_sample["Store Name"].apply(store_match_key)
             d1, d2 = st.columns(2)
-            d1.dataframe(_visible_sample, use_container_width=True, hide_index=True)
-            d2.dataframe(_logged_sample, use_container_width=True, hide_index=True)
+            d1.dataframe(_visible_sample, width="stretch", hide_index=True)
+            d2.dataframe(_logged_sample, width="stretch", hide_index=True)
 
     for rank, lic in enumerate(display_lics, 1):
         store_name = df.loc[lic, "Store Name"]
@@ -2439,7 +2439,7 @@ with tab_contact:
 
                 save_this_store = st.form_submit_button(
                     "💾 Save This Store",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary",
                 )
             if save_this_store:
@@ -2494,10 +2494,10 @@ with tab_contact:
         data=pd.DataFrame(_csv_rows).to_csv(index=False),
         file_name=f"store-contacts-{slugify(cf_view)}-{slugify(contact_month)}.csv",
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
     )
 
-    if reset_col.button("Reset", use_container_width=True):
+    if reset_col.button("Reset", width="stretch"):
         for lic in cf_pool:
             for field in ("date", "initials", "person", "method",
                           "commitment", "cadence", "amount", "alert_interval",
@@ -2525,7 +2525,7 @@ with tab_contact:
             key="contact_log_restore_all",
             help="Use for full backups or older CSVs where date-only rows are intentional. Leave off for form exports with blank/default rows.",
         )
-        if st.button("Import CSV to Team Log", use_container_width=True, key="contact_log_restore_btn"):
+        if st.button("Import CSV to Team Log", width="stretch", key="contact_log_restore_btn"):
             if restore_file is None:
                 st.warning("Choose a CSV file first.")
             else:
@@ -2568,7 +2568,7 @@ with tab_contact:
 
         st.dataframe(
             display_log_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Saved At": st.column_config.TextColumn("Saved At"),
@@ -2584,9 +2584,9 @@ with tab_contact:
             data=log_csv,
             file_name="team-contact-log.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
-        if clear_col.button("Clear All", use_container_width=True):
+        if clear_col.button("Clear All", width="stretch"):
             try:
                 clear_contact_log()
             except Exception as e:
@@ -2679,7 +2679,7 @@ with tab_contact:
                                      height=120, key="log_ed_notes")
 
             save_ed_col, del_ed_col = st.columns([1, 1])
-            if save_ed_col.button("Save Changes", type="primary", use_container_width=True, key="log_ed_save"):
+            if save_ed_col.button("Save Changes", type="primary", width="stretch", key="log_ed_save"):
                 try:
                     upsert_contact_log_rows([{
                         "license":           sel_row["License"],
@@ -2705,7 +2705,7 @@ with tab_contact:
                 else:
                     st.success("Entry updated.")
                     st.rerun()
-            if del_ed_col.button("Delete Entry", type="secondary", use_container_width=True, key="log_ed_delete"):
+            if del_ed_col.button("Delete Entry", type="secondary", width="stretch", key="log_ed_delete"):
                 try:
                     delete_contact_log_entry(sel_row["License"], sel_row["Month"])
                 except Exception as e:
@@ -2783,7 +2783,7 @@ with tab_orders:
     fig_rev.update_layout(showlegend=False, margin=dict(t=10, b=10), height=220,
                           xaxis_tickprefix="$", xaxis_tickformat=",")
     fig_rev.update_yaxes(autorange="reversed")
-    ch1.plotly_chart(fig_rev, use_container_width=True)
+    ch1.plotly_chart(fig_rev, width="stretch")
 
     fig_units = px.bar(
         brand_summary, x="Units", y="Brand", orientation="h",
@@ -2791,7 +2791,7 @@ with tab_orders:
     )
     fig_units.update_layout(showlegend=False, margin=dict(t=10, b=10), height=220)
     fig_units.update_yaxes(autorange="reversed")
-    ch2.plotly_chart(fig_units, use_container_width=True)
+    ch2.plotly_chart(fig_units, width="stretch")
 
     st.divider()
 
@@ -2811,7 +2811,7 @@ with tab_orders:
         )
         fig_time.update_layout(margin=dict(t=10, b=10), height=300,
                                 xaxis_title=None, legend_title=None)
-        st.plotly_chart(fig_time, use_container_width=True)
+        st.plotly_chart(fig_time, width="stretch")
 
     st.divider()
 
@@ -2841,7 +2841,7 @@ with tab_orders:
                     height=max(300, len(top_prods) * 32),
                 )
                 fig_prod.update_yaxes(autorange="reversed")
-                st.plotly_chart(fig_prod, use_container_width=True)
+                st.plotly_chart(fig_prod, width="stretch")
             else:
                 st.info(f"No paid {brand} lines in current selection.")
 
@@ -2911,7 +2911,7 @@ with tab_orders:
     })[["Store", "License", "Orders", "Last Order", "Order #", "Revenue", "Total Units"] + BRANDS]
     st.dataframe(
         disp_store,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Revenue": st.column_config.NumberColumn("Revenue", format="$%.0f"),
@@ -3051,7 +3051,7 @@ with tab_orders:
                     "Date", "Store", "License", "Brand", "Sales", "Units",
                     "Orders", "Manifests", "Manifest Reference #",
                 ]],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Date": st.column_config.DateColumn("Date", format="MM/DD/YYYY"),
@@ -3168,7 +3168,7 @@ with tab_orders:
             ),
             hoverlabel=dict(bgcolor="#1C2028", font_color=_dark_chart_text),
         )
-        st.plotly_chart(fig_lapsed_age, use_container_width=True)
+        st.plotly_chart(fig_lapsed_age, width="stretch")
 
         st.markdown("##### Revenue-at-Risk Pareto")
         if len(lapsed_df) > 5:
@@ -3230,7 +3230,7 @@ with tab_orders:
             textfont=dict(color=_dark_chart_text),
             cliponaxis=False,
         )
-        st.plotly_chart(fig_lapsed_pareto, use_container_width=True)
+        st.plotly_chart(fig_lapsed_pareto, width="stretch")
 
         st.markdown("##### Outreach Priority")
         _scatter_df = lapsed_df.rename(columns={
@@ -3276,7 +3276,7 @@ with tab_orders:
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
             hoverlabel=dict(bgcolor="#1C2028", font_color=_dark_chart_text),
         )
-        st.plotly_chart(fig_lapsed_scatter, use_container_width=True)
+        st.plotly_chart(fig_lapsed_scatter, width="stretch")
 
         st.dataframe(
             lapsed_df.rename(columns={
@@ -3292,7 +3292,7 @@ with tab_orders:
                 "Contact Status", "Est. Monthly Risk", "Last Active Revenue",
                 "All-time Revenue", "Active Months",
             ]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "All-time Revenue": st.column_config.NumberColumn("All-time Revenue", format="$%.0f"),
@@ -3344,7 +3344,7 @@ with tab_orders:
 
     st.dataframe(
         obs_table[["Store", "License #", "Order #", "Date", "Revenue", "Units"] + BRANDS],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Revenue": st.column_config.NumberColumn("Revenue", format="$%.0f"),
@@ -3394,7 +3394,7 @@ with tab_orders:
         detail_cols = [c for c in detail_cols if c in store_orders.columns]
         st.dataframe(
             store_orders[detail_cols],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -3435,7 +3435,7 @@ with tab_orders:
             "Total_Units": "Total Units", "Last_Drop": "Last Drop",
         })[["Store", "License", "Drops", "Last Drop", "Total Units"] + BRANDS]
 
-        st.dataframe(sample_table, use_container_width=True, hide_index=True)
+        st.dataframe(sample_table, width="stretch", hide_index=True)
 
         # Product breakdown
         with st.expander("Sample product detail"):
@@ -3446,7 +3446,7 @@ with tab_orders:
                 .sort_values(["Client", "Units"], ascending=[True, False])
                 .rename(columns={"Client": "Store"})
             )
-            st.dataframe(sample_prods, use_container_width=True, hide_index=True)
+            st.dataframe(sample_prods, width="stretch", hide_index=True)
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Month over Month                                          ║
@@ -3639,7 +3639,7 @@ with tab_mom:
                 "% Change":    lambda v: f"{v:+.1f}%" if pd.notna(v) else "—",
             })
         )
-        st.dataframe(styled_mom, use_container_width=True, hide_index=True)
+        st.dataframe(styled_mom, width="stretch", hide_index=True)
         st.caption(f"{len(disp_mom)} store{'s' if len(disp_mom) != 1 else ''}")
 
         # ── Top movers chart ──────────────────────────────────────────────────
@@ -3789,4 +3789,4 @@ with tab_mom:
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, title=None),
                 hoverlabel=dict(bgcolor="#1C2028", font_color="#F7F8FA"),
             )
-            st.plotly_chart(fig_mom, use_container_width=True)
+            st.plotly_chart(fig_mom, width="stretch")
