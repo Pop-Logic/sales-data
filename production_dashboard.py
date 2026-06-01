@@ -524,6 +524,13 @@ if not dfs:
 all_df = pd.concat(dfs, ignore_index=True)
 all_df = all_df[~all_df["Vendor"].isin(EXCLUDE_VENDORS)]
 all_df["Product"] = all_df["Product"].map(PRODUCT_ALIASES).fillna(all_df["Product"])
+_row_ppg = all_df["Total"].div(all_df["Units"]).where(all_df["Units"] > 0)
+_low_price_a_grade = (
+    (all_df["Product"] == "A Grade")
+    & (all_df["Units UOM"] == "Grams")
+    & (_row_ppg < 1)
+)
+all_df = all_df[~_low_price_a_grade].copy()
 
 # ── Sidebar — Brand Assignments ───────────────────────────────────────────────
 # Brand assignments label brand-vendor rows by named brand. Non-brand vendors
