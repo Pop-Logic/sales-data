@@ -92,6 +92,7 @@ TERRITORY_LOCATION_COLUMNS = [
 ]
 TERRITORY_MAP_COLORS = {
     "Pitch Mayfield": "#7C5CFF",
+    "Mayfield placed": "#E8844C",
     "Carries Mayfield": "#E8844C",
     "Maintain K. Savage": "#FF5AA5",
     "Carries K. Savage": "#FF5AA5",
@@ -1270,6 +1271,8 @@ def territory_map_category(row):
     rec = row.get("Recommendation", "")
     if rec == "Pitch Mayfield":
         return "Pitch Mayfield"
+    if rec == "Mayfield placed":
+        return "Mayfield placed"
     if rec == "Maintain K. Savage":
         return "Maintain K. Savage"
     if rec == "Open lane":
@@ -1340,6 +1343,7 @@ def enrich_territory_proximity(stores_df, radius_miles):
     stores["Recommendation"] = stores.apply(territory_recommendation, axis=1)
     stores = assign_open_lane_priority(stores)
     stores["Map Category"] = stores.apply(territory_map_category, axis=1)
+    stores["Designation"] = stores["Map Category"]
     pairs = pd.DataFrame(pair_rows).sort_values("Distance (mi)") if pair_rows else pd.DataFrame(
         columns=["Store A", "License A", "Brands A", "Store B", "License B", "Brands B", "Distance (mi)"]
     )
@@ -3618,11 +3622,9 @@ with tab_territory:
         m4.metric("Pitch Mayfield", f"{pitch_count:,}")
         m5.metric("Market Sales", fmt_usd(market_sales))
 
-        filter_cols = st.columns([1, 1, 2])
-        rec_options = ["All"] + sorted(stores["Recommendation"].dropna().unique().tolist())
-        rec_filter = filter_cols[0].selectbox("Recommendation", rec_options, key="territory_rec_filter")
-        brand_filter = filter_cols[1].selectbox("Brand", ["All"] + TERRITORY_BRANDS, key="territory_brand_filter")
-        use_google_map = filter_cols[2].checkbox(
+        filter_cols = st.columns([1, 1])
+        brand_filter = filter_cols[0].selectbox("Brand", ["All"] + TERRITORY_BRANDS, key="territory_brand_filter")
+        use_google_map = filter_cols[1].checkbox(
             "Use Google Maps",
             value=bool(google_maps_browser_key()),
             disabled=not bool(google_maps_browser_key()),
@@ -3630,9 +3632,35 @@ with tab_territory:
             help="Uses `google_maps_browser_key` when present; otherwise falls back to the geocoding key.",
         )
 
+        category_values = set(stores["Map Category"].dropna().astype(str))
+        designation_options = [
+            category for category in TERRITORY_MAP_COLORS
+            if category in category_values
+        ]
+        designation_options.extend(sorted(category_values - set(designation_options)))
+        selected_designations = []
+        if designation_options:
+            action_cols = st.columns([1, 1, 4])
+            select_all_designations = action_cols[0].button("All", key="territory_designations_all")
+            clear_designations = action_cols[1].button("None", key="territory_designations_none")
+            for designation in designation_options:
+                designation_key = f"territory_designation_{slugify(designation)}"
+                if select_all_designations:
+                    st.session_state[designation_key] = True
+                elif clear_designations:
+                    st.session_state[designation_key] = False
+
+            designation_cols = st.columns(3)
+            for idx, designation in enumerate(designation_options):
+                designation_key = f"territory_designation_{slugify(designation)}"
+                if designation_cols[idx % 3].checkbox(designation, value=True, key=designation_key):
+                    selected_designations.append(designation)
+
         filtered_stores = stores.copy()
-        if rec_filter != "All":
-            filtered_stores = filtered_stores[filtered_stores["Recommendation"] == rec_filter]
+        if selected_designations:
+            filtered_stores = filtered_stores[filtered_stores["Map Category"].isin(selected_designations)]
+        elif designation_options:
+            filtered_stores = filtered_stores.iloc[0:0]
         if brand_filter != "All":
             brand_mask = filtered_stores[f"Carries {brand_filter}"]
             if brand_filter == "Mayfield":
@@ -3662,7 +3690,7 @@ with tab_territory:
 
         st.subheader("Placement Signals")
         table_cols = [
-            "Recommendation", "Store Name", "License", "City", "County",
+            "Designation", "Recommendation", "Store Name", "License", "City", "County",
             "Priority Level", "Market Sales Last Month", "Sales Rank", "Active Brands",
             "Nearby K. Savage", "Nearby Mayfield", "Nearest Store", "Nearest Distance",
             "Nearby Detail", "K. Savage", "Mayfield", "Leisure Land",
