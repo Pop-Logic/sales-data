@@ -2301,6 +2301,14 @@ st.markdown(f"""
   [data-testid="stExpander"] [data-testid="stWidgetLabel"] span {{
     color:#F7F8FA !important;
   }}
+  div[class*="st-key-territory_designations_"] button,
+  div[class*="st-key-territory_designations_"] button *,
+  div[class*="st-key-territory_designation_"] [data-testid="stWidgetLabel"],
+  div[class*="st-key-territory_designation_"] [data-testid="stWidgetLabel"] label,
+  div[class*="st-key-territory_designation_"] [data-testid="stWidgetLabel"] p,
+  div[class*="st-key-territory_designation_"] [data-testid="stWidgetLabel"] span {{
+    color:#FFFFFF !important;
+  }}
   [data-testid="stMetric"] label {{font-size:12px !important}}
 </style>
 """, unsafe_allow_html=True)
