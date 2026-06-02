@@ -93,8 +93,12 @@ TERRITORY_LOCATION_COLUMNS = [
 TERRITORY_MAP_COLORS = {
     "Pitch Mayfield": "#7C5CFF",
     "Carries Mayfield": "#E8844C",
-    "Carries K. Savage": "#2EAD69",
+    "Maintain K. Savage": "#FF5AA5",
+    "Carries K. Savage": "#FF5AA5",
     "K. Savage blocked": "#D84A4A",
+    "Open Lane - High Priority": "#006D2C",
+    "Open Lane - Medium Priority": "#31A354",
+    "Open Lane - Low Priority": "#A1D99B",
     "No recent brand": "#6E7781",
     "Needs location": "#A8ADB3",
 }
@@ -1233,10 +1237,44 @@ def territory_recommendation(row):
         return "Maintain K. Savage"
     return "Open lane"
 
+def assign_open_lane_priority(stores):
+    stores["Priority Level"] = ""
+    stores["Priority Score"] = 0.0
+    if stores.empty or "Market Sales Last Month" not in stores:
+        return stores
+
+    open_lane = stores["Recommendation"].eq("Open lane")
+    if not open_lane.any():
+        return stores
+
+    sales = pd.to_numeric(stores.loc[open_lane, "Market Sales Last Month"], errors="coerce").fillna(0)
+    if sales.empty:
+        return stores
+
+    if len(sales) == 1:
+        scores = pd.Series(1.0, index=sales.index)
+    else:
+        scores = (sales.rank(method="first") - 1) / (len(sales) - 1)
+    stores.loc[open_lane, "Priority Score"] = scores
+    stores.loc[open_lane & (stores["Priority Score"] >= 0.75), "Priority Level"] = "High"
+    stores.loc[
+        open_lane
+        & stores["Priority Level"].eq("")
+        & (stores["Priority Score"] >= 0.40),
+        "Priority Level",
+    ] = "Medium"
+    stores.loc[open_lane & stores["Priority Level"].eq(""), "Priority Level"] = "Low"
+    return stores
+
 def territory_map_category(row):
     rec = row.get("Recommendation", "")
     if rec == "Pitch Mayfield":
         return "Pitch Mayfield"
+    if rec == "Maintain K. Savage":
+        return "Maintain K. Savage"
+    if rec == "Open lane":
+        priority = str(row.get("Priority Level", "") or "Low").title()
+        return f"Open Lane - {priority} Priority"
     if row.get("Carries Mayfield", False):
         return "Carries Mayfield"
     if row.get("Carries K. Savage", False):
@@ -1300,6 +1338,7 @@ def enrich_territory_proximity(stores_df, radius_miles):
         lambda idx: "; ".join(neighbor_details[idx][:4]) if neighbor_details[idx] else ""
     )
     stores["Recommendation"] = stores.apply(territory_recommendation, axis=1)
+    stores = assign_open_lane_priority(stores)
     stores["Map Category"] = stores.apply(territory_map_category, axis=1)
     pairs = pd.DataFrame(pair_rows).sort_values("Distance (mi)") if pair_rows else pd.DataFrame(
         columns=["Store A", "License A", "Brands A", "Store B", "License B", "Brands B", "Distance (mi)"]
@@ -1319,6 +1358,8 @@ def render_google_territory_map(map_df, height=540):
             "license": str(row.get("License", "")),
             "brands": str(row.get("Active Brands", "")),
             "recommendation": str(row.get("Recommendation", "")),
+            "priority": str(row.get("Priority Level", "")),
+            "marketSales": float(row.get("Market Sales Last Month", 0) or 0),
             "nearby": str(row.get("Nearby Detail", "")),
             "color": TERRITORY_MAP_COLORS.get(row.get("Map Category"), "#6E7781"),
         })
@@ -1363,6 +1404,8 @@ def render_google_territory_map(map_df, height=540):
                 <div>License: ${{esc(point.license)}}</div>
                 <div>Brands: ${{esc(point.brands)}}</div>
                 <div>Recommendation: <b>${{esc(point.recommendation)}}</b></div>
+                ${{point.priority ? `<div>Priority: <b>${{esc(point.priority)}}</b></div>` : ""}}
+                <div>Market sales: $${{Number(point.marketSales || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</div>
                 ${{point.nearby ? `<div style="margin-top:6px">Nearby: ${{esc(point.nearby)}}</div>` : ""}}
               </div>
             `);
@@ -1398,6 +1441,8 @@ def render_plotly_territory_map(map_df):
             "License": True,
             "Active Brands": True,
             "Recommendation": True,
+            "Priority Level": True,
+            "Market Sales Last Month": ":$,.0f",
             "Nearby K. Savage": True,
             "Nearby Mayfield": True,
             "Latitude": False,
@@ -3597,7 +3642,7 @@ with tab_territory:
         st.subheader("Placement Signals")
         table_cols = [
             "Recommendation", "Store Name", "License", "City", "County",
-            "Market Sales Last Month", "Sales Rank", "Active Brands",
+            "Priority Level", "Market Sales Last Month", "Sales Rank", "Active Brands",
             "Nearby K. Savage", "Nearby Mayfield", "Nearest Store", "Nearest Distance",
             "Nearby Detail", "K. Savage", "Mayfield", "Leisure Land",
             "Orders", "Last Order", "Brand Revenue", "Revenue Total",
