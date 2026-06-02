@@ -1396,6 +1396,20 @@ def territory_map_category(row):
         return "K. Savage blocked"
     return "No recent brand"
 
+def territory_selector_mask(stores_df, designation):
+    false_mask = pd.Series(False, index=stores_df.index)
+    if stores_df is None or stores_df.empty:
+        return false_mask
+    if designation == "Carries K. Savage":
+        return stores_df.get("Carries K. Savage", false_mask).fillna(False).astype(bool)
+    if designation in {"Mayfield placed", "Carries Mayfield"}:
+        return stores_df.get("Carries Mayfield", false_mask).fillna(False).astype(bool)
+    if designation == "Leisure Land Placed":
+        return stores_df.get("Carries Leisure Land", false_mask).fillna(False).astype(bool)
+    if designation == "K Savage Lapsed":
+        return stores_df.get("K Savage Lapsed", false_mask).fillna(False).astype(bool)
+    return stores_df.get("Map Category", pd.Series("", index=stores_df.index)).eq(designation)
+
 def enrich_territory_proximity(stores_df, radius_miles):
     if stores_df is None or stores_df.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -3810,15 +3824,33 @@ with tab_territory:
                 designation for designation in selected_designations
                 if designation != TERRITORY_ALL_OTHER_SELECTOR
             ]
-            designation_mask = filtered_stores["Map Category"].isin(regular_designations)
+            selector_masks = {
+                designation: territory_selector_mask(filtered_stores, designation)
+                for designation in regular_designations
+            }
+            designation_mask = pd.Series(False, index=filtered_stores.index)
+            selected_category = pd.Series("", index=filtered_stores.index, dtype=object)
+            for designation, selector_mask in selector_masks.items():
+                designation_mask = designation_mask | selector_mask
+                selected_category = selected_category.mask(
+                    selected_category.eq("") & selector_mask,
+                    designation,
+                )
             if TERRITORY_ALL_OTHER_SELECTOR in selected_designations:
-                other_mask = ~filtered_stores["Map Category"].isin(regular_designations)
+                other_mask = ~designation_mask
                 other_mask = other_mask & ~filtered_stores["Map Category"].isin(TERRITORY_SELECTOR_EXCLUDED_CATEGORIES)
                 all_other_mask = other_mask
                 designation_mask = designation_mask | other_mask
             if include_missing:
                 designation_mask = designation_mask | unmapped_mask
             filtered_stores = filtered_stores[designation_mask].copy()
+            selected_category = selected_category.reindex(filtered_stores.index, fill_value="")
+            category_override = (
+                selected_category.ne("")
+                & ~filtered_stores["Map Category"].isin(regular_designations)
+            )
+            filtered_stores.loc[category_override, "Map Category"] = selected_category[category_override]
+            filtered_stores.loc[category_override, "Designation"] = selected_category[category_override]
             all_other_filtered = all_other_mask.reindex(filtered_stores.index, fill_value=False)
             filtered_stores.loc[all_other_filtered, "Map Category"] = TERRITORY_ALL_OTHER_SELECTOR
             filtered_stores.loc[all_other_filtered, "Designation"] = TERRITORY_ALL_OTHER_SELECTOR
