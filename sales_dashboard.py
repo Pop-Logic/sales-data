@@ -96,7 +96,9 @@ TERRITORY_MAP_COLORS = {
     "Carries Mayfield": "#E8844C",
     "Maintain K. Savage": "#FF5AA5",
     "Carries K. Savage": "#FF5AA5",
-    "K Savage Lapsed": "#FFD23F",
+    "K Savage Lapsed - High Priority": "#B8860B",
+    "K Savage Lapsed - Medium Priority": "#FFD23F",
+    "K Savage Lapsed - Low Priority": "#FFF3B0",
     "Leisure Land Placed": "#89CFF0",
     "K. Savage blocked": "#D84A4A",
     "Open Lane - High Priority": "#006D2C",
@@ -108,10 +110,18 @@ TERRITORY_MAP_COLORS = {
 }
 TERRITORY_SELECTOR_EXCLUDED_CATEGORIES = {"Needs location"}
 TERRITORY_ALL_OTHER_SELECTOR = "All Other Retailers"
+TERRITORY_K_SAVAGE_LAPSED_CATEGORIES = [
+    "K Savage Lapsed - High Priority",
+    "K Savage Lapsed - Medium Priority",
+    "K Savage Lapsed - Low Priority",
+]
+TERRITORY_MAP_STROKES = {
+    "Leisure Land Placed": "#F28C28",
+}
 TERRITORY_SELECTOR_ALWAYS_VISIBLE_CATEGORIES = {
-    "K Savage Lapsed",
     "Leisure Land Placed",
     TERRITORY_ALL_OTHER_SELECTOR,
+    *TERRITORY_K_SAVAGE_LAPSED_CATEGORIES,
 }
 TOTAL_PATTERN = re.compile(
     r"^(total|totals|sum|grand\s*total|ytd|year\s*to\s*date|annual|avg|average|subtotal)s?$",
@@ -1170,7 +1180,10 @@ def build_brand_store_profile(order_df, active_days=120):
     columns = [
         "License Key", "Order Store", "Orders", "Last Order", "Last Order #",
         "Last Order Amount", "Total Units", "Brand Revenue"
-    ] + TERRITORY_BRANDS + ["K. Savage Last Order", "K. Savage Historical Revenue"]
+    ] + TERRITORY_BRANDS + [
+        "K. Savage Last Order", "K. Savage Last Order #",
+        "K. Savage Last Order Amount", "K. Savage Historical Revenue",
+    ]
     if order_df is None or order_df.empty:
         return pd.DataFrame(columns=columns)
 
@@ -1203,6 +1216,27 @@ def build_brand_store_profile(order_df, active_days=120):
             "K_Savage_Historical_Revenue": "K. Savage Historical Revenue",
         })
     )
+    k_savage_order_totals = (
+        odf[odf["Brand"].eq("K. Savage")]
+        .groupby(["License Key", "Order #", "Submitted Date"], dropna=False)
+        .agg(K_Savage_Last_Order_Amount=("Line Total", "sum"))
+        .reset_index()
+        .sort_values(["License Key", "Submitted Date", "Order #"])
+    )
+    if not k_savage_order_totals.empty:
+        k_savage_latest_orders = (
+            k_savage_order_totals.drop_duplicates("License Key", keep="last")
+            .rename(columns={
+                "Order #": "K. Savage Last Order #",
+                "Submitted Date": "K. Savage Last Order",
+                "K_Savage_Last_Order_Amount": "K. Savage Last Order Amount",
+            })[[
+                "License Key", "K. Savage Last Order #",
+                "K. Savage Last Order", "K. Savage Last Order Amount",
+            ]]
+        )
+        k_savage_history = k_savage_history.drop(columns=["K. Savage Last Order"], errors="ignore")
+        k_savage_history = k_savage_history.merge(k_savage_latest_orders, on="License Key", how="outer")
     order_totals = (
         odf.groupby(["License Key", "Order #", "Submitted Date"], dropna=False)
         .agg(Last_Order_Amount=("Line Total", "sum"))
@@ -1303,6 +1337,15 @@ def build_territory_store_table(locations_df, revenue_df, months, order_df, acti
         errors="coerce",
     ).fillna(0)
     stores["K. Savage Last Order"] = pd.to_datetime(stores.get("K. Savage Last Order"), errors="coerce")
+    stores["K. Savage Last Order #"] = (
+        stores["K. Savage Last Order #"].fillna("").astype(str)
+        if "K. Savage Last Order #" in stores
+        else ""
+    )
+    stores["K. Savage Last Order Amount"] = pd.to_numeric(
+        stores.get("K. Savage Last Order Amount", 0),
+        errors="coerce",
+    ).fillna(0)
     stores["K. Savage Historical Revenue"] = pd.to_numeric(
         stores.get("K. Savage Historical Revenue", 0),
         errors="coerce",
@@ -1369,6 +1412,36 @@ def assign_open_lane_priority(stores):
         "Priority Level",
     ] = "Medium"
     stores.loc[open_lane & stores["Priority Level"].eq(""), "Priority Level"] = "Low"
+
+    k_lapsed = stores["Recommendation"].eq("K Savage Lapsed")
+    if k_lapsed.any():
+        run_rate = pd.to_numeric(
+            stores.loc[k_lapsed, "K. Savage Monthly Run Rate"],
+            errors="coerce",
+        ).fillna(0)
+        last_revenue = pd.to_numeric(
+            stores.loc[k_lapsed, "K. Savage Last Active Revenue"],
+            errors="coerce",
+        ).fillna(0)
+        historical_revenue = pd.to_numeric(
+            stores.loc[k_lapsed, "K. Savage Historical Revenue"],
+            errors="coerce",
+        ).fillna(0)
+        lapsed_values = run_rate.where(run_rate > 0, last_revenue)
+        lapsed_values = lapsed_values.where(lapsed_values > 0, historical_revenue)
+        if len(lapsed_values) == 1:
+            lapsed_scores = pd.Series(1.0, index=lapsed_values.index)
+        else:
+            lapsed_scores = (lapsed_values.rank(method="first") - 1) / (len(lapsed_values) - 1)
+        stores.loc[k_lapsed, "Priority Score"] = lapsed_scores
+        stores.loc[k_lapsed & (stores["Priority Score"] >= 0.75), "Priority Level"] = "High"
+        stores.loc[
+            k_lapsed
+            & stores["Priority Level"].eq("")
+            & (stores["Priority Score"] >= 0.40),
+            "Priority Level",
+        ] = "Medium"
+        stores.loc[k_lapsed & stores["Priority Level"].eq(""), "Priority Level"] = "Low"
     return stores
 
 def territory_map_category(row):
@@ -1378,7 +1451,8 @@ def territory_map_category(row):
     if row.get("Carries K. Savage", False):
         return "Carries K. Savage"
     if rec == "K Savage Lapsed" or row.get("K Savage Lapsed", False):
-        return "K Savage Lapsed"
+        priority = str(row.get("Priority Level", "") or "Low").title()
+        return f"K Savage Lapsed - {priority} Priority"
     if row.get("Carries Leisure Land", False):
         return "Leisure Land Placed"
     if rec == "Pitch Mayfield":
@@ -1408,6 +1482,12 @@ def territory_selector_mask(stores_df, designation):
         return stores_df.get("Carries Leisure Land", false_mask).fillna(False).astype(bool)
     if designation == "K Savage Lapsed":
         return stores_df.get("K Savage Lapsed", false_mask).fillna(False).astype(bool)
+    if designation in TERRITORY_K_SAVAGE_LAPSED_CATEGORIES:
+        priority = designation.replace("K Savage Lapsed - ", "").replace(" Priority", "")
+        return (
+            stores_df.get("K Savage Lapsed", false_mask).fillna(False).astype(bool)
+            & stores_df.get("Priority Level", pd.Series("", index=stores_df.index)).eq(priority)
+        )
     return stores_df.get("Map Category", pd.Series("", index=stores_df.index)).eq(designation)
 
 def enrich_territory_proximity(stores_df, radius_miles):
@@ -1479,6 +1559,13 @@ def render_google_territory_map(map_df, height=540):
     for _, row in map_df.dropna(subset=["Latitude", "Longitude"]).iterrows():
         last_order = pd.to_datetime(row.get("Last Order"), errors="coerce")
         last_order_amount = pd.to_numeric(row.get("Last Order Amount", 0), errors="coerce")
+        k_savage_last_order = pd.to_datetime(row.get("K. Savage Last Order"), errors="coerce")
+        k_savage_last_order_amount = pd.to_numeric(row.get("K. Savage Last Order Amount", 0), errors="coerce")
+        k_savage_last_active_amount = pd.to_numeric(row.get("K. Savage Last Active Revenue", 0), errors="coerce")
+        k_savage_run_rate = pd.to_numeric(row.get("K. Savage Monthly Run Rate", 0), errors="coerce")
+        k_savage_last_active = row.get("K. Savage Last Active Month", "")
+        k_savage_last_active = "" if pd.isna(k_savage_last_active) else str(k_savage_last_active)
+        map_category = row.get("Map Category")
         points.append({
             "lat": float(row["Latitude"]),
             "lng": float(row["Longitude"]),
@@ -1490,8 +1577,16 @@ def render_google_territory_map(map_df, height=540):
             "marketSales": float(row.get("Market Sales Last Month", 0) or 0),
             "lastOrder": last_order.strftime("%m/%d/%Y") if pd.notna(last_order) else "",
             "lastOrderAmount": float(0 if pd.isna(last_order_amount) else last_order_amount),
+            "kSavageLapsed": bool(row.get("K Savage Lapsed", False)),
+            "kSavageLastOrder": k_savage_last_order.strftime("%m/%d/%Y") if pd.notna(k_savage_last_order) else "",
+            "kSavageLastOrderAmount": float(0 if pd.isna(k_savage_last_order_amount) else k_savage_last_order_amount),
+            "kSavageLastActive": k_savage_last_active,
+            "kSavageLastActiveAmount": float(0 if pd.isna(k_savage_last_active_amount) else k_savage_last_active_amount),
+            "kSavageRunRate": float(0 if pd.isna(k_savage_run_rate) else k_savage_run_rate),
             "nearby": str(row.get("Nearby Detail", "")),
-            "color": TERRITORY_MAP_COLORS.get(row.get("Map Category"), "#6E7781"),
+            "color": TERRITORY_MAP_COLORS.get(map_category, "#6E7781"),
+            "strokeColor": TERRITORY_MAP_STROKES.get(map_category, "#ffffff"),
+            "strokeWeight": 3 if map_category in TERRITORY_MAP_STROKES else 2,
         })
     if not points:
         return False
@@ -1523,8 +1618,8 @@ def render_google_territory_map(map_df, height=540):
               scale: 8,
               fillColor: point.color,
               fillOpacity: 0.95,
-              strokeColor: "#ffffff",
-              strokeWeight: 2
+              strokeColor: point.strokeColor,
+              strokeWeight: point.strokeWeight
             }}
           }});
           marker.addListener("click", () => {{
@@ -1537,6 +1632,9 @@ def render_google_territory_map(map_df, height=540):
                 ${{point.priority ? `<div>Priority: <b>${{esc(point.priority)}}</b></div>` : ""}}
                 <div>Market sales: $${{Number(point.marketSales || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</div>
                 ${{point.lastOrder ? `<div>Last order: <b>${{esc(point.lastOrder)}}</b> · $${{Number(point.lastOrderAmount || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</div>` : ""}}
+                ${{point.kSavageLapsed && point.kSavageLastOrder ? `<div>Last K. Savage order: <b>${{esc(point.kSavageLastOrder)}}</b> · $${{Number(point.kSavageLastOrderAmount || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</div>` : ""}}
+                ${{point.kSavageLapsed && !point.kSavageLastOrder && point.kSavageLastActive ? `<div>Last K. Savage activity: <b>${{esc(point.kSavageLastActive)}}</b> · $${{Number(point.kSavageLastActiveAmount || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</div>` : ""}}
+                ${{point.kSavageLapsed && point.kSavageRunRate ? `<div>K. Savage run rate: $${{Number(point.kSavageRunRate || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</div>` : ""}}
                 ${{point.nearby ? `<div style="margin-top:6px">Nearby: ${{esc(point.nearby)}}</div>` : ""}}
               </div>
             `);
@@ -1576,6 +1674,11 @@ def render_plotly_territory_map(map_df):
             "Market Sales Last Month": ":$,.0f",
             "Last Order": True,
             "Last Order Amount": ":$,.0f",
+            "K. Savage Last Order": True,
+            "K. Savage Last Order Amount": ":$,.0f",
+            "K. Savage Last Active Month": True,
+            "K. Savage Last Active Revenue": ":$,.0f",
+            "K. Savage Monthly Run Rate": ":$,.0f",
             "Nearby K. Savage": True,
             "Nearby Mayfield": True,
             "Latitude": False,
@@ -3887,7 +3990,8 @@ with tab_territory:
         table_cols = [
             "Designation", "Recommendation", "Store Name", "License", "City", "County",
             "Priority Level", "Market Sales Last Month", "Sales Rank", "Active Brands",
-            "K Savage Lapsed", "K. Savage Last Order", "K. Savage Historical Revenue",
+            "K Savage Lapsed", "K. Savage Last Order", "K. Savage Last Order #",
+            "K. Savage Last Order Amount", "K. Savage Historical Revenue",
             "K. Savage Last Active Month", "K. Savage Last Active Revenue", "K. Savage Monthly Run Rate",
             "Nearby K. Savage", "Nearby Mayfield", "Nearest Store", "Nearest Distance",
             "Nearby Detail", "K. Savage", "Mayfield", "Leisure Land",
@@ -3918,6 +4022,7 @@ with tab_territory:
                 "Last Order": st.column_config.DatetimeColumn("Last Order", format="MM/DD/YYYY"),
                 "Last Order Amount": st.column_config.NumberColumn("Last Order Amount", format="$%.0f"),
                 "K. Savage Last Order": st.column_config.DatetimeColumn("K. Savage Last", format="MM/DD/YYYY"),
+                "K. Savage Last Order Amount": st.column_config.NumberColumn("K. Savage Last Order", format="$%.0f"),
             },
         )
         st.download_button(
