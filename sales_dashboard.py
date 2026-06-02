@@ -106,7 +106,7 @@ TERRITORY_MAP_COLORS = {
     "Needs location": "#A8ADB3",
 }
 TERRITORY_SELECTOR_EXCLUDED_CATEGORIES = {"Needs location"}
-TERRITORY_SELECTOR_ALWAYS_VISIBLE_CATEGORIES = {"K Savage Lapsed"}
+TERRITORY_SELECTOR_ALWAYS_VISIBLE_CATEGORIES = {"K Savage Lapsed", "Leisure Land Placed"}
 TOTAL_PATTERN = re.compile(
     r"^(total|totals|sum|grand\s*total|ytd|year\s*to\s*date|annual|avg|average|subtotal)s?$",
     re.IGNORECASE,
@@ -1162,7 +1162,8 @@ def build_revenue_store_profile(df, months):
 
 def build_brand_store_profile(order_df, active_days=120):
     columns = [
-        "License Key", "Order Store", "Orders", "Last Order", "Total Units", "Brand Revenue"
+        "License Key", "Order Store", "Orders", "Last Order", "Last Order #",
+        "Last Order Amount", "Total Units", "Brand Revenue"
     ] + TERRITORY_BRANDS + ["K. Savage Last Order", "K. Savage Historical Revenue"]
     if order_df is None or order_df.empty:
         return pd.DataFrame(columns=columns)
@@ -1196,12 +1197,32 @@ def build_brand_store_profile(order_df, active_days=120):
             "K_Savage_Historical_Revenue": "K. Savage Historical Revenue",
         })
     )
+    order_totals = (
+        odf.groupby(["License Key", "Order #", "Submitted Date"], dropna=False)
+        .agg(Last_Order_Amount=("Line Total", "sum"))
+        .reset_index()
+        .sort_values(["License Key", "Submitted Date", "Order #"])
+    )
+    latest_orders = (
+        order_totals.drop_duplicates("License Key", keep="last")
+        .rename(columns={
+            "Order #": "Last Order #",
+            "Submitted Date": "Last Order",
+            "Last_Order_Amount": "Last Order Amount",
+        })[["License Key", "Last Order #", "Last Order", "Last Order Amount"]]
+    )
+    names = (
+        odf.sort_values("Submitted Date")
+        .drop_duplicates("License Key", keep="last")[["License Key", "Client"]]
+        .rename(columns={"Client": "Order Store"})
+    )
 
     as_of = odf["Submitted Date"].max()
     cutoff = as_of - pd.Timedelta(days=int(active_days))
     active_odf = odf[odf["Submitted Date"] >= cutoff].copy()
     if active_odf.empty:
-        out = k_savage_history.copy()
+        out = latest_orders.merge(names, on="License Key", how="left")
+        out = out.merge(k_savage_history, on="License Key", how="outer")
         for col in columns:
             if col not in out.columns:
                 out[col] = 0
@@ -1223,21 +1244,15 @@ def build_brand_store_profile(order_df, active_days=120):
         active_odf.groupby("License Key")
         .agg(
             Orders=("Order #", "nunique"),
-            Last_Order=("Submitted Date", "max"),
             Total_Units=("Units", "sum"),
             Brand_Revenue=("Line Total", "sum"),
         )
         .reset_index()
     )
-    names = (
-        active_odf.sort_values("Submitted Date")
-        .drop_duplicates("License Key", keep="last")[["License Key", "Client"]]
-        .rename(columns={"Client": "Order Store"})
-    )
     out = totals.merge(names, on="License Key", how="left").merge(brand_pivot, on="License Key", how="left")
+    out = out.merge(latest_orders, on="License Key", how="outer")
     out = out.merge(k_savage_history, on="License Key", how="outer")
     out = out.rename(columns={
-        "Last_Order": "Last Order",
         "Total_Units": "Total Units",
         "Brand_Revenue": "Brand Revenue",
     })
@@ -1265,6 +1280,9 @@ def build_territory_store_table(locations_df, revenue_df, months, order_df, acti
         stores[brand] = pd.to_numeric(stores.get(brand, 0), errors="coerce").fillna(0)
         stores[f"Carries {brand}"] = stores[brand] > 0
     stores["Orders"] = pd.to_numeric(stores.get("Orders", 0), errors="coerce").fillna(0).astype(int)
+    stores["Last Order"] = pd.to_datetime(stores.get("Last Order"), errors="coerce")
+    stores["Last Order #"] = stores["Last Order #"].fillna("").astype(str) if "Last Order #" in stores else ""
+    stores["Last Order Amount"] = pd.to_numeric(stores.get("Last Order Amount", 0), errors="coerce").fillna(0)
     stores["Total Units"] = pd.to_numeric(stores.get("Total Units", 0), errors="coerce").fillna(0)
     stores["Brand Revenue"] = pd.to_numeric(stores.get("Brand Revenue", 0), errors="coerce").fillna(0)
     stores["Revenue Total"] = pd.to_numeric(stores.get("Revenue Total", 0), errors="coerce").fillna(0)
@@ -1439,6 +1457,8 @@ def render_google_territory_map(map_df, height=540):
         return False
     points = []
     for _, row in map_df.dropna(subset=["Latitude", "Longitude"]).iterrows():
+        last_order = pd.to_datetime(row.get("Last Order"), errors="coerce")
+        last_order_amount = pd.to_numeric(row.get("Last Order Amount", 0), errors="coerce")
         points.append({
             "lat": float(row["Latitude"]),
             "lng": float(row["Longitude"]),
@@ -1448,6 +1468,8 @@ def render_google_territory_map(map_df, height=540):
             "recommendation": str(row.get("Recommendation", "")),
             "priority": str(row.get("Priority Level", "")),
             "marketSales": float(row.get("Market Sales Last Month", 0) or 0),
+            "lastOrder": last_order.strftime("%m/%d/%Y") if pd.notna(last_order) else "",
+            "lastOrderAmount": float(0 if pd.isna(last_order_amount) else last_order_amount),
             "nearby": str(row.get("Nearby Detail", "")),
             "color": TERRITORY_MAP_COLORS.get(row.get("Map Category"), "#6E7781"),
         })
@@ -1494,6 +1516,7 @@ def render_google_territory_map(map_df, height=540):
                 <div>Recommendation: <b>${{esc(point.recommendation)}}</b></div>
                 ${{point.priority ? `<div>Priority: <b>${{esc(point.priority)}}</b></div>` : ""}}
                 <div>Market sales: $${{Number(point.marketSales || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</div>
+                ${{point.lastOrder ? `<div>Last order: <b>${{esc(point.lastOrder)}}</b> · $${{Number(point.lastOrderAmount || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</div>` : ""}}
                 ${{point.nearby ? `<div style="margin-top:6px">Nearby: ${{esc(point.nearby)}}</div>` : ""}}
               </div>
             `);
@@ -1531,6 +1554,8 @@ def render_plotly_territory_map(map_df):
             "Recommendation": True,
             "Priority Level": True,
             "Market Sales Last Month": ":$,.0f",
+            "Last Order": True,
+            "Last Order Amount": ":$,.0f",
             "Nearby K. Savage": True,
             "Nearby Mayfield": True,
             "Latitude": False,
@@ -3815,7 +3840,7 @@ with tab_territory:
             "K. Savage Last Active Month", "K. Savage Last Active Revenue", "K. Savage Monthly Run Rate",
             "Nearby K. Savage", "Nearby Mayfield", "Nearest Store", "Nearest Distance",
             "Nearby Detail", "K. Savage", "Mayfield", "Leisure Land",
-            "Orders", "Last Order", "Brand Revenue", "Revenue Total",
+            "Orders", "Last Order", "Last Order #", "Last Order Amount", "Brand Revenue", "Revenue Total",
             "Flowers & Prerolls", "Concentrates & Cartridges",
             "Edibles, Topicals, Infused, etc.",
         ]
@@ -3840,6 +3865,7 @@ with tab_territory:
                 "K. Savage Monthly Run Rate": st.column_config.NumberColumn("K. Savage Run Rate", format="$%.0f"),
                 "Market Sales Last Month": st.column_config.NumberColumn("Market Sales", format="$%.0f"),
                 "Last Order": st.column_config.DatetimeColumn("Last Order", format="MM/DD/YYYY"),
+                "Last Order Amount": st.column_config.NumberColumn("Last Order Amount", format="$%.0f"),
                 "K. Savage Last Order": st.column_config.DatetimeColumn("K. Savage Last", format="MM/DD/YYYY"),
             },
         )
