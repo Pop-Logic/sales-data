@@ -96,6 +96,7 @@ TERRITORY_MAP_COLORS = {
     "Carries Mayfield": "#E8844C",
     "Maintain K. Savage": "#FF5AA5",
     "Carries K. Savage": "#FF5AA5",
+    "Leisure Land Placed": "#89CFF0",
     "K. Savage blocked": "#D84A4A",
     "Open Lane - High Priority": "#006D2C",
     "Open Lane - Medium Priority": "#31A354",
@@ -1273,6 +1274,8 @@ def territory_map_category(row):
         return "Needs location"
     if row.get("Carries K. Savage", False):
         return "Carries K. Savage"
+    if row.get("Carries Leisure Land", False):
+        return "Leisure Land Placed"
     if rec == "Pitch Mayfield":
         return "Pitch Mayfield"
     if rec == "Mayfield placed":
