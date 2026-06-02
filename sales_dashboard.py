@@ -96,6 +96,7 @@ TERRITORY_MAP_COLORS = {
     "Carries Mayfield": "#E8844C",
     "Maintain K. Savage": "#FF5AA5",
     "Carries K. Savage": "#FF5AA5",
+    "K Savage Lapsed": "#FFD23F",
     "Leisure Land Placed": "#89CFF0",
     "K. Savage blocked": "#D84A4A",
     "Open Lane - High Priority": "#006D2C",
@@ -1123,7 +1124,7 @@ def build_revenue_store_profile(df, months):
 def build_brand_store_profile(order_df, active_days=120):
     columns = [
         "License Key", "Order Store", "Orders", "Last Order", "Total Units", "Brand Revenue"
-    ] + TERRITORY_BRANDS
+    ] + TERRITORY_BRANDS + ["K. Savage Last Order", "K. Savage Historical Revenue"]
     if order_df is None or order_df.empty:
         return pd.DataFrame(columns=columns)
 
@@ -1140,17 +1141,35 @@ def build_brand_store_profile(order_df, active_days=120):
     if odf.empty:
         return pd.DataFrame(columns=columns)
 
-    as_of = odf["Submitted Date"].max()
-    cutoff = as_of - pd.Timedelta(days=int(active_days))
-    odf = odf[odf["Submitted Date"] >= cutoff].copy()
-    if odf.empty:
-        return pd.DataFrame(columns=columns)
-
     odf["License"] = odf["License #"].apply(clean_reference)
     odf["License Key"] = odf["License"].apply(license_match_key)
     odf = odf[odf["License Key"].ne("")]
+    k_savage_history = (
+        odf[odf["Brand"].eq("K. Savage")]
+        .groupby("License Key")
+        .agg(
+            K_Savage_Last_Order=("Submitted Date", "max"),
+            K_Savage_Historical_Revenue=("Line Total", "sum"),
+        )
+        .reset_index()
+        .rename(columns={
+            "K_Savage_Last_Order": "K. Savage Last Order",
+            "K_Savage_Historical_Revenue": "K. Savage Historical Revenue",
+        })
+    )
+
+    as_of = odf["Submitted Date"].max()
+    cutoff = as_of - pd.Timedelta(days=int(active_days))
+    active_odf = odf[odf["Submitted Date"] >= cutoff].copy()
+    if active_odf.empty:
+        out = k_savage_history.copy()
+        for col in columns:
+            if col not in out.columns:
+                out[col] = 0
+        return out[columns]
+
     brand_pivot = (
-        odf.pivot_table(
+        active_odf.pivot_table(
             index="License Key", columns="Brand", values="Line Total",
             aggfunc="sum", fill_value=0,
         )
@@ -1162,7 +1181,7 @@ def build_brand_store_profile(order_df, active_days=120):
             brand_pivot[brand] = 0
 
     totals = (
-        odf.groupby("License Key")
+        active_odf.groupby("License Key")
         .agg(
             Orders=("Order #", "nunique"),
             Last_Order=("Submitted Date", "max"),
@@ -1172,11 +1191,12 @@ def build_brand_store_profile(order_df, active_days=120):
         .reset_index()
     )
     names = (
-        odf.sort_values("Submitted Date")
+        active_odf.sort_values("Submitted Date")
         .drop_duplicates("License Key", keep="last")[["License Key", "Client"]]
         .rename(columns={"Client": "Order Store"})
     )
     out = totals.merge(names, on="License Key", how="left").merge(brand_pivot, on="License Key", how="left")
+    out = out.merge(k_savage_history, on="License Key", how="outer")
     out = out.rename(columns={
         "Last_Order": "Last Order",
         "Total_Units": "Total Units",
@@ -1210,6 +1230,12 @@ def build_territory_store_table(locations_df, revenue_df, months, order_df, acti
     stores["Brand Revenue"] = pd.to_numeric(stores.get("Brand Revenue", 0), errors="coerce").fillna(0)
     stores["Revenue Total"] = pd.to_numeric(stores.get("Revenue Total", 0), errors="coerce").fillna(0)
     stores["Latest Month Revenue"] = pd.to_numeric(stores.get("Latest Month Revenue", 0), errors="coerce").fillna(0)
+    stores["K. Savage Last Order"] = pd.to_datetime(stores.get("K. Savage Last Order"), errors="coerce")
+    stores["K. Savage Historical Revenue"] = pd.to_numeric(
+        stores.get("K. Savage Historical Revenue", 0),
+        errors="coerce",
+    ).fillna(0)
+    stores["K Savage Lapsed"] = (stores["K. Savage Historical Revenue"] > 0) & (~stores["Carries K. Savage"])
     stores["Market Sales Last Month"] = stores["Sales Last Month"].apply(parse_market_sales)
     stores["Active Brands"] = stores.apply(
         lambda r: ", ".join([brand for brand in TERRITORY_BRANDS if r.get(f"Carries {brand}", False)]) or "None",
@@ -1229,6 +1255,8 @@ def haversine_miles(lat1, lon1, lat2, lon2):
 def territory_recommendation(row):
     if pd.isna(row.get("Latitude")) or pd.isna(row.get("Longitude")):
         return "Needs location"
+    if row.get("K Savage Lapsed", False):
+        return "K Savage Lapsed"
     if row.get("Carries Mayfield", False):
         return "Mayfield placed"
     if row.get("Nearby K. Savage", 0) > 0 and row.get("Nearby Mayfield", 0) == 0:
@@ -1274,6 +1302,8 @@ def territory_map_category(row):
         return "Needs location"
     if row.get("Carries K. Savage", False):
         return "Carries K. Savage"
+    if rec == "K Savage Lapsed" or row.get("K Savage Lapsed", False):
+        return "K Savage Lapsed"
     if row.get("Carries Leisure Land", False):
         return "Leisure Land Placed"
     if rec == "Pitch Mayfield":
@@ -3723,6 +3753,7 @@ with tab_territory:
         table_cols = [
             "Designation", "Recommendation", "Store Name", "License", "City", "County",
             "Priority Level", "Market Sales Last Month", "Sales Rank", "Active Brands",
+            "K Savage Lapsed", "K. Savage Last Order", "K. Savage Historical Revenue",
             "Nearby K. Savage", "Nearby Mayfield", "Nearest Store", "Nearest Distance",
             "Nearby Detail", "K. Savage", "Mayfield", "Leisure Land",
             "Orders", "Last Order", "Brand Revenue", "Revenue Total",
@@ -3745,8 +3776,10 @@ with tab_territory:
                 "Leisure Land": st.column_config.NumberColumn("Leisure Land", format="$%.0f"),
                 "Brand Revenue": st.column_config.NumberColumn("Brand Revenue", format="$%.0f"),
                 "Revenue Total": st.column_config.NumberColumn("Revenue Total", format="$%.0f"),
+                "K. Savage Historical Revenue": st.column_config.NumberColumn("K. Savage History", format="$%.0f"),
                 "Market Sales Last Month": st.column_config.NumberColumn("Market Sales", format="$%.0f"),
                 "Last Order": st.column_config.DatetimeColumn("Last Order", format="MM/DD/YYYY"),
+                "K. Savage Last Order": st.column_config.DatetimeColumn("K. Savage Last", format="MM/DD/YYYY"),
             },
         )
         st.download_button(
