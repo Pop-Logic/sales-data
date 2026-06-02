@@ -1112,8 +1112,13 @@ def geocode_store_locations(locations_df, api_key, limit=25):
     return updated, {"attempted": attempted, "successes": successes}
 
 def build_revenue_store_profile(df, months):
+    columns = [
+        "License Key", "License", "Revenue Store", "Revenue Total", "Latest Month Revenue",
+        "K. Savage Last Active", "K. Savage Last Active Month",
+        "K. Savage Last Active Revenue", "K. Savage Monthly Run Rate",
+    ]
     if df is None or df.empty:
-        return pd.DataFrame(columns=["License Key", "License", "Revenue Store", "Revenue Total", "Latest Month Revenue"])
+        return pd.DataFrame(columns=columns)
     profile = df.reset_index()[["License", "Store Name"]].copy()
     profile["License"] = profile["License"].apply(clean_reference)
     profile["License Key"] = profile["License"].apply(license_match_key)
@@ -1121,7 +1126,39 @@ def build_revenue_store_profile(df, months):
     profile["Revenue Total"] = df[months].sum(axis=1).values if months else 0
     latest_month = find_latest_populated_month_col(df, months) if months else None
     profile["Latest Month Revenue"] = df[latest_month].values if latest_month else 0
-    return profile
+
+    dated_months = [
+        (month, month_col_to_ts(month))
+        for month in months
+        if month_col_to_ts(month) is not None
+    ]
+    last_active_dates = []
+    last_active_labels = []
+    last_active_revenues = []
+    monthly_run_rates = []
+    for lic in df.index:
+        active_months = []
+        for month, ts in dated_months:
+            value = pd.to_numeric(df.at[lic, month], errors="coerce")
+            value = 0 if pd.isna(value) else float(value)
+            if value > 0:
+                active_months.append((month, ts, value))
+        if active_months:
+            last_month, last_ts, last_revenue = active_months[-1]
+            recent_revenues = [value for _, _, value in active_months[-3:]]
+            monthly_run_rate = sum(recent_revenues) / len(recent_revenues)
+        else:
+            last_month, last_ts, last_revenue, monthly_run_rate = "", pd.NaT, 0, 0
+        last_active_dates.append(last_ts)
+        last_active_labels.append(last_month)
+        last_active_revenues.append(last_revenue)
+        monthly_run_rates.append(monthly_run_rate)
+
+    profile["K. Savage Last Active"] = last_active_dates
+    profile["K. Savage Last Active Month"] = last_active_labels
+    profile["K. Savage Last Active Revenue"] = last_active_revenues
+    profile["K. Savage Monthly Run Rate"] = monthly_run_rates
+    return profile[columns]
 
 def build_brand_store_profile(order_df, active_days=120):
     columns = [
@@ -1232,12 +1269,24 @@ def build_territory_store_table(locations_df, revenue_df, months, order_df, acti
     stores["Brand Revenue"] = pd.to_numeric(stores.get("Brand Revenue", 0), errors="coerce").fillna(0)
     stores["Revenue Total"] = pd.to_numeric(stores.get("Revenue Total", 0), errors="coerce").fillna(0)
     stores["Latest Month Revenue"] = pd.to_numeric(stores.get("Latest Month Revenue", 0), errors="coerce").fillna(0)
+    stores["K. Savage Last Active"] = pd.to_datetime(stores.get("K. Savage Last Active"), errors="coerce")
+    stores["K. Savage Last Active Revenue"] = pd.to_numeric(
+        stores.get("K. Savage Last Active Revenue", 0),
+        errors="coerce",
+    ).fillna(0)
+    stores["K. Savage Monthly Run Rate"] = pd.to_numeric(
+        stores.get("K. Savage Monthly Run Rate", 0),
+        errors="coerce",
+    ).fillna(0)
     stores["K. Savage Last Order"] = pd.to_datetime(stores.get("K. Savage Last Order"), errors="coerce")
     stores["K. Savage Historical Revenue"] = pd.to_numeric(
         stores.get("K. Savage Historical Revenue", 0),
         errors="coerce",
     ).fillna(0)
-    stores["K Savage Lapsed"] = (stores["K. Savage Historical Revenue"] > 0) & (~stores["Carries K. Savage"])
+    monthly_k_savage_active = stores["Latest Month Revenue"] > 0
+    k_savage_has_history = (stores["Revenue Total"] > 0) | (stores["K. Savage Historical Revenue"] > 0)
+    stores["Carries K. Savage"] = stores["Carries K. Savage"] | monthly_k_savage_active
+    stores["K Savage Lapsed"] = k_savage_has_history & (~stores["Carries K. Savage"])
     stores["Market Sales Last Month"] = stores["Sales Last Month"].apply(parse_market_sales)
     stores["Active Brands"] = stores.apply(
         lambda r: ", ".join([brand for brand in TERRITORY_BRANDS if r.get(f"Carries {brand}", False)]) or "None",
@@ -3763,6 +3812,7 @@ with tab_territory:
             "Designation", "Recommendation", "Store Name", "License", "City", "County",
             "Priority Level", "Market Sales Last Month", "Sales Rank", "Active Brands",
             "K Savage Lapsed", "K. Savage Last Order", "K. Savage Historical Revenue",
+            "K. Savage Last Active Month", "K. Savage Last Active Revenue", "K. Savage Monthly Run Rate",
             "Nearby K. Savage", "Nearby Mayfield", "Nearest Store", "Nearest Distance",
             "Nearby Detail", "K. Savage", "Mayfield", "Leisure Land",
             "Orders", "Last Order", "Brand Revenue", "Revenue Total",
@@ -3786,6 +3836,8 @@ with tab_territory:
                 "Brand Revenue": st.column_config.NumberColumn("Brand Revenue", format="$%.0f"),
                 "Revenue Total": st.column_config.NumberColumn("Revenue Total", format="$%.0f"),
                 "K. Savage Historical Revenue": st.column_config.NumberColumn("K. Savage History", format="$%.0f"),
+                "K. Savage Last Active Revenue": st.column_config.NumberColumn("K. Savage Last Active Rev", format="$%.0f"),
+                "K. Savage Monthly Run Rate": st.column_config.NumberColumn("K. Savage Run Rate", format="$%.0f"),
                 "Market Sales Last Month": st.column_config.NumberColumn("Market Sales", format="$%.0f"),
                 "Last Order": st.column_config.DatetimeColumn("Last Order", format="MM/DD/YYYY"),
                 "K. Savage Last Order": st.column_config.DatetimeColumn("K. Savage Last", format="MM/DD/YYYY"),
