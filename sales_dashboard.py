@@ -2505,14 +2505,35 @@ if rev_exact_dup_ids:
 
 _order_df_check = st.session_state.get("order_df")
 if _order_df_check is not None:
-    _ord_dup_mask = _order_df_check.duplicated()
+    _ord_dup_key = _order_df_check.fillna("<blank>").astype(str).agg("\x1f".join, axis=1)
+    _ord_dup_mask = _ord_dup_key.duplicated(keep=False)
     if _ord_dup_mask.any():
-        _ord_dup_rows = _order_df_check[_ord_dup_mask]
-        _id_cols = [c for c in ["Order #", "License #", "Client", "Submitted Date"] if c in _ord_dup_rows.columns]
-        _ord_dup_labels = _ord_dup_rows[_id_cols].astype(str).agg(" · ".join, axis=1).tolist()
+        _ord_dup_rows = _order_df_check[_ord_dup_mask].copy()
+        _ord_dup_rows["_dup_key"] = _ord_dup_key[_ord_dup_mask]
+        _ord_dup_groups = []
+        for _, _group in _ord_dup_rows.groupby("_dup_key", sort=False):
+            _first = _group.iloc[0]
+            _row_labels = []
+            for _idx in _group.index:
+                try:
+                    _row_labels.append(str(int(_idx) + 2))
+                except Exception:
+                    _row_labels.append(str(_idx))
+            _row_nums = ", ".join(_row_labels)
+            _parts = [
+                str(_first.get("Order #", "")).strip(),
+                str(_first.get("Product", "")).strip(),
+                str(_first.get("Client", "")).strip(),
+                str(_first.get("License #", "")).strip(),
+                str(_first.get("Submitted Date", "")).strip(),
+            ]
+            _ord_dup_groups.append(" · ".join([p for p in _parts if p]) + f" · rows {_row_nums}")
+        _ord_dup_preview = "; ".join(_ord_dup_groups[:8])
+        if len(_ord_dup_groups) > 8:
+            _ord_dup_preview += f"; +{len(_ord_dup_groups) - 8} more"
         st.warning(
-            f"⚠️ Order data: {len(_ord_dup_labels)} fully duplicate row{'s' if len(_ord_dup_labels)!=1 else ''} detected "
-            f"(identical across all columns) — {'; '.join(_ord_dup_labels)}"
+            f"⚠️ Order data: {len(_ord_dup_groups)} fully duplicate row group{'s' if len(_ord_dup_groups)!=1 else ''} detected "
+            f"({len(_ord_dup_rows)} rows involved; identical across all columns) — {_ord_dup_preview}"
         )
 
 top_lics, grand = compute_pareto(df, months, threshold)
