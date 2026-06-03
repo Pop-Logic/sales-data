@@ -250,13 +250,18 @@ function transactionStatusInfo_(response) {
       ''
     );
     const lowerStatus = info.status.toLowerCase();
+    const update = String(json.Update || json.update || '').toLowerCase();
+    const pct = Number(json.Pct || json.pct || 0);
     info.failed = (
       Boolean(json.Failed || json.failed || json.HasError || json.hasError) ||
       /fail|error|cancel/.test(lowerStatus)
     );
     info.done = (
       Boolean(json.IsComplete || json.isComplete || json.Completed || json.completed || json.Done || json.done) ||
-      /complete|completed|success|succeeded|done|finished/.test(lowerStatus)
+      Number(json.Status || json.status) === 2 ||
+      pct >= 1 ||
+      /complete|completed|success|succeeded|done|finished/.test(lowerStatus) ||
+      /complete|completed|success|succeeded|done|finished/.test(update)
     );
     info.downloadUrl = downloadUrlFromJson_(json);
   } catch (err) {
@@ -266,7 +271,7 @@ function transactionStatusInfo_(response) {
 }
 
 function downloadUrlFromJson_(json) {
-  const url = firstStringByKeyPattern_(json, /download|file|url|uri|href/i);
+  const url = firstStringByKeyPattern_(json, /finalvalue|download|file|url|uri|href/i);
   if (!url) {
     return '';
   }
