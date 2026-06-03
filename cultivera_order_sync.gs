@@ -26,6 +26,11 @@ function testCultiveraExportRequest() {
   Logger.log(`Content-Disposition: ${headerValue_(headers, 'Content-Disposition') || headerValue_(headers, 'content-disposition') || ''}`);
   Logger.log(`Body bytes: ${response.getBlob().getBytes().length}`);
   Logger.log(`Body preview: ${safeTextPreview_(response, 300)}`);
+  const transactionId = transactionIdFromResponse_(response);
+  if (transactionId) {
+    Logger.log(`Cultivera created async export transaction: ${transactionId}`);
+    Logger.log('Next step: capture the follow-up Network request that uses this TransactionId to download the export file.');
+  }
 }
 
 function syncCultiveraOrdersToSheet() {
@@ -119,12 +124,32 @@ function responseToSheetValues_(response) {
   ).toLowerCase();
 
   if (contentType.includes('json')) {
-    return jsonToSheetValues_(JSON.parse(response.getContentText()));
+    const json = JSON.parse(response.getContentText());
+    const transactionId = transactionIdFromJson_(json);
+    if (transactionId) {
+      throw new Error(
+        `Cultivera returned async export TransactionId ${transactionId}, not order rows yet. ` +
+        'Capture the follow-up download/status request from DevTools Network and add it to this script.'
+      );
+    }
+    return jsonToSheetValues_(json);
   }
   if (contentType.includes('csv') || disposition.includes('.csv')) {
     return Utilities.parseCsv(response.getContentText());
   }
   return excelBlobToSheetValues_(response.getBlob());
+}
+
+function transactionIdFromResponse_(response) {
+  try {
+    return transactionIdFromJson_(JSON.parse(response.getContentText()));
+  } catch (err) {
+    return '';
+  }
+}
+
+function transactionIdFromJson_(json) {
+  return String((json && (json.TransactionId || json.transactionId || json.transactionID)) || '').trim();
 }
 
 function excelBlobToSheetValues_(blob) {
