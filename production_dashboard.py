@@ -94,6 +94,21 @@ COST_TREND_COLUMNS = [
     "Total Expenses",
     "Net Income",
 ]
+COST_TREND_DERIVED_COLUMNS = {
+    "Processing Labor": [
+        "624 Wages - Buck",
+        "628.1 Contract Labor - Trim",
+    ],
+    "Production Labor": [
+        "622 Wages - Grow",
+    ],
+    "Consulting": [
+        "606 Consulting",
+    ],
+    "Total Direct Labor": [
+        "Total 620 Direct Labor",
+    ],
+}
 
 # Canonical product names — aliases are collapsed to the canonical form
 PRODUCT_ALIASES = {
@@ -238,6 +253,14 @@ def cost_detail_summary(costs_view: pd.DataFrame, columns: list[str], cost_type:
     detail = detail[detail["Amount"].abs() > 0].copy()
     return detail[["Cost Type", "Line Item", "Amount"]]
 
+def add_cost_trend_derived_columns(monthly: pd.DataFrame) -> pd.DataFrame:
+    for label, source_cols in COST_TREND_DERIVED_COLUMNS.items():
+        monthly[label] = 0.0
+        for col in source_cols:
+            if col in monthly.columns:
+                monthly[label] += monthly[col]
+    return monthly
+
 def render_costs_tab(
     costs_df: pd.DataFrame,
     costs_error: str = "",
@@ -300,12 +323,19 @@ def render_costs_tab(
     st.divider()
 
     st.subheader("Monthly Performance")
-    trend_cols = [col for col in COST_TREND_COLUMNS if col in costs_view.columns]
     monthly = (
-        costs_view.groupby("Statement Month", as_index=False)[trend_cols]
-        .sum()
+        costs_view.groupby("Statement Month", as_index=False)
+        .sum(numeric_only=True)
         .sort_values("Statement Month")
     )
+    monthly = add_cost_trend_derived_columns(monthly)
+    trend_cols = [
+        col for col in [
+            *COST_TREND_COLUMNS,
+            *COST_TREND_DERIVED_COLUMNS.keys(),
+        ]
+        if col in monthly.columns
+    ]
     trend = monthly.melt(
         id_vars="Statement Month",
         value_vars=trend_cols,
