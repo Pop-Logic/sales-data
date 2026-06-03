@@ -1860,6 +1860,27 @@ def route_waypoint_coords(waypoint_rows):
             coords.append((float(row["Latitude"]), float(row["Longitude"])))
     return tuple(coords[:9])
 
+def route_map_overlay(origin_endpoint, destination_endpoint, waypoint_rows):
+    if not origin_endpoint or not destination_endpoint:
+        return None
+
+    path = []
+    if origin_endpoint.get("coords"):
+        lat, lng = origin_endpoint["coords"]
+        path.append({"lat": float(lat), "lng": float(lng), "label": "Start"})
+    for idx, (lat, lng) in enumerate(route_waypoint_coords(waypoint_rows), start=1):
+        path.append({"lat": float(lat), "lng": float(lng), "label": f"Stop {idx}"})
+    if destination_endpoint.get("coords"):
+        lat, lng = destination_endpoint["coords"]
+        path.append({"lat": float(lat), "lng": float(lng), "label": "Destination"})
+
+    return {
+        "origin": origin_endpoint.get("maps_value", ""),
+        "destination": destination_endpoint.get("maps_value", ""),
+        "waypoints": list(route_waypoint_values(waypoint_rows)),
+        "path": path,
+    }
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def google_directions_summary(origin, destination, waypoints, api_key):
     if not api_key or not origin or not destination:
@@ -2017,7 +2038,7 @@ def enrich_territory_proximity(stores_df, radius_miles):
     )
     return stores, pairs
 
-def render_google_territory_map(map_df, height=540):
+def render_google_territory_map(map_df, route_overlay=None, height=540):
     key = google_maps_browser_key()
     if not key:
         return False
@@ -2063,9 +2084,26 @@ def render_google_territory_map(map_df, height=540):
     <div id="territory-map" style="height:{height}px;width:100%;border-radius:6px;overflow:hidden"></div>
     <script>
       const territoryPoints = {json.dumps(points)};
+      const territoryRoute = {json.dumps(route_overlay or {})};
       const esc = (value) => String(value ?? "")
         .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+      function drawFallbackRoute(map, bounds) {{
+        const path = (territoryRoute.path || []).map((point) => ({{lat: point.lat, lng: point.lng}}));
+        if (path.length < 2) {{
+          return false;
+        }}
+        new google.maps.Polyline({{
+          path,
+          geodesic: true,
+          strokeColor: "#35A7FF",
+          strokeOpacity: 0.88,
+          strokeWeight: 5,
+          map
+        }});
+        path.forEach((position) => bounds.extend(position));
+        return true;
+      }}
       function initTerritoryMap() {{
         const map = new google.maps.Map(document.getElementById("territory-map"), {{
           center: {{lat: territoryPoints[0].lat, lng: territoryPoints[0].lng}},
@@ -2111,6 +2149,41 @@ def render_google_territory_map(map_df, height=540):
           }});
           bounds.extend(marker.getPosition());
         }});
+        let hasFallbackRoute = false;
+        if (territoryRoute.origin && territoryRoute.destination) {{
+          const directionsService = new google.maps.DirectionsService();
+          const directionsRenderer = new google.maps.DirectionsRenderer({{
+            map,
+            suppressMarkers: false,
+            preserveViewport: false,
+            polylineOptions: {{
+              strokeColor: "#35A7FF",
+              strokeOpacity: 0.9,
+              strokeWeight: 6
+            }}
+          }});
+          directionsService.route(
+            {{
+              origin: territoryRoute.origin,
+              destination: territoryRoute.destination,
+              waypoints: (territoryRoute.waypoints || []).map((location) => ({{location, stopover: true}})),
+              optimizeWaypoints: false,
+              travelMode: google.maps.TravelMode.DRIVING
+            }},
+            (result, status) => {{
+              if (status === "OK" && result) {{
+                directionsRenderer.setDirections(result);
+              }} else {{
+                drawFallbackRoute(map, bounds);
+              }}
+            }}
+          );
+        }} else {{
+          hasFallbackRoute = drawFallbackRoute(map, bounds);
+        }}
+        if (!hasFallbackRoute && (territoryRoute.path || []).length > 1) {{
+          (territoryRoute.path || []).forEach((point) => bounds.extend({{lat: point.lat, lng: point.lng}}));
+        }}
         if (territoryPoints.length > 1) {{
           map.fitBounds(bounds, 60);
         }} else {{
@@ -2124,7 +2197,7 @@ def render_google_territory_map(map_df, height=540):
     components.html(html, height=height + 8)
     return True
 
-def render_plotly_territory_map(map_df):
+def render_plotly_territory_map(map_df, route_overlay=None):
     plotted = map_df.dropna(subset=["Latitude", "Longitude"]).copy()
     if plotted.empty:
         return False
@@ -2160,6 +2233,19 @@ def render_plotly_territory_map(map_df):
         height=540,
     )
     fig.update_traces(marker=dict(size=11, opacity=0.9))
+    route_path = (route_overlay or {}).get("path", [])
+    if len(route_path) > 1:
+        fig.add_trace(
+            go.Scattermapbox(
+                lat=[point["lat"] for point in route_path],
+                lon=[point["lng"] for point in route_path],
+                mode="lines+markers",
+                name="Route",
+                line=dict(color="#35A7FF", width=4),
+                marker=dict(size=8, color="#F7F8FA"),
+                hoverinfo="skip",
+            )
+        )
     fig.update_layout(
         mapbox_style="open-street-map",
         margin=dict(l=0, r=0, t=0, b=0),
@@ -2993,6 +3079,11 @@ st.markdown(f"""
   [data-testid="stMetric"] label,
   [data-testid="stMetric"] label p {{
     color:#111 !important;
+  }}
+  [data-testid="stExpander"] [data-testid="stMetric"] label,
+  [data-testid="stExpander"] [data-testid="stMetric"] label p,
+  [data-testid="stExpander"] [data-testid="stMetricLabel"] {{
+    color:#F7F8FA !important;
   }}
   [data-testid="stWidgetLabel"],
   [data-testid="stWidgetLabel"] label,
@@ -4463,12 +4554,10 @@ with tab_territory:
         mapped_filtered = filtered_stores[
             filtered_stores["Latitude"].notna() & filtered_stores["Longitude"].notna()
         ]
-        if mapped_filtered.empty:
-            st.info("No mapped stores match the current filters. Geocode addresses to enable the map and proximity signals; the retailer table below still shows loaded rows.")
-        else:
-            rendered_google = render_google_territory_map(mapped_filtered) if use_google_map else False
-            if not rendered_google:
-                render_plotly_territory_map(mapped_filtered)
+        territory_map_container = st.container()
+        route_start_endpoint = None
+        route_destination_endpoint = None
+        selected_route_rows = pd.DataFrame()
 
         with st.expander("Route Planner", expanded=True):
             route_api_key = google_maps_server_key()
@@ -4625,6 +4714,23 @@ with tab_territory:
                     )
                 else:
                     st.caption("Enter a final destination to open the selected stops in Google Maps.")
+
+        active_route_overlay = route_map_overlay(
+            route_start_endpoint,
+            route_destination_endpoint,
+            selected_route_rows,
+        )
+        with territory_map_container:
+            if mapped_filtered.empty:
+                st.info("No mapped stores match the current filters. Geocode addresses to enable the map and proximity signals; the retailer table below still shows loaded rows.")
+            else:
+                rendered_google = (
+                    render_google_territory_map(mapped_filtered, route_overlay=active_route_overlay)
+                    if use_google_map
+                    else False
+                )
+                if not rendered_google:
+                    render_plotly_territory_map(mapped_filtered, route_overlay=active_route_overlay)
 
         st.subheader("Placement Signals")
         table_cols = [
