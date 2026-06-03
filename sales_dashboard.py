@@ -66,6 +66,7 @@ DATA_DIR = Path("Data")
 DB_PATH = DATA_DIR / "sales_dashboard.sqlite3"
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1kY5e6SXd7eQ7GJx-jg6M1R60WCCZ9I_25Eb7ZmuDKHw/edit?usp=sharing"
 DEFAULT_SHEET_GID = "0"
+DEFAULT_TERRITORY_REP_GID = "1653796501"
 CONTACT_LOG_WORKSHEET = "Contact Log"
 CONTACT_LOG_COLUMNS = [
     "License", "Store Name", "Month", "Revenue",
@@ -90,6 +91,7 @@ TERRITORY_LOCATION_COLUMNS = [
     "Flowers & Prerolls", "Concentrates & Cartridges",
     "Edibles, Topicals, Infused, etc.", "UBI",
 ]
+TERRITORY_REP_ASSIGNMENT_COLUMNS = ["License", "Store Name", "Territory Rep", "Territory"]
 TERRITORY_MAP_COLORS = {
     "Pitch Mayfield": "#7C5CFF",
     "Mayfield placed": "#E8844C",
@@ -976,6 +978,74 @@ def load_location_sheet_as_df(sheet_url, gid="0"):
         raise ValueError("The location sheet is empty.")
     return normalize_store_locations(raw), raw.shape
 
+def normalize_territory_rep_assignments(raw_df):
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=TERRITORY_REP_ASSIGNMENT_COLUMNS + ["License Key", "Store Key"])
+
+    aliases = {
+        "License": ["License", "License #", "license", "license_number"],
+        "Store Name": ["Store Name", "Store", "Client", "Retailer", "Account", "Business Name"],
+        "Territory Rep": ["Territory Rep", "Sales Rep", "Rep", "Representative", "Owner", "Assigned Rep"],
+        "Territory": ["Territory", "Region", "Sales Territory", "Area", "Route"],
+    }
+    out = pd.DataFrame(index=raw_df.index)
+    for target, source_names in aliases.items():
+        source = _first_source_col(raw_df, source_names)
+        out[target] = raw_df[source] if source is not None else ""
+
+    for col in TERRITORY_REP_ASSIGNMENT_COLUMNS:
+        out[col] = out[col].apply(_territory_clean_cell)
+    out["License"] = out["License"].apply(clean_reference)
+    out["License Key"] = out["License"].apply(license_match_key)
+    out["Store Key"] = out["Store Name"].apply(store_match_key)
+    out = out[
+        (out["License Key"].ne("") | out["Store Key"].ne(""))
+        & (out["Territory Rep"].ne("") | out["Territory"].ne(""))
+    ].copy()
+    return out[TERRITORY_REP_ASSIGNMENT_COLUMNS + ["License Key", "Store Key"]].reset_index(drop=True)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_territory_rep_assignments(sheet_url=DEFAULT_SHEET_URL, gid=DEFAULT_TERRITORY_REP_GID):
+    from io import StringIO as _StringIO
+    csv_url = google_sheet_csv_url(sheet_url, gid)
+    text = _fetch_sheet_csv(csv_url)
+    raw = pd.read_csv(_StringIO(text)).dropna(how="all").dropna(axis=1, how="all")
+    if raw.empty:
+        raise ValueError("The territory rep sheet is empty.")
+    return normalize_territory_rep_assignments(raw), raw.shape
+
+def apply_territory_rep_assignments(stores_df, assignments_df):
+    stores = stores_df.copy()
+    stores["Territory Rep"] = ""
+    stores["Territory"] = ""
+    if stores.empty or assignments_df is None or assignments_df.empty:
+        return stores
+
+    assignments = assignments_df.copy()
+    for col in ["Territory Rep", "Territory", "License Key", "Store Key"]:
+        if col not in assignments:
+            assignments[col] = ""
+
+    for target_col in ["Territory Rep", "Territory"]:
+        by_license = (
+            assignments[assignments["License Key"].ne("")]
+            .drop_duplicates("License Key", keep="last")
+            .set_index("License Key")[target_col]
+            .to_dict()
+        )
+        by_store = (
+            assignments[assignments["Store Key"].ne("")]
+            .drop_duplicates("Store Key", keep="last")
+            .set_index("Store Key")[target_col]
+            .to_dict()
+        )
+        values = stores["License Key"].map(by_license).fillna("")
+        missing = values.astype(str).str.strip().eq("")
+        store_keys = stores["Store Name"].apply(store_match_key)
+        values = values.where(~missing, store_keys.map(by_store).fillna(""))
+        stores[target_col] = values.fillna("").astype(str).str.strip()
+    return stores
+
 @st.cache_data(ttl=60, show_spinner=False)
 def load_store_locations():
     init_storage()
@@ -1571,6 +1641,8 @@ def render_google_territory_map(map_df, height=540):
             "lng": float(row["Longitude"]),
             "store": str(row.get("Store Name", "")),
             "license": str(row.get("License", "")),
+            "rep": str(row.get("Territory Rep", "")),
+            "territory": str(row.get("Territory", "")),
             "brands": str(row.get("Active Brands", "")),
             "recommendation": str(row.get("Recommendation", "")),
             "priority": str(row.get("Priority Level", "")),
@@ -1627,6 +1699,7 @@ def render_google_territory_map(map_df, height=540):
               <div style="font-family:Arial,sans-serif;max-width:280px">
                 <div style="font-weight:700;margin-bottom:4px">${{esc(point.store)}}</div>
                 <div>License: ${{esc(point.license)}}</div>
+                ${{point.rep ? `<div>Rep: <b>${{esc(point.rep)}}</b>${{point.territory ? ` · ${{esc(point.territory)}}` : ""}}</div>` : ""}}
                 <div>Brands: ${{esc(point.brands)}}</div>
                 <div>Recommendation: <b>${{esc(point.recommendation)}}</b></div>
                 ${{point.priority ? `<div>Priority: <b>${{esc(point.priority)}}</b></div>` : ""}}
@@ -1668,6 +1741,8 @@ def render_plotly_territory_map(map_df):
         hover_name="Store Name",
         hover_data={
             "License": True,
+            "Territory Rep": True,
+            "Territory": True,
             "Active Brands": True,
             "Recommendation": True,
             "Priority Level": True,
@@ -3692,6 +3767,12 @@ with tab_territory:
         st.warning(st.session_state.pop("territory_warning"))
 
     locations = load_store_locations()
+    rep_assignments = pd.DataFrame(columns=TERRITORY_REP_ASSIGNMENT_COLUMNS + ["License Key", "Store Key"])
+    try:
+        rep_assignments, rep_shape = load_territory_rep_assignments()
+    except Exception as exc:
+        st.warning(f"Could not load territory rep assignments: {exc}")
+        rep_shape = None
     coord_ready = (
         locations["Latitude"].notna() & locations["Longitude"].notna()
         if not locations.empty else pd.Series(dtype=bool)
@@ -3850,6 +3931,7 @@ with tab_territory:
         )
 
         stores = build_territory_store_table(locations, df, months, ord_df, active_days)
+        stores = apply_territory_rep_assignments(stores, rep_assignments)
         stores, nearby_pairs = enrich_territory_proximity(stores, radius_miles)
 
         m1, m2, m3, m4, m5 = st.columns(5)
@@ -3864,9 +3946,11 @@ with tab_territory:
         m4.metric("Pitch Mayfield", f"{pitch_count:,}")
         m5.metric("Market Sales", fmt_usd(market_sales))
 
-        filter_cols = st.columns([1, 1])
-        brand_filter = filter_cols[0].selectbox("Brand", ["All"] + TERRITORY_BRANDS, key="territory_brand_filter")
-        use_google_map = filter_cols[1].checkbox(
+        filter_cols = st.columns([1, 1, 1])
+        rep_options = ["All"] + sorted([rep for rep in stores["Territory Rep"].dropna().unique().tolist() if str(rep).strip()])
+        rep_filter = filter_cols[0].selectbox("Rep", rep_options, key="territory_rep_filter")
+        brand_filter = filter_cols[1].selectbox("Brand", ["All"] + TERRITORY_BRANDS, key="territory_brand_filter")
+        use_google_map = filter_cols[2].checkbox(
             "Use Google Maps",
             value=bool(google_maps_browser_key()),
             disabled=not bool(google_maps_browser_key()),
@@ -3961,6 +4045,8 @@ with tab_territory:
             filtered_stores.loc[all_other_filtered, "Designation"] = TERRITORY_ALL_OTHER_SELECTOR
         elif designation_options:
             filtered_stores = filtered_stores[unmapped_mask] if include_missing else filtered_stores.iloc[0:0]
+        if rep_filter != "All":
+            filtered_stores = filtered_stores[filtered_stores["Territory Rep"].eq(rep_filter)]
         if brand_filter != "All":
             brand_mask = filtered_stores[f"Carries {brand_filter}"]
             if brand_filter == "Mayfield":
@@ -3991,7 +4077,7 @@ with tab_territory:
         st.subheader("Placement Signals")
         table_cols = [
             "Designation", "Recommendation", "Store Name", "License", "City", "County",
-            "Priority Level", "Market Sales Last Month", "Sales Rank", "Active Brands",
+            "Territory Rep", "Territory", "Priority Level", "Market Sales Last Month", "Sales Rank", "Active Brands",
             "K Savage Lapsed", "K. Savage Last Order", "K. Savage Last Order #",
             "K. Savage Last Order Amount", "K. Savage Historical Revenue",
             "K. Savage Last Active Month", "K. Savage Last Active Revenue", "K. Savage Monthly Run Rate",

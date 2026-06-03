@@ -64,6 +64,8 @@ Optional columns are `Google Place ID`, `Geocoded At`, and `Geocode Status`. Add
 
 Retailer-market columns such as `Sales Last Month`, `Sales Rank`, `County`, `Flowers & Prerolls`, `Concentrates & Cartridges`, `Edibles, Topicals, Infused, etc.`, and `UBI` are preserved when present and shown in the Territory Map analytics table.
 
+The app also loads territory rep assignments from the shared Google Sheet tab with gid `1653796501`. Expected columns are `License`, `Store Name`, `Territory Rep`, and `Territory`; common alternatives such as `License #`, `Store`, `Sales Rep`, `Rep`, `Region`, and `Area` are accepted. License matches are used first, with store-name matching as a fallback.
+
 ### Geocoding retailer addresses in Google Sheets
 
 To geocode the retailer address tab directly in Google Sheets:
