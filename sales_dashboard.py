@@ -2520,12 +2520,14 @@ st.markdown(f"""
   .metric-label {{font-size:11px;color:#111;margin:0}}
   .metric-value {{font-size:22px;font-weight:600;color:#111;margin:0}}
   [data-testid="stMetric"] label,
-  [data-testid="stMetric"] label p,
+  [data-testid="stMetric"] label p {{
+    color:#111 !important;
+  }}
   [data-testid="stWidgetLabel"],
   [data-testid="stWidgetLabel"] label,
   [data-testid="stWidgetLabel"] p,
   [data-testid="stWidgetLabel"] span {{
-    color:#111 !important;
+    color:#FFFFFF !important;
   }}
   [data-testid="stExpander"] [data-testid="stWidgetLabel"],
   [data-testid="stExpander"] [data-testid="stWidgetLabel"] label,
