@@ -1601,6 +1601,122 @@ def geocode_route_endpoint(query, api_key):
         return None
     return float(lat), float(lng)
 
+def route_store_matches(query, stores_df, max_matches=8):
+    text = str(query or "").strip()
+    if not text or parse_lat_lng_text(text) or stores_df is None or stores_df.empty:
+        return pd.DataFrame()
+
+    mapped = stores_df.copy()
+    mapped["Latitude"] = pd.to_numeric(mapped.get("Latitude"), errors="coerce")
+    mapped["Longitude"] = pd.to_numeric(mapped.get("Longitude"), errors="coerce")
+    mapped = mapped[mapped["Latitude"].notna() & mapped["Longitude"].notna()].copy()
+    if mapped.empty:
+        return mapped
+
+    license_key = license_match_key(text)
+    store_key = store_match_key(text)
+    query_lower = text.lower()
+    address_like = bool(re.search(r"\d+\s+\S+", text))
+
+    mapped["_route_match_score"] = 0
+    if "License Key" in mapped:
+        route_license_key = mapped["License Key"].astype(str)
+    else:
+        route_license_key = mapped.get("License", pd.Series("", index=mapped.index)).apply(license_match_key)
+    store_names = mapped.get("Store Name", pd.Series("", index=mapped.index)).astype(str)
+    route_store_key = store_names.apply(store_match_key)
+
+    if license_key:
+        mapped.loc[route_license_key.eq(license_key), "_route_match_score"] = 100
+    if store_key:
+        mapped.loc[route_store_key.eq(store_key), "_route_match_score"] = mapped["_route_match_score"].clip(lower=90)
+    if query_lower and not address_like:
+        store_lower = store_names.str.lower()
+        mapped.loc[store_lower.str.startswith(query_lower, na=False), "_route_match_score"] = (
+            mapped["_route_match_score"].clip(lower=75)
+        )
+        mapped.loc[store_lower.str.contains(re.escape(query_lower), na=False), "_route_match_score"] = (
+            mapped["_route_match_score"].clip(lower=55)
+        )
+
+    matched = mapped[mapped["_route_match_score"] > 0].copy()
+    if matched.empty:
+        return matched
+    matched["_route_market_sales"] = pd.to_numeric(
+        matched.get("Market Sales Last Month", 0),
+        errors="coerce",
+    ).fillna(0)
+    return (
+        matched.sort_values(["_route_match_score", "_route_market_sales", "Store Name"], ascending=[False, False, True])
+        .head(max_matches)
+        .drop(columns=["_route_match_score", "_route_market_sales"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+def route_store_match_label(row):
+    name = str(row.get("Store Name", "") or "Unnamed Store")
+    license_number = str(row.get("License", "") or "").strip()
+    city = str(row.get("City", "") or "").strip()
+    parts = [name]
+    if license_number:
+        parts.append(f"License {license_number}")
+    if city:
+        parts.append(city)
+    return " - ".join(parts)
+
+def route_endpoint_from_coords(label, coords, source):
+    if not coords:
+        return None
+    lat, lng = coords
+    maps_value = f"{float(lat):.6f},{float(lng):.6f}"
+    return {
+        "coords": (float(lat), float(lng)),
+        "label": label,
+        "maps_value": maps_value,
+        "source": source,
+    }
+
+def route_endpoint_from_store(row):
+    lat = _coerce_coord(row.get("Latitude"))
+    lng = _coerce_coord(row.get("Longitude"))
+    if pd.isna(lat) or pd.isna(lng):
+        return None
+    return route_endpoint_from_coords(route_store_match_label(row), (lat, lng), "store")
+
+def route_endpoint_from_text(query, api_key):
+    text = str(query or "").strip()
+    if not text:
+        return None
+    parsed = parse_lat_lng_text(text)
+    if parsed:
+        return route_endpoint_from_coords(text, parsed, "coordinates")
+    geocoded = geocode_route_endpoint(text, api_key)
+    if geocoded:
+        return route_endpoint_from_coords(text, geocoded, "address")
+    return {
+        "coords": None,
+        "label": text,
+        "maps_value": text,
+        "source": "address",
+    }
+
+def route_endpoint_for_input(query, stores_df, api_key, match_label, key):
+    text = str(query or "").strip()
+    if not text:
+        return None
+    matches = route_store_matches(text, stores_df)
+    if not matches.empty:
+        if len(matches) == 1:
+            return route_endpoint_from_store(matches.iloc[0])
+        selected_match = st.selectbox(
+            match_label,
+            list(range(len(matches))),
+            format_func=lambda idx: route_store_match_label(matches.iloc[idx]),
+            key=key,
+        )
+        return route_endpoint_from_store(matches.iloc[selected_match])
+    return route_endpoint_from_text(text, api_key)
+
 def route_numeric_value(value, default=0.0):
     if value is None:
         return default
@@ -1729,6 +1845,116 @@ def google_maps_route_url(origin, destination, waypoint_rows):
     if waypoints:
         params["waypoints"] = "|".join(waypoints[:9])
     return "https://www.google.com/maps/dir/?" + urlencode(params, safe="|,")
+
+def route_waypoint_values(waypoint_rows):
+    values = []
+    for _, row in waypoint_rows.iterrows():
+        if pd.notna(row.get("Latitude")) and pd.notna(row.get("Longitude")):
+            values.append(f"{float(row['Latitude']):.6f},{float(row['Longitude']):.6f}")
+    return tuple(values[:9])
+
+def route_waypoint_coords(waypoint_rows):
+    coords = []
+    for _, row in waypoint_rows.iterrows():
+        if pd.notna(row.get("Latitude")) and pd.notna(row.get("Longitude")):
+            coords.append((float(row["Latitude"]), float(row["Longitude"])))
+    return tuple(coords[:9])
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def google_directions_summary(origin, destination, waypoints, api_key):
+    if not api_key or not origin or not destination:
+        return None
+
+    import requests as _req
+
+    params = {
+        "origin": origin,
+        "destination": destination,
+        "mode": "driving",
+        "key": api_key,
+    }
+    if waypoints:
+        params["waypoints"] = "|".join(waypoints[:9])
+
+    try:
+        resp = _req.get(
+            "https://maps.googleapis.com/maps/api/directions/json",
+            params=params,
+            timeout=20,
+        )
+        data = resp.json()
+    except Exception:
+        return None
+
+    if data.get("status") != "OK" or not data.get("routes"):
+        return None
+    legs = data["routes"][0].get("legs", [])
+    distance_meters = sum(leg.get("distance", {}).get("value", 0) for leg in legs)
+    duration_seconds = sum(leg.get("duration", {}).get("value", 0) for leg in legs)
+    if not distance_meters or not duration_seconds:
+        return None
+    return {
+        "distance_miles": distance_meters / 1609.344,
+        "duration_minutes": duration_seconds / 60,
+        "source": "Google Directions",
+    }
+
+def approximate_route_summary(start_coords, destination_coords, waypoint_coords):
+    if not start_coords or not destination_coords:
+        return None
+    points = [start_coords, *waypoint_coords, destination_coords]
+    if len(points) < 2:
+        return None
+    straight_miles = sum(
+        haversine_miles(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1])
+        for i in range(len(points) - 1)
+    )
+    road_miles = straight_miles * 1.2
+    return {
+        "distance_miles": road_miles,
+        "duration_minutes": (road_miles / 35) * 60,
+        "source": "Estimated",
+    }
+
+def route_trip_summary(origin_endpoint, destination_endpoint, waypoint_rows, api_key):
+    if not origin_endpoint or not destination_endpoint:
+        return None
+
+    waypoint_values = route_waypoint_values(waypoint_rows)
+    google_summary = google_directions_summary(
+        origin_endpoint.get("maps_value"),
+        destination_endpoint.get("maps_value"),
+        waypoint_values,
+        api_key,
+    )
+    if google_summary:
+        return google_summary
+
+    return approximate_route_summary(
+        origin_endpoint.get("coords"),
+        destination_endpoint.get("coords"),
+        route_waypoint_coords(waypoint_rows),
+    )
+
+def format_drive_minutes(minutes):
+    if minutes is None:
+        return "--"
+    try:
+        minutes = int(round(float(minutes)))
+    except (TypeError, ValueError):
+        return "--"
+    hours, mins = divmod(max(0, minutes), 60)
+    if hours:
+        return f"{hours}h {mins}m"
+    return f"{mins}m"
+
+def format_route_miles(miles):
+    if miles is None:
+        return "--"
+    try:
+        return f"{float(miles):,.1f} mi"
+    except (TypeError, ValueError):
+        return "--"
 
 def enrich_territory_proximity(stores_df, radius_miles):
     if stores_df is None or stores_df.empty:
@@ -4250,12 +4476,12 @@ with tab_territory:
             route_start = route_cols[0].text_input(
                 "Start",
                 key="territory_route_start",
-                placeholder="Address or lat,lng",
+                placeholder="Store, license, address, or lat,lng",
             )
             route_destination = route_cols[1].text_input(
                 "Final Destination",
                 key="territory_route_destination",
-                placeholder="Address or lat,lng",
+                placeholder="Store, license, address, or lat,lng",
             )
             route_max_stops = route_cols[2].number_input(
                 "Stops",
@@ -4275,12 +4501,22 @@ with tab_territory:
                 key="territory_route_max_detour",
             )
 
-            route_start_coords = geocode_route_endpoint(route_start, route_api_key) if route_start.strip() else None
-            route_destination_coords = (
-                geocode_route_endpoint(route_destination, route_api_key)
-                if route_destination.strip()
-                else None
+            route_start_endpoint = route_endpoint_for_input(
+                route_start,
+                stores,
+                route_api_key,
+                "Start Match",
+                "territory_route_start_match",
             )
+            route_destination_endpoint = route_endpoint_for_input(
+                route_destination,
+                stores,
+                route_api_key,
+                "Destination Match",
+                "territory_route_destination_match",
+            )
+            route_start_coords = route_start_endpoint.get("coords") if route_start_endpoint else None
+            route_destination_coords = route_destination_endpoint.get("coords") if route_destination_endpoint else None
             route_candidates = build_route_candidates(
                 mapped_filtered,
                 start_coords=route_start_coords,
@@ -4312,24 +4548,47 @@ with tab_territory:
                 selected_route_rows = route_options.loc[
                     [idx for idx in route_option_indices if idx in selected_route_indices]
                 ].head(9)
+                trip_summary = route_trip_summary(
+                    route_start_endpoint,
+                    route_destination_endpoint,
+                    selected_route_rows,
+                    route_api_key,
+                )
 
-                route_summary_cols = st.columns(3)
+                route_summary_cols = st.columns(5)
                 route_summary_cols[0].metric("Candidates", f"{len(route_candidates):,}")
                 route_summary_cols[1].metric("Selected Stops", f"{len(selected_route_rows):,}")
+                miles_label = "Trip Miles"
+                time_label = "Drive Time"
+                if trip_summary and trip_summary.get("source") == "Estimated":
+                    miles_label = "Trip Miles Est."
+                    time_label = "Drive Time Est."
+                route_summary_cols[2].metric(
+                    miles_label,
+                    format_route_miles(trip_summary.get("distance_miles") if trip_summary else None),
+                )
+                route_summary_cols[3].metric(
+                    time_label,
+                    format_drive_minutes(trip_summary.get("duration_minutes") if trip_summary else None),
+                )
                 if selected_route_rows["Approx Detour Miles"].notna().any():
                     max_detour = pd.to_numeric(
                         selected_route_rows["Approx Detour Miles"],
                         errors="coerce",
                     ).max()
-                    route_summary_cols[2].metric("Max Detour", f"{max_detour:.1f} mi")
+                    route_summary_cols[4].metric("Max Detour", f"{max_detour:.1f} mi")
                 elif selected_route_rows["Miles To Destination"].notna().any():
                     nearest_destination = pd.to_numeric(
                         selected_route_rows["Miles To Destination"],
                         errors="coerce",
                     ).min()
-                    route_summary_cols[2].metric("Nearest Dest.", f"{nearest_destination:.1f} mi")
+                    route_summary_cols[4].metric("Nearest Dest.", f"{nearest_destination:.1f} mi")
                 else:
-                    route_summary_cols[2].metric("Top Score", f"{route_options['Route Score'].max():.1f}")
+                    route_summary_cols[4].metric("Top Score", f"{route_options['Route Score'].max():.1f}")
+                if route_start_endpoint and route_start_endpoint.get("source") == "store":
+                    st.caption(f"Start: {route_start_endpoint['label']}")
+                if route_destination_endpoint and route_destination_endpoint.get("source") == "store":
+                    st.caption(f"Destination: {route_destination_endpoint['label']}")
 
                 route_display_cols = [
                     "Store Name", "License", "City", "Territory Rep", "Territory",
@@ -4357,7 +4616,11 @@ with tab_territory:
                 if route_destination.strip():
                     st.link_button(
                         "Open Route in Google Maps",
-                        google_maps_route_url(route_start, route_destination, selected_route_rows),
+                        google_maps_route_url(
+                            route_start_endpoint.get("maps_value") if route_start_endpoint else route_start,
+                            route_destination_endpoint.get("maps_value") if route_destination_endpoint else route_destination,
+                            selected_route_rows,
+                        ),
                         width="stretch",
                     )
                 else:
