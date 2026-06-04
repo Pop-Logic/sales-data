@@ -774,6 +774,57 @@ def sort_share_rows(share_df, revenue_col, sort_by):
 def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-") or "report"
 
+def _order_duplicate_groups(odf: pd.DataFrame):
+    if odf is None or odf.empty:
+        return [], 0, 0
+
+    dup_key = odf.fillna("<blank>").astype(str).agg("\x1f".join, axis=1)
+    dup_mask = dup_key.duplicated(keep=False)
+    removed_count = int(dup_key.duplicated(keep="first").sum())
+    if not dup_mask.any():
+        return [], 0, 0
+
+    dup_rows = odf[dup_mask].copy()
+    dup_rows["_dup_key"] = dup_key[dup_mask]
+    groups = []
+    for _, group in dup_rows.groupby("_dup_key", sort=False):
+        first = group.iloc[0]
+        row_labels = []
+        for idx in group.index:
+            try:
+                row_labels.append(str(int(idx) + 2))
+            except Exception:
+                row_labels.append(str(idx))
+        row_nums = ", ".join(row_labels)
+        parts = [
+            str(first.get("Order #", "")).strip(),
+            str(first.get("Product", "")).strip(),
+            str(first.get("Client", "")).strip(),
+            str(first.get("License #", "")).strip(),
+            str(first.get("Submitted Date", "")).strip(),
+        ]
+        groups.append(" · ".join([p for p in parts if p]) + f" · rows {row_nums}")
+
+    return groups, int(dup_mask.sum()), removed_count
+
+def _dedupe_order_detail_rows(odf: pd.DataFrame) -> pd.DataFrame:
+    groups, rows_involved, removed_count = _order_duplicate_groups(odf)
+    out = odf.drop_duplicates(keep="first").reset_index(drop=True) if removed_count else odf.copy()
+    out.attrs["order_duplicate_groups"] = groups
+    out.attrs["order_duplicate_rows_involved"] = rows_involved
+    out.attrs["order_duplicate_rows_removed"] = removed_count
+    return out
+
+def _order_data_label(source, odf: pd.DataFrame, column_count=None):
+    cols = column_count if column_count is not None else (odf.shape[1] if odf is not None else 0)
+    row_word = "row" if len(odf) == 1 else "rows"
+    label = f"{source} · {len(odf)} {row_word} · {cols} columns"
+    removed = int(odf.attrs.get("order_duplicate_rows_removed", 0))
+    if removed:
+        dup_word = "row" if removed == 1 else "rows"
+        label += f" · {removed} duplicate {dup_word} removed"
+    return label
+
 def _enrich_order_df(odf: pd.DataFrame) -> pd.DataFrame:
     def _brand(sub):
         s = str(sub).strip()
@@ -791,7 +842,7 @@ def _enrich_order_df(odf: pd.DataFrame) -> pd.DataFrame:
         odf["License #"] = odf["License #"].apply(
             lambda x: str(int(float(x))) if pd.notna(x) and str(x).strip() not in ("", "nan") else ""
         )
-    return odf
+    return _dedupe_order_detail_rows(odf)
 
 def parse_orders(file_obj) -> pd.DataFrame:
     name = getattr(file_obj, "name", "")
@@ -815,9 +866,10 @@ def load_order_sheet_into_session(sheet_url, gid, clear_cache=False):
     if clear_cache:
         load_order_sheet_as_df.clear()
     raw, shape = load_order_sheet_as_df(sheet_url, gid)
-    st.session_state["order_df"] = _enrich_order_df(raw)
-    st.session_state["order_data_label"] = f"Google Sheet · {shape[0]} rows · {shape[1]} columns"
-    return shape
+    order_df = _enrich_order_df(raw)
+    st.session_state["order_df"] = order_df
+    st.session_state["order_data_label"] = _order_data_label("Google Sheet", order_df, shape[1])
+    return order_df.shape
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_cultivera_sync_last_updated(sheet_url):
@@ -3955,11 +4007,10 @@ with st.sidebar:
         if _saved_url:
             if st.button("Refresh Order Sheet", width="stretch"):
                 try:
-                    _shape = load_order_sheet_into_session(
+                    load_order_sheet_into_session(
                         _saved_url, get_setting("order_sheet_gid", "0"), clear_cache=True
                     )
                     st.session_state.pop("order_sheet_error", None)
-                    st.session_state["order_data_label"] = f"Google Sheet · {_shape[0]} rows · {_shape[1]} columns"
                     st.rerun()
                 except Exception as _e:
                     st.error(f"Could not refresh: {_e}")
@@ -3981,11 +4032,10 @@ with st.sidebar:
                 st.warning("Enter a sheet URL.")
             else:
                 try:
-                    _shape = load_order_sheet_into_session(_new_url.strip(), _new_gid.strip(), clear_cache=True)
+                    load_order_sheet_into_session(_new_url.strip(), _new_gid.strip(), clear_cache=True)
                     set_setting("order_sheet_url", _new_url.strip())
                     set_setting("order_sheet_gid", _new_gid.strip() or "0")
                     st.session_state.pop("order_sheet_error", None)
-                    st.session_state["order_data_label"] = f"Google Sheet · {_shape[0]} rows · {_shape[1]} columns"
                     st.rerun()
                 except Exception as _e:
                     st.error(f"Could not load sheet: {_e}")
@@ -3999,7 +4049,7 @@ with st.sidebar:
     if order_file is not None:
         try:
             st.session_state["order_df"] = parse_orders(order_file)
-            st.session_state["order_data_label"] = f"File · {len(st.session_state['order_df'])} lines"
+            st.session_state["order_data_label"] = _order_data_label("File", st.session_state["order_df"])
             st.session_state.pop("order_sheet_error", None)
             st.rerun()
         except Exception as _oe:
@@ -4029,35 +4079,19 @@ if rev_exact_dup_ids:
 
 _order_df_check = st.session_state.get("order_df")
 if _order_df_check is not None:
-    _ord_dup_key = _order_df_check.fillna("<blank>").astype(str).agg("\x1f".join, axis=1)
-    _ord_dup_mask = _ord_dup_key.duplicated(keep=False)
-    if _ord_dup_mask.any():
-        _ord_dup_rows = _order_df_check[_ord_dup_mask].copy()
-        _ord_dup_rows["_dup_key"] = _ord_dup_key[_ord_dup_mask]
-        _ord_dup_groups = []
-        for _, _group in _ord_dup_rows.groupby("_dup_key", sort=False):
-            _first = _group.iloc[0]
-            _row_labels = []
-            for _idx in _group.index:
-                try:
-                    _row_labels.append(str(int(_idx) + 2))
-                except Exception:
-                    _row_labels.append(str(_idx))
-            _row_nums = ", ".join(_row_labels)
-            _parts = [
-                str(_first.get("Order #", "")).strip(),
-                str(_first.get("Product", "")).strip(),
-                str(_first.get("Client", "")).strip(),
-                str(_first.get("License #", "")).strip(),
-                str(_first.get("Submitted Date", "")).strip(),
-            ]
-            _ord_dup_groups.append(" · ".join([p for p in _parts if p]) + f" · rows {_row_nums}")
+    if "order_duplicate_rows_removed" not in _order_df_check.attrs:
+        _order_df_check = _dedupe_order_detail_rows(_order_df_check)
+        st.session_state["order_df"] = _order_df_check
+    _ord_removed = int(_order_df_check.attrs.get("order_duplicate_rows_removed", 0))
+    if _ord_removed:
+        _ord_dup_groups = _order_df_check.attrs.get("order_duplicate_groups", [])
+        _ord_rows_involved = int(_order_df_check.attrs.get("order_duplicate_rows_involved", 0))
         _ord_dup_preview = "; ".join(_ord_dup_groups[:8])
         if len(_ord_dup_groups) > 8:
             _ord_dup_preview += f"; +{len(_ord_dup_groups) - 8} more"
         st.warning(
-            f"⚠️ Order data: {len(_ord_dup_groups)} fully duplicate row group{'s' if len(_ord_dup_groups)!=1 else ''} detected "
-            f"({len(_ord_dup_rows)} rows involved; identical across all columns) — {_ord_dup_preview}"
+            f"⚠️ Order data: {_ord_removed} fully duplicate row{'s' if _ord_removed!=1 else ''} removed "
+            f"({_ord_rows_involved} rows involved; first copy kept) — {_ord_dup_preview}"
         )
 
 top_lics, grand = compute_pareto(df, months, threshold)
