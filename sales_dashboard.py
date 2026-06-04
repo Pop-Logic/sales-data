@@ -841,9 +841,11 @@ def _load_sales_goals(month_key):
     except Exception:
         data = {}
     weeks = data.get("weeks", {}) if isinstance(data.get("weeks", {}), dict) else {}
+    notes = data.get("notes", {}) if isinstance(data.get("notes", {}), dict) else {}
     return {
         "eom": _clean_goal_amount(data.get("eom", 0)),
         "weeks": {str(k): _clean_goal_amount(v) for k, v in weeks.items()},
+        "notes": {str(k): str(v or "") for k, v in notes.items()},
     }
 
 def _save_sales_goals(month_key, goals):
@@ -853,6 +855,11 @@ def _save_sales_goals(month_key, goals):
             str(k): round(_clean_goal_amount(v), 2)
             for k, v in (goals.get("weeks", {}) or {}).items()
             if _clean_goal_amount(v) > 0
+        },
+        "notes": {
+            str(k): str(v or "").strip()
+            for k, v in (goals.get("notes", {}) or {}).items()
+            if str(v or "").strip()
         },
     }
     set_setting(_sales_goal_key(month_key), json.dumps(normalized, sort_keys=True))
@@ -6411,6 +6418,7 @@ with tab_goals:
             {
                 "Week": week["label"],
                 "Goal": _clean_goal_amount(saved_goals.get("weeks", {}).get(week["id"], 0)),
+                "Notes": saved_goals.get("notes", {}).get(week["id"], ""),
             }
             for week in goal_weeks
         ]
@@ -6423,21 +6431,31 @@ with tab_goals:
             column_config={
                 "Week": st.column_config.TextColumn("Week"),
                 "Goal": st.column_config.NumberColumn("Weekly Goal", min_value=0.0, step=500.0, format="$%.0f"),
+                "Notes": st.column_config.TextColumn("Notes"),
             },
         )
         weekly_goals = {}
+        weekly_notes = {}
         for week, row in zip(goal_weeks, weekly_goal_input.to_dict("records")):
             amount = _clean_goal_amount(row.get("Goal", 0))
             if amount > 0:
                 weekly_goals[week["id"]] = amount
+            note = str(row.get("Notes", "") or "").strip()
+            if note:
+                weekly_notes[week["id"]] = note
 
-        current_goals = {"eom": _clean_goal_amount(eom_goal), "weeks": weekly_goals}
+        current_goals = {"eom": _clean_goal_amount(eom_goal), "weeks": weekly_goals, "notes": weekly_notes}
         saved_normalized = {
             "eom": round(_clean_goal_amount(saved_goals.get("eom", 0)), 2),
             "weeks": {
                 str(k): round(_clean_goal_amount(v), 2)
                 for k, v in saved_goals.get("weeks", {}).items()
                 if _clean_goal_amount(v) > 0
+            },
+            "notes": {
+                str(k): str(v or "").strip()
+                for k, v in saved_goals.get("notes", {}).items()
+                if str(v or "").strip()
             },
         }
         current_normalized = {
@@ -6446,6 +6464,11 @@ with tab_goals:
                 str(k): round(_clean_goal_amount(v), 2)
                 for k, v in current_goals.get("weeks", {}).items()
                 if _clean_goal_amount(v) > 0
+            },
+            "notes": {
+                str(k): str(v or "").strip()
+                for k, v in current_goals.get("notes", {}).items()
+                if str(v or "").strip()
             },
         }
         if current_normalized != saved_normalized:
@@ -6568,6 +6591,7 @@ with tab_goals:
             week_goal = _clean_goal_amount(weekly_goals.get(week["id"], 0))
             weekly_progress_rows.append({
                 "Week": week["label"],
+                "Notes": weekly_notes.get(week["id"], ""),
                 "Goal": week_goal,
                 "Actual": week_actual,
                 "Progress": pct_value(week_actual, week_goal) if week_goal else 0.0,
@@ -6578,6 +6602,7 @@ with tab_goals:
             width="stretch",
             hide_index=True,
             column_config={
+                "Notes": st.column_config.TextColumn("Notes"),
                 "Goal": st.column_config.NumberColumn("Goal", format="$%.0f"),
                 "Actual": st.column_config.NumberColumn("Actual", format="$%.0f"),
                 "Progress": st.column_config.NumberColumn("Progress", format="%.1f%%"),
