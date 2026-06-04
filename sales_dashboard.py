@@ -13,7 +13,7 @@ import os
 import sqlite3
 import tempfile
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "sales_dashboard_matplotlib"))
 import matplotlib
 matplotlib.use("Agg")
@@ -519,6 +519,22 @@ def google_sheet_csv_url(sheet_url, gid="0"):
     base = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
     return base if url_gid in ("0", "", None) else f"{base}&gid={url_gid}"
 
+def google_sheet_csv_url_by_sheet_name(sheet_url, sheet_name):
+    sheet_url = str(sheet_url or "").strip()
+    if not sheet_url:
+        raise ValueError("Enter a Google Sheets URL.")
+    parsed = urlparse(sheet_url)
+    if "docs.google.com" not in parsed.netloc:
+        raise ValueError("Sheet-name lookup requires a Google Sheets URL.")
+    match = SHEET_ID_PATTERN.search(parsed.path)
+    if not match:
+        raise ValueError("Could not find the spreadsheet ID in that Google Sheets URL.")
+    sheet_id = match.group(1)
+    return (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq"
+        f"?tqx=out:csv&sheet={quote(sheet_name)}"
+    )
+
 _SHEET_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -802,6 +818,26 @@ def load_order_sheet_into_session(sheet_url, gid, clear_cache=False):
     st.session_state["order_df"] = _enrich_order_df(raw)
     st.session_state["order_data_label"] = f"Google Sheet · {shape[0]} rows · {shape[1]} columns"
     return shape
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_cultivera_sync_last_updated(sheet_url):
+    from io import StringIO as _StringIO
+    csv_url = google_sheet_csv_url_by_sheet_name(sheet_url, "Cultivera Sync Log")
+    text = _fetch_sheet_csv(csv_url)
+    log_df = pd.read_csv(_StringIO(text)).dropna(how="all")
+    if log_df.empty or "Timestamp" not in log_df.columns:
+        return ""
+
+    view = log_df.copy()
+    if "Status" in view.columns:
+        ok_view = view[view["Status"].astype(str).str.upper().eq("OK")]
+        if not ok_view.empty:
+            view = ok_view
+
+    timestamps = pd.to_datetime(view["Timestamp"], errors="coerce").dropna()
+    if timestamps.empty:
+        return ""
+    return timestamps.max().strftime("%m/%d/%Y %I:%M %p")
 
 def storage_path():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -5471,6 +5507,15 @@ with tab_orders:
     ord_df = ord_df[ord_df["Brand"] != "Bulk"]
 
     # ── Filters ───────────────────────────────────────────────────────────────
+    _order_sheet_url = get_setting("order_sheet_url", "")
+    if _order_sheet_url:
+        try:
+            _cultivera_last_updated = load_cultivera_sync_last_updated(_order_sheet_url)
+        except Exception:
+            _cultivera_last_updated = ""
+        if _cultivera_last_updated:
+            st.caption(f"**Cultivera Data Last Updated:** {_cultivera_last_updated}")
+
     fc1, fc2, fc3, _ = st.columns([1, 1, 1, 1])
     status_opts = ["All"] + sorted(ord_df["Status"].dropna().unique().tolist())
     status_filter = fc1.selectbox("Status", status_opts, key="ord_status")
