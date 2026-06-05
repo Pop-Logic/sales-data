@@ -210,22 +210,33 @@ function fetchCultiveraSignIn_(username, password) {
 function fetchCultiveraSignInOnce_(username, password) {
   return UrlFetchApp.fetch(CULTIVERA_AUTH_URL, {
     method: 'post',
-    contentType: 'text/plain; charset=utf-8',
-    payload: JSON.stringify({ username: username, password: password }),
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      username: username,
+      password: password,
+      utcOffset: cultiveraTimezoneOffset_()
+    }),
     headers: cultiveraSignInHeaders_(),
     muteHttpExceptions: true
   });
 }
 
 function cultiveraSignInHeaders_() {
-  const props = PropertiesService.getScriptProperties();
   return {
     Accept: 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
     Origin: 'https://wa.cultiverapro.com',
     Referer: 'https://wa.cultiverapro.com/',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     'x-rts': Math.floor(Date.now() / 1000).toString(),
-    'x-tzo': props.getProperty(CULTIVERA_PROP_TZO) || '-420'
+    'x-tzo': String(cultiveraTimezoneOffset_())
   };
+}
+
+function cultiveraTimezoneOffset_() {
+  const raw = PropertiesService.getScriptProperties().getProperty(CULTIVERA_PROP_TZO);
+  const parsed = Number(raw || -420);
+  return Number.isFinite(parsed) ? parsed : -420;
 }
 
 function tokenFromCultiveraAuthResponse_(response) {
