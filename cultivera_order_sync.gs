@@ -31,6 +31,35 @@ function testCultiveraSignIn() {
   Logger.log(`Cultivera sign-in OK. Token stored: ${Boolean(token)}; token length: ${token.length}.`);
 }
 
+function debugCultiveraSignInResponse() {
+  const props = PropertiesService.getScriptProperties();
+  const username = props.getProperty(CULTIVERA_PROP_USERNAME);
+  const password = props.getProperty(CULTIVERA_PROP_PASSWORD);
+  if (!username || !password) {
+    throw new Error(`Missing Script Properties: ${CULTIVERA_PROP_USERNAME} and/or ${CULTIVERA_PROP_PASSWORD}`);
+  }
+
+  const response = UrlFetchApp.fetch(CULTIVERA_AUTH_URL, {
+    method: 'post',
+    contentType: 'text/plain;charset=UTF-8',
+    payload: JSON.stringify({ username: username, password: password }),
+    headers: {
+      Accept: 'application/json, text/plain, */*',
+      Origin: 'https://wa.cultiverapro.com',
+      Referer: 'https://wa.cultiverapro.com/',
+      'x-rts': Math.floor(Date.now() / 1000).toString(),
+      'x-tzo': props.getProperty(CULTIVERA_PROP_TZO) || '-420'
+    },
+    muteHttpExceptions: true
+  });
+
+  Logger.log(`Sign-in HTTP status: ${response.getResponseCode()}`);
+  Logger.log(`Sign-in Content-Type: ${headerValue_(response.getAllHeaders(), 'Content-Type') || headerValue_(response.getAllHeaders(), 'content-type') || ''}`);
+  Logger.log(`Sign-in header keys: ${Object.keys(response.getAllHeaders()).join(', ')}`);
+  Logger.log(`Sign-in token candidates: ${tokenCandidateSummary_(response)}`);
+  Logger.log(`Sign-in redacted preview: ${redactedTextPreview_(response, 800)}`);
+}
+
 function testCultiveraExportRequest() {
   const response = fetchCultiveraExport_();
   const headers = response.getAllHeaders();
@@ -171,11 +200,6 @@ function refreshCultiveraBearerToken_() {
 }
 
 function tokenFromCultiveraAuthResponse_(response) {
-  const headerToken = tokenFromCultiveraAuthHeaders_(response.getAllHeaders());
-  if (headerToken) {
-    return headerToken;
-  }
-
   const text = response.getContentText().trim();
   if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text)) {
     return text;
@@ -183,10 +207,19 @@ function tokenFromCultiveraAuthResponse_(response) {
 
   try {
     const json = JSON.parse(text);
-    return normalizeBearerToken_(authTokenFromJson_(json));
+    const jsonToken = authTokenFromJson_(json);
+    if (jsonToken) {
+      return normalizeBearerToken_(jsonToken);
+    }
   } catch (err) {
-    return '';
+    // Fall through to header parsing.
   }
+
+  const headerToken = tokenFromCultiveraAuthHeaders_(response.getAllHeaders());
+  if (headerToken) {
+    return headerToken;
+  }
+  return '';
 }
 
 function tokenFromCultiveraAuthHeaders_(headers) {
@@ -205,53 +238,76 @@ function tokenFromCultiveraAuthHeaders_(headers) {
 }
 
 function authTokenFromJson_(json) {
-  const preferredKeys = [
-    'access_token', 'accessToken', 'AccessToken',
-    'bearer_token', 'bearerToken', 'BearerToken',
-    'token', 'Token', 'jwt', 'Jwt', 'id_token', 'idToken'
-  ];
-
-  for (const key of preferredKeys) {
-    const found = firstStringByExactKey_(json, key);
-    if (found) {
-      return found;
-    }
+  const candidates = [];
+  collectAuthTokenCandidates_(json, '', candidates);
+  if (!candidates.length) {
+    return '';
   }
 
-  return firstStringByKeyPattern_(json, /^(?!.*refresh).*token$|bearer|jwt/i);
+  candidates.sort((a, b) => {
+    if (a.isJwt !== b.isJwt) {
+      return a.isJwt ? -1 : 1;
+    }
+    if (a.preferred !== b.preferred) {
+      return a.preferred ? -1 : 1;
+    }
+    return b.value.length - a.value.length;
+  });
+  return candidates[0].value;
 }
 
-function firstStringByExactKey_(value, wantedKey) {
+function collectAuthTokenCandidates_(value, path, candidates) {
   if (value === null || value === undefined) {
-    return '';
+    return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = firstStringByExactKey_(item, wantedKey);
-      if (found) {
-        return found;
-      }
-    }
-    return '';
+    value.forEach((item, i) => collectAuthTokenCandidates_(item, `${path}[${i}]`, candidates));
+    return;
   }
   if (typeof value !== 'object') {
-    return '';
+    return;
   }
+
+  const preferredKeys = {
+    access_token: true,
+    accessToken: true,
+    AccessToken: true,
+    bearer_token: true,
+    bearerToken: true,
+    BearerToken: true,
+    jwt: true,
+    Jwt: true,
+    id_token: true,
+    idToken: true
+  };
+
   for (const key of Object.keys(value)) {
     const child = value[key];
-    if (key === wantedKey && typeof child === 'string' && child.trim()) {
-      return child.trim();
+    const childPath = path ? `${path}.${key}` : key;
+    if (
+      typeof child === 'string' &&
+      child.trim() &&
+      /token|bearer|jwt/i.test(key) &&
+      !/refresh/i.test(key)
+    ) {
+      const token = normalizeBearerToken_(child);
+      candidates.push({
+        path: childPath,
+        value: token,
+        isJwt: isJwtToken_(token),
+        preferred: Boolean(preferredKeys[key])
+      });
     }
-    const found = firstStringByExactKey_(child, wantedKey);
-    if (found) {
-      return found;
-    }
+    collectAuthTokenCandidates_(child, childPath, candidates);
   }
-  return '';
 }
 
 function normalizeBearerToken_(token) {
   return String(token || '').replace(/^Bearer\s+/i, '').trim();
+}
+
+function isJwtToken_(token) {
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(String(token || '').trim());
 }
 
 function cultiveraHeaders_(token) {
@@ -622,6 +678,34 @@ function redactedTextPreview_(response, limit) {
     .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer REDACTED')
     .replace(/([A-Za-z0-9_-]+\.){2}[A-Za-z0-9_-]+/g, 'JWT_REDACTED')
     .replace(/("(?:access_token|accessToken|AccessToken|bearer_token|bearerToken|BearerToken|token|Token|jwt|Jwt|id_token|idToken|refresh_token|refreshToken|RefreshToken)"\s*:\s*")[^"]+(")/g, '$1REDACTED$2');
+}
+
+function tokenCandidateSummary_(response) {
+  const summaries = [];
+  const headerToken = tokenFromCultiveraAuthHeaders_(response.getAllHeaders());
+  if (headerToken) {
+    summaries.push(`header:${isJwtToken_(headerToken) ? 'jwt' : 'non-jwt'}:${headerToken.length}`);
+  }
+
+  try {
+    const text = response.getContentText().trim();
+    if (isJwtToken_(text)) {
+      summaries.push(`body:raw-jwt:${text.length}`);
+    } else {
+      const json = JSON.parse(text);
+      const candidates = [];
+      collectAuthTokenCandidates_(json, '', candidates);
+      candidates.forEach(candidate => {
+        summaries.push(
+          `${candidate.path}:${candidate.isJwt ? 'jwt' : 'non-jwt'}:${candidate.value.length}`
+        );
+      });
+    }
+  } catch (err) {
+    summaries.push('body:not-json-or-empty');
+  }
+
+  return summaries.join('; ') || 'none';
 }
 
 function trashDriveFile_(fileId) {
