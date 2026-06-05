@@ -16,13 +16,14 @@ const CULTIVERA_PROP_TZO = 'CULTIVERA_TZO_MINUTES';
 
 function checkCultiveraSyncSetup() {
   const props = PropertiesService.getScriptProperties();
+  const credentials = getCultiveraCredentials_();
   const spreadsheet = SpreadsheetApp.openById(CULTIVERA_SPREADSHEET_ID);
   const sheet = getOrCreateCultiveraSheet_(CULTIVERA_DATA_SHEET_NAME);
   Logger.log(`Spreadsheet: ${spreadsheet.getName()}`);
   Logger.log(`Target sheet: ${sheet.getName()}; rows: ${sheet.getLastRow()}; columns: ${sheet.getLastColumn()}`);
   Logger.log(`${CULTIVERA_PROP_TOKEN} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_TOKEN))}`);
-  Logger.log(`${CULTIVERA_PROP_USERNAME} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_USERNAME))}`);
-  Logger.log(`${CULTIVERA_PROP_PASSWORD} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_PASSWORD))}`);
+  Logger.log(`${CULTIVERA_PROP_USERNAME} configured: ${Boolean(credentials.username)}; length: ${credentials.username.length}`);
+  Logger.log(`${CULTIVERA_PROP_PASSWORD} configured: ${Boolean(credentials.password)}; length: ${credentials.password.length}`);
   Logger.log(`${CULTIVERA_PROP_PAYLOAD} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_PAYLOAD))}`);
   Logger.log(`${CULTIVERA_PROP_TZO}: ${props.getProperty(CULTIVERA_PROP_TZO) || '-420 default'}`);
 }
@@ -33,9 +34,9 @@ function testCultiveraSignIn() {
 }
 
 function debugCultiveraSignInResponse() {
-  const props = PropertiesService.getScriptProperties();
-  const username = props.getProperty(CULTIVERA_PROP_USERNAME);
-  const password = props.getProperty(CULTIVERA_PROP_PASSWORD);
+  const credentials = getCultiveraCredentials_();
+  const username = credentials.username;
+  const password = credentials.password;
   if (!username || !password) {
     throw new Error(`Missing Script Properties: ${CULTIVERA_PROP_USERNAME} and/or ${CULTIVERA_PROP_PASSWORD}`);
   }
@@ -145,14 +146,15 @@ function getCultiveraBearerToken_() {
 }
 
 function canRefreshCultiveraToken_() {
-  const props = PropertiesService.getScriptProperties();
-  return Boolean(props.getProperty(CULTIVERA_PROP_USERNAME) && props.getProperty(CULTIVERA_PROP_PASSWORD));
+  const credentials = getCultiveraCredentials_();
+  return Boolean(credentials.username && credentials.password);
 }
 
 function refreshCultiveraBearerToken_() {
   const props = PropertiesService.getScriptProperties();
-  const username = props.getProperty(CULTIVERA_PROP_USERNAME);
-  const password = props.getProperty(CULTIVERA_PROP_PASSWORD);
+  const credentials = getCultiveraCredentials_();
+  const username = credentials.username;
+  const password = credentials.password;
   if (!username || !password) {
     throw new Error(`Missing Script Properties: ${CULTIVERA_PROP_USERNAME} and/or ${CULTIVERA_PROP_PASSWORD}`);
   }
@@ -174,6 +176,25 @@ function refreshCultiveraBearerToken_() {
 
   props.setProperty(CULTIVERA_PROP_TOKEN, token);
   return token;
+}
+
+function getCultiveraCredentials_() {
+  const props = PropertiesService.getScriptProperties();
+  return {
+    username: cleanCultiveraCredential_(props.getProperty(CULTIVERA_PROP_USERNAME)),
+    password: cleanCultiveraCredential_(props.getProperty(CULTIVERA_PROP_PASSWORD))
+  };
+}
+
+function cleanCultiveraCredential_(value) {
+  let cleaned = String(value || '').trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned;
 }
 
 function fetchCultiveraSignIn_(username, password) {
