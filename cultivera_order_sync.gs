@@ -179,6 +179,7 @@ function refreshCultiveraBearerToken_() {
 function fetchCultiveraSignIn_(username, password) {
   let response = fetchCultiveraSignInOnce_(username, password);
   if (response.getResponseCode() >= 500) {
+    Logger.log(`Cultivera sign-in returned HTTP ${response.getResponseCode()}. Waiting and retrying once.`);
     Utilities.sleep(CULTIVERA_SIGN_IN_RETRY_SLEEP_MS);
     response = fetchCultiveraSignInOnce_(username, password);
   }
@@ -188,7 +189,7 @@ function fetchCultiveraSignIn_(username, password) {
 function fetchCultiveraSignInOnce_(username, password) {
   return UrlFetchApp.fetch(CULTIVERA_AUTH_URL, {
     method: 'post',
-    contentType: 'text/plain;charset=UTF-8',
+    contentType: 'text/plain; charset=utf-8',
     payload: JSON.stringify({ username: username, password: password }),
     headers: cultiveraSignInHeaders_(),
     muteHttpExceptions: true
@@ -199,12 +200,8 @@ function cultiveraSignInHeaders_() {
   const props = PropertiesService.getScriptProperties();
   return {
     Accept: 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.9',
     Origin: 'https://wa.cultiverapro.com',
     Referer: 'https://wa.cultiverapro.com/',
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-    'X-Requested-With': 'XMLHttpRequest',
-    'Cache-Control': 'no-cache',
     'x-rts': Math.floor(Date.now() / 1000).toString(),
     'x-tzo': props.getProperty(CULTIVERA_PROP_TZO) || '-420'
   };
