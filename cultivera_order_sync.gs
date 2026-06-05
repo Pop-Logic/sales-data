@@ -6,6 +6,7 @@ const CULTIVERA_EXPORT_URL = 'https://api-wa.cultiverapro.com/api/v1/Orders/expo
 const CULTIVERA_TRANSACTION_STATUS_URL_PREFIX = 'https://api-wa.cultiverapro.com/api/v1/transactions/status/';
 const CULTIVERA_TRANSACTION_POLL_ATTEMPTS = 12;
 const CULTIVERA_TRANSACTION_POLL_SLEEP_MS = 5000;
+const CULTIVERA_SIGN_IN_RETRY_SLEEP_MS = 5000;
 
 const CULTIVERA_PROP_TOKEN = 'CULTIVERA_BEARER_TOKEN';
 const CULTIVERA_PROP_USERNAME = 'CULTIVERA_USERNAME';
@@ -39,19 +40,7 @@ function debugCultiveraSignInResponse() {
     throw new Error(`Missing Script Properties: ${CULTIVERA_PROP_USERNAME} and/or ${CULTIVERA_PROP_PASSWORD}`);
   }
 
-  const response = UrlFetchApp.fetch(CULTIVERA_AUTH_URL, {
-    method: 'post',
-    contentType: 'text/plain;charset=UTF-8',
-    payload: JSON.stringify({ username: username, password: password }),
-    headers: {
-      Accept: 'application/json, text/plain, */*',
-      Origin: 'https://wa.cultiverapro.com',
-      Referer: 'https://wa.cultiverapro.com/',
-      'x-rts': Math.floor(Date.now() / 1000).toString(),
-      'x-tzo': props.getProperty(CULTIVERA_PROP_TZO) || '-420'
-    },
-    muteHttpExceptions: true
-  });
+  const response = fetchCultiveraSignIn_(username, password);
 
   Logger.log(`Sign-in HTTP status: ${response.getResponseCode()}`);
   Logger.log(`Sign-in Content-Type: ${headerValue_(response.getAllHeaders(), 'Content-Type') || headerValue_(response.getAllHeaders(), 'content-type') || ''}`);
@@ -168,19 +157,7 @@ function refreshCultiveraBearerToken_() {
     throw new Error(`Missing Script Properties: ${CULTIVERA_PROP_USERNAME} and/or ${CULTIVERA_PROP_PASSWORD}`);
   }
 
-  const response = UrlFetchApp.fetch(CULTIVERA_AUTH_URL, {
-    method: 'post',
-    contentType: 'text/plain;charset=UTF-8',
-    payload: JSON.stringify({ username: username, password: password }),
-    headers: {
-      Accept: 'application/json, text/plain, */*',
-      Origin: 'https://wa.cultiverapro.com',
-      Referer: 'https://wa.cultiverapro.com/',
-      'x-rts': Math.floor(Date.now() / 1000).toString(),
-      'x-tzo': props.getProperty(CULTIVERA_PROP_TZO) || '-420'
-    },
-    muteHttpExceptions: true
-  });
+  const response = fetchCultiveraSignIn_(username, password);
 
   const status = response.getResponseCode();
   if (status < 200 || status >= 300) {
@@ -197,6 +174,40 @@ function refreshCultiveraBearerToken_() {
 
   props.setProperty(CULTIVERA_PROP_TOKEN, token);
   return token;
+}
+
+function fetchCultiveraSignIn_(username, password) {
+  let response = fetchCultiveraSignInOnce_(username, password);
+  if (response.getResponseCode() >= 500) {
+    Utilities.sleep(CULTIVERA_SIGN_IN_RETRY_SLEEP_MS);
+    response = fetchCultiveraSignInOnce_(username, password);
+  }
+  return response;
+}
+
+function fetchCultiveraSignInOnce_(username, password) {
+  return UrlFetchApp.fetch(CULTIVERA_AUTH_URL, {
+    method: 'post',
+    contentType: 'text/plain;charset=UTF-8',
+    payload: JSON.stringify({ username: username, password: password }),
+    headers: cultiveraSignInHeaders_(),
+    muteHttpExceptions: true
+  });
+}
+
+function cultiveraSignInHeaders_() {
+  const props = PropertiesService.getScriptProperties();
+  return {
+    Accept: 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    Origin: 'https://wa.cultiverapro.com',
+    Referer: 'https://wa.cultiverapro.com/',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Cache-Control': 'no-cache',
+    'x-rts': Math.floor(Date.now() / 1000).toString(),
+    'x-tzo': props.getProperty(CULTIVERA_PROP_TZO) || '-420'
+  };
 }
 
 function tokenFromCultiveraAuthResponse_(response) {
