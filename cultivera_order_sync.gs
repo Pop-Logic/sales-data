@@ -1,12 +1,15 @@
 const CULTIVERA_SPREADSHEET_ID = '1kY5e6SXd7eQ7GJx-jg6M1R60WCCZ9I_25Eb7ZmuDKHw';
 const CULTIVERA_DATA_SHEET_NAME = 'Cultivera Data';
 const CULTIVERA_SYNC_LOG_SHEET_NAME = 'Cultivera Sync Log';
+const CULTIVERA_AUTH_URL = 'https://api-wa.cultiverapro.com/api/v1/auth/sign-in';
 const CULTIVERA_EXPORT_URL = 'https://api-wa.cultiverapro.com/api/v1/Orders/export-order-details-to-excel';
 const CULTIVERA_TRANSACTION_STATUS_URL_PREFIX = 'https://api-wa.cultiverapro.com/api/v1/transactions/status/';
 const CULTIVERA_TRANSACTION_POLL_ATTEMPTS = 12;
 const CULTIVERA_TRANSACTION_POLL_SLEEP_MS = 5000;
 
 const CULTIVERA_PROP_TOKEN = 'CULTIVERA_BEARER_TOKEN';
+const CULTIVERA_PROP_USERNAME = 'CULTIVERA_USERNAME';
+const CULTIVERA_PROP_PASSWORD = 'CULTIVERA_PASSWORD';
 const CULTIVERA_PROP_PAYLOAD = 'CULTIVERA_EXPORT_PAYLOAD_JSON';
 const CULTIVERA_PROP_TZO = 'CULTIVERA_TZO_MINUTES';
 
@@ -17,8 +20,15 @@ function checkCultiveraSyncSetup() {
   Logger.log(`Spreadsheet: ${spreadsheet.getName()}`);
   Logger.log(`Target sheet: ${sheet.getName()}; rows: ${sheet.getLastRow()}; columns: ${sheet.getLastColumn()}`);
   Logger.log(`${CULTIVERA_PROP_TOKEN} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_TOKEN))}`);
+  Logger.log(`${CULTIVERA_PROP_USERNAME} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_USERNAME))}`);
+  Logger.log(`${CULTIVERA_PROP_PASSWORD} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_PASSWORD))}`);
   Logger.log(`${CULTIVERA_PROP_PAYLOAD} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_PAYLOAD))}`);
   Logger.log(`${CULTIVERA_PROP_TZO}: ${props.getProperty(CULTIVERA_PROP_TZO) || '-420 default'}`);
+}
+
+function testCultiveraSignIn() {
+  const token = refreshCultiveraBearerToken_();
+  Logger.log(`Cultivera sign-in OK. Token stored: ${Boolean(token)}; token length: ${token.length}.`);
 }
 
 function testCultiveraExportRequest() {
@@ -72,19 +82,64 @@ function deleteCultiveraOrderSyncTriggers() {
 }
 
 function fetchCultiveraExport_() {
-  const props = PropertiesService.getScriptProperties();
-  const token = props.getProperty(CULTIVERA_PROP_TOKEN);
-  if (!token) {
-    throw new Error(`Missing Script Property: ${CULTIVERA_PROP_TOKEN}`);
+  let response = fetchCultiveraExportWithToken_(getCultiveraBearerToken_());
+  if (response.getResponseCode() === 401 && canRefreshCultiveraToken_()) {
+    Logger.log('Cultivera export returned HTTP 401. Refreshing bearer token and retrying once.');
+    response = fetchCultiveraExportWithToken_(refreshCultiveraBearerToken_());
   }
 
+  const status = response.getResponseCode();
+  if (status < 200 || status >= 300) {
+    throw new Error(`Cultivera export failed with HTTP ${status}: ${redactedTextPreview_(response, 500)}`);
+  }
+  return response;
+}
+
+function fetchCultiveraExportWithToken_(token) {
   const payload = getCultiveraExportPayload_();
-  const options = {
+  return UrlFetchApp.fetch(CULTIVERA_EXPORT_URL, {
     method: 'post',
     contentType: 'application/json;charset=UTF-8',
     payload: JSON.stringify(payload),
+    headers: cultiveraHeaders_(token),
+    muteHttpExceptions: true
+  });
+}
+
+function getCultiveraBearerToken_() {
+  if (canRefreshCultiveraToken_()) {
+    return refreshCultiveraBearerToken_();
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty(CULTIVERA_PROP_TOKEN);
+  if (!token) {
+    throw new Error(
+      `Missing Script Property: ${CULTIVERA_PROP_TOKEN}. ` +
+      `For automatic refresh, set ${CULTIVERA_PROP_USERNAME} and ${CULTIVERA_PROP_PASSWORD}.`
+    );
+  }
+  return normalizeBearerToken_(token);
+}
+
+function canRefreshCultiveraToken_() {
+  const props = PropertiesService.getScriptProperties();
+  return Boolean(props.getProperty(CULTIVERA_PROP_USERNAME) && props.getProperty(CULTIVERA_PROP_PASSWORD));
+}
+
+function refreshCultiveraBearerToken_() {
+  const props = PropertiesService.getScriptProperties();
+  const username = props.getProperty(CULTIVERA_PROP_USERNAME);
+  const password = props.getProperty(CULTIVERA_PROP_PASSWORD);
+  if (!username || !password) {
+    throw new Error(`Missing Script Properties: ${CULTIVERA_PROP_USERNAME} and/or ${CULTIVERA_PROP_PASSWORD}`);
+  }
+
+  const response = UrlFetchApp.fetch(CULTIVERA_AUTH_URL, {
+    method: 'post',
+    contentType: 'text/plain;charset=UTF-8',
+    payload: JSON.stringify({ username: username, password: password }),
     headers: {
-      Authorization: `Bearer ${token}`,
       Accept: 'application/json, text/plain, */*',
       Origin: 'https://wa.cultiverapro.com',
       Referer: 'https://wa.cultiverapro.com/',
@@ -92,14 +147,119 @@ function fetchCultiveraExport_() {
       'x-tzo': props.getProperty(CULTIVERA_PROP_TZO) || '-420'
     },
     muteHttpExceptions: true
-  };
+  });
 
-  const response = UrlFetchApp.fetch(CULTIVERA_EXPORT_URL, options);
   const status = response.getResponseCode();
   if (status < 200 || status >= 300) {
-    throw new Error(`Cultivera export failed with HTTP ${status}: ${safeTextPreview_(response, 500)}`);
+    throw new Error(`Cultivera sign-in failed with HTTP ${status}: ${redactedTextPreview_(response, 500)}`);
   }
-  return response;
+
+  const token = tokenFromCultiveraAuthResponse_(response);
+  if (!token) {
+    throw new Error(
+      `Cultivera sign-in succeeded, but no bearer token was found. ` +
+      `Response preview: ${redactedTextPreview_(response, 500)}`
+    );
+  }
+
+  props.setProperty(CULTIVERA_PROP_TOKEN, token);
+  return token;
+}
+
+function tokenFromCultiveraAuthResponse_(response) {
+  const headerToken = tokenFromCultiveraAuthHeaders_(response.getAllHeaders());
+  if (headerToken) {
+    return headerToken;
+  }
+
+  const text = response.getContentText().trim();
+  if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text)) {
+    return text;
+  }
+
+  try {
+    const json = JSON.parse(text);
+    return normalizeBearerToken_(authTokenFromJson_(json));
+  } catch (err) {
+    return '';
+  }
+}
+
+function tokenFromCultiveraAuthHeaders_(headers) {
+  const candidates = [
+    'Authorization', 'authorization',
+    'X-Auth-Token', 'x-auth-token',
+    'X-Access-Token', 'x-access-token'
+  ];
+  for (const name of candidates) {
+    const token = normalizeBearerToken_(headerValue_(headers, name));
+    if (token) {
+      return token;
+    }
+  }
+  return '';
+}
+
+function authTokenFromJson_(json) {
+  const preferredKeys = [
+    'access_token', 'accessToken', 'AccessToken',
+    'bearer_token', 'bearerToken', 'BearerToken',
+    'token', 'Token', 'jwt', 'Jwt', 'id_token', 'idToken'
+  ];
+
+  for (const key of preferredKeys) {
+    const found = firstStringByExactKey_(json, key);
+    if (found) {
+      return found;
+    }
+  }
+
+  return firstStringByKeyPattern_(json, /^(?!.*refresh).*token$|bearer|jwt/i);
+}
+
+function firstStringByExactKey_(value, wantedKey) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = firstStringByExactKey_(item, wantedKey);
+      if (found) {
+        return found;
+      }
+    }
+    return '';
+  }
+  if (typeof value !== 'object') {
+    return '';
+  }
+  for (const key of Object.keys(value)) {
+    const child = value[key];
+    if (key === wantedKey && typeof child === 'string' && child.trim()) {
+      return child.trim();
+    }
+    const found = firstStringByExactKey_(child, wantedKey);
+    if (found) {
+      return found;
+    }
+  }
+  return '';
+}
+
+function normalizeBearerToken_(token) {
+  return String(token || '').replace(/^Bearer\s+/i, '').trim();
+}
+
+function cultiveraHeaders_(token) {
+  const props = PropertiesService.getScriptProperties();
+  return {
+    Authorization: `Bearer ${normalizeBearerToken_(token)}`,
+    Accept: 'application/json, text/plain, */*',
+    Origin: 'https://wa.cultiverapro.com',
+    Referer: 'https://wa.cultiverapro.com/',
+    'x-rts': Math.floor(Date.now() / 1000).toString(),
+    'x-tzo': props.getProperty(CULTIVERA_PROP_TZO) || '-420'
+  };
 }
 
 function getCultiveraExportPayload_() {
@@ -451,6 +611,13 @@ function safeTextPreview_(response, limit) {
   } catch (err) {
     return '[binary response]';
   }
+}
+
+function redactedTextPreview_(response, limit) {
+  return safeTextPreview_(response, limit)
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer REDACTED')
+    .replace(/([A-Za-z0-9_-]+\.){2}[A-Za-z0-9_-]+/g, 'JWT_REDACTED')
+    .replace(/("(?:access_token|accessToken|AccessToken|bearer_token|bearerToken|BearerToken|token|Token|jwt|Jwt|id_token|idToken|refresh_token|refreshToken|RefreshToken)"\s*:\s*")[^"]+(")/g, '$1REDACTED$2');
 }
 
 function trashDriveFile_(fileId) {
