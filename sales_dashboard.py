@@ -78,6 +78,10 @@ CONTACT_LOG_COLUMNS = [
     "Alert Recipient", "Alert CC", "Alert Sent Week",
     "Saved At",
 ]
+STORE_CONTACT_WORKSHEET = "Store Contacts"
+STORE_CONTACT_COLUMNS = [
+    "License Key", "License", "Store Name", "Contact Name", "Phone Number", "Updated At",
+]
 ALERT_RECIPIENTS = {
     "DK": "danny@balaclavabrands.com",
     "CH": "chris@balaclavabrands.com",
@@ -391,6 +395,9 @@ def contact_sheet_id():
 
 def contact_worksheet_name():
     return secret_value("contact_log_worksheet", CONTACT_LOG_WORKSHEET) or CONTACT_LOG_WORKSHEET
+
+def store_contact_worksheet_name():
+    return secret_value("store_contact_worksheet", STORE_CONTACT_WORKSHEET) or STORE_CONTACT_WORKSHEET
 
 def is_totals_col(header, values, other_cols):
     header_text = str(header).strip()
@@ -1056,6 +1063,16 @@ def init_storage():
                 conn.execute(f"ALTER TABLE contact_log ADD COLUMN {col}")
             except Exception:
                 pass  # column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS store_contacts (
+                license_key TEXT PRIMARY KEY,
+                license TEXT NOT NULL,
+                store_name TEXT,
+                contact_name TEXT,
+                phone_number TEXT,
+                updated_at TEXT NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -3288,6 +3305,101 @@ def _restore_contact_rows(df, import_all=False):
         return _contact_df_to_save_rows(normalized)
     return _meaningful_contact_rows(normalized)
 
+def _store_contact_row_from_save_dict(row, updated_at):
+    license_value = _clean_cell(row.get("license"))
+    license_key = license_match_key(row.get("license_key") or license_value)
+    return {
+        "License Key": license_key,
+        "License": license_value,
+        "Store Name": _clean_cell(row.get("store_name")),
+        "Contact Name": _clean_cell(row.get("contact_name")),
+        "Phone Number": _clean_cell(row.get("phone_number")),
+        "Updated At": updated_at,
+    }
+
+def _normalize_store_contacts_df(df):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=STORE_CONTACT_COLUMNS)
+
+    aliases = {
+        "License Key": ["License Key", "license_key"],
+        "License": ["License", "license"],
+        "Store Name": ["Store Name", "store_name", "Client", "Store"],
+        "Contact Name": ["Contact Name", "contact_name", "Name"],
+        "Phone Number": ["Phone Number", "phone_number", "Phone", "phone"],
+        "Updated At": ["Updated At", "updated_at"],
+    }
+
+    out = pd.DataFrame()
+    source_cols = {str(c).strip(): c for c in df.columns}
+    for target, source_names in aliases.items():
+        source = next((source_cols[name] for name in source_names if name in source_cols), None)
+        out[target] = df[source] if source is not None else ""
+
+    out = out.fillna("").astype(str)
+    out["License"] = out["License"].str.strip()
+    out["Store Name"] = out["Store Name"].str.strip()
+    out["Contact Name"] = out["Contact Name"].str.strip()
+    out["Phone Number"] = out["Phone Number"].str.strip()
+    out["License Key"] = out["License Key"].apply(license_match_key)
+    missing_key = out["License Key"].eq("")
+    out.loc[missing_key, "License Key"] = out.loc[missing_key, "License"].apply(license_match_key)
+    out = out[out["License Key"] != ""]
+    return out[STORE_CONTACT_COLUMNS]
+
+def _store_contacts_from_sqlite() -> pd.DataFrame:
+    init_storage()
+    with sqlite3.connect(storage_path()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT license_key, license, store_name, contact_name, phone_number, updated_at
+            FROM store_contacts
+            ORDER BY store_name COLLATE NOCASE
+        """).fetchall()
+    if not rows:
+        return pd.DataFrame(columns=STORE_CONTACT_COLUMNS)
+    return _normalize_store_contacts_df(pd.DataFrame([dict(r) for r in rows]))
+
+def _upsert_store_contact_sqlite(row: dict):
+    init_storage()
+    now = datetime.now().isoformat(timespec="seconds")
+    normalized = _normalize_store_contacts_df(
+        pd.DataFrame([_store_contact_row_from_save_dict(row, now)])
+    )
+    if normalized.empty:
+        return
+    contact = normalized.iloc[0]
+    with sqlite3.connect(storage_path()) as conn:
+        conn.execute("""
+            INSERT INTO store_contacts
+                (license_key, license, store_name, contact_name, phone_number, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(license_key) DO UPDATE SET
+                license      = excluded.license,
+                store_name   = excluded.store_name,
+                contact_name = excluded.contact_name,
+                phone_number = excluded.phone_number,
+                updated_at   = excluded.updated_at
+        """, (
+            contact["License Key"], contact["License"], contact["Store Name"],
+            contact["Contact Name"], contact["Phone Number"], contact["Updated At"],
+        ))
+
+def phone_tel_href(phone_number):
+    text = str(phone_number or "").strip()
+    if not text:
+        return ""
+    digits = re.sub(r"\D", "", text)
+    if not digits:
+        return ""
+    if text.startswith("+"):
+        return f"tel:+{digits}"
+    if len(digits) == 10:
+        return f"tel:+1{digits}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"tel:+{digits}"
+    return f"tel:{digits}"
+
 def _contact_log_from_sqlite() -> pd.DataFrame:
     init_storage()
     with sqlite3.connect(storage_path()) as conn:
@@ -3411,6 +3523,20 @@ def _contact_worksheet():
         _worksheet_update(worksheet, [CONTACT_LOG_COLUMNS])
     return worksheet
 
+@st.cache_resource(show_spinner=False)
+def _store_contacts_worksheet():
+    client = _contact_sheet_client()
+    spreadsheet = client.open_by_key(contact_sheet_id())
+    title = store_contact_worksheet_name()
+    try:
+        worksheet = spreadsheet.worksheet(title)
+    except Exception:
+        worksheet = spreadsheet.add_worksheet(title=title, rows=500, cols=len(STORE_CONTACT_COLUMNS))
+    values = worksheet.get_all_values()
+    if not values:
+        _worksheet_update(worksheet, [STORE_CONTACT_COLUMNS])
+    return worksheet
+
 def _contact_log_from_sheet() -> pd.DataFrame:
     worksheet = _contact_worksheet()
     values = worksheet.get_all_values()
@@ -3444,6 +3570,38 @@ def _upsert_contact_log_sheet(rows: list[dict]):
     combined = combined.sort_values("Saved At", ascending=False)
     _write_contact_log_sheet(combined)
 
+def _store_contacts_from_sheet() -> pd.DataFrame:
+    worksheet = _store_contacts_worksheet()
+    values = worksheet.get_all_values()
+    if not values or len(values) == 1:
+        return pd.DataFrame(columns=STORE_CONTACT_COLUMNS)
+    headers = values[0]
+    rows = [
+        row[:len(headers)] + [""] * max(0, len(headers) - len(row))
+        for row in values[1:]
+    ]
+    return _normalize_store_contacts_df(pd.DataFrame(rows, columns=headers))
+
+def _write_store_contacts_sheet(df):
+    worksheet = _store_contacts_worksheet()
+    normalized = _normalize_store_contacts_df(df)
+    rows = normalized.fillna("").astype(str).values.tolist()
+    values = [STORE_CONTACT_COLUMNS] + rows
+    old_row_count = len(worksheet.get_all_values())
+    if old_row_count > len(values):
+        values.extend([[""] * len(STORE_CONTACT_COLUMNS) for _ in range(old_row_count - len(values))])
+    _worksheet_update(worksheet, values)
+
+def _upsert_store_contact_sheet(row: dict):
+    now = datetime.now().isoformat(timespec="seconds")
+    existing = _store_contacts_from_sheet()
+    incoming = pd.DataFrame([_store_contact_row_from_save_dict(row, now)], columns=STORE_CONTACT_COLUMNS)
+    combined = pd.concat([existing, incoming], ignore_index=True)
+    combined = _normalize_store_contacts_df(combined)
+    combined = combined.drop_duplicates("License Key", keep="last")
+    combined = combined.sort_values(["Store Name", "License"], key=lambda col: col.astype(str).str.lower())
+    _write_store_contacts_sheet(combined)
+
 def contact_log_backend_label():
     mode = contact_auth_mode()
     if mode == "service_account":
@@ -3466,6 +3624,20 @@ def load_contact_log() -> pd.DataFrame:
     if contact_sheet_configured():
         return _contact_log_from_sheet()
     return _contact_log_from_sqlite()
+
+def upsert_store_contact(row: dict):
+    if contact_sheet_configured():
+        result = _upsert_store_contact_sheet(row)
+    else:
+        result = _upsert_store_contact_sqlite(row)
+    load_store_contacts.clear()
+    return result
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_store_contacts() -> pd.DataFrame:
+    if contact_sheet_configured():
+        return _store_contacts_from_sheet()
+    return _store_contacts_from_sqlite()
 
 def delete_contact_log_entry(license_id: str, month: str):
     if contact_sheet_configured():
@@ -4512,6 +4684,12 @@ with tab_contact:
         st.error(f"Could not load saved contact entries: {e}")
         _saved_log = pd.DataFrame(columns=CONTACT_LOG_COLUMNS)
 
+    try:
+        _store_contacts = load_store_contacts()
+    except Exception as e:
+        st.error(f"Could not load store contact details: {e}")
+        _store_contacts = pd.DataFrame(columns=STORE_CONTACT_COLUMNS)
+
     cf_view = st.radio(
         "Show",
         ["Top 30 Stores", "Lapsed Priority", "All Stores"],
@@ -4593,6 +4771,8 @@ with tab_contact:
         st.success(st.session_state.pop("contact_log_notice"))
     if st.session_state.get("contact_log_warning"):
         st.warning(st.session_state.pop("contact_log_warning"))
+    if st.session_state.get("store_contact_notice"):
+        st.success(st.session_state.pop("store_contact_notice"))
 
     def _lic_key(lic):
         return license_match_key(lic)
@@ -4608,6 +4788,14 @@ with tab_contact:
             return contact_match_keys(lic, df.loc[lic, "Store Name"])
         except Exception:
             return contact_match_keys(lic)
+
+    _store_contact_map_by_license = {}
+    if not _store_contacts.empty:
+        for _, _r in _normalize_store_contacts_df(_store_contacts).iterrows():
+            _store_contact_map_by_license[_r["License Key"]] = _r.to_dict()
+
+    def _store_contact_for_lic(lic):
+        return _store_contact_map_by_license.get(_lic_key(lic), {})
 
     # Saved entries for this month pre-populate widgets.
     _saved_map_by_license: dict = {}
@@ -4835,6 +5023,47 @@ with tab_contact:
         has_saved = _has_logged_contact(lic)
         label = f"{'✅ ' if has_saved else ''}#{rank}  {store_name}  ·  {lic}  ·  {revenue}"
         with st.expander(label):
+            store_contact = _store_contact_for_lic(lic)
+            st.markdown("**Store Contact**")
+            contact_cols = st.columns([1.25, 1.1, 0.8])
+            contact_name_value = contact_cols[0].text_input(
+                "Contact Name",
+                value=store_contact.get("Contact Name", ""),
+                key=f"sc_{lic}_contact_name",
+            )
+            phone_value = contact_cols[1].text_input(
+                "Phone Number",
+                value=store_contact.get("Phone Number", ""),
+                key=f"sc_{lic}_phone",
+            )
+            call_href = phone_tel_href(phone_value)
+            if call_href:
+                contact_cols[2].markdown(
+                    (
+                        '<div style="padding-top:1.85rem">'
+                        f'<a href="{html_lib.escape(call_href, quote=True)}">'
+                        f'Call {html_lib.escape(str(phone_value))}</a>'
+                        '</div>'
+                    ),
+                    unsafe_allow_html=True,
+                )
+            else:
+                contact_cols[2].caption("No phone number")
+
+            if st.button("Save Store Contact", width="stretch", key=f"sc_{lic}_save_contact"):
+                try:
+                    upsert_store_contact({
+                        "license": lic,
+                        "store_name": store_name,
+                        "contact_name": contact_name_value,
+                        "phone_number": phone_value,
+                    })
+                except Exception as e:
+                    st.error(f"Could not save store contact: {e}")
+                else:
+                    st.session_state["store_contact_notice"] = f"Saved contact details for {store_name}."
+                    st.rerun()
+
             contact_history = _contact_history_for_lic(lic)
             st.markdown("**Contact History**")
             if contact_history.empty:
@@ -4866,8 +5095,11 @@ with tab_contact:
                 cur_initials = r1b.selectbox("Initials", INITIALS_OPTIONS,
                                              index=_sel_idx(INITIALS_OPTIONS, _saved(lic, "Initials")),
                                              key=f"cf_{lic}_initials")
-                r1c.text_input("Person Contacted", value=_saved(lic, "Person Contacted"),
-                               key=f"cf_{lic}_person")
+                r1c.text_input(
+                    "Person Contacted",
+                    value=_saved(lic, "Person Contacted", store_contact.get("Contact Name", "")),
+                    key=f"cf_{lic}_person",
+                )
                 r1d.selectbox("Contact Method", METHOD_OPTIONS,
                               index=_sel_idx(METHOD_OPTIONS, _saved(lic, "Contact Method")),
                               key=f"cf_{lic}_method")
