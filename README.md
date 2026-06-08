@@ -52,6 +52,17 @@ The contact form stores next-outreach reminder fields in the `Contact Log` works
 
 The trigger runs every Monday morning and sends one digest per recipient for stores whose `Next Outreach Date` falls within that Monday-Sunday week. DK routes to `danny@balaclavabrands.com`, CH routes to `chris@balaclavabrands.com`, and all alerts CC `geoff@ksavagesupply.com` and `roger@ksavagesupply.com`.
 
+## Order activity
+
+The Order Activity tab auto-loads from the shared Google Sheet tab named `Cultivera Data`. Override this with Streamlit secrets:
+
+```toml
+order_sheet_url = "https://docs.google.com/spreadsheets/d/..."
+order_sheet_name = "Cultivera Data"
+# Or use a worksheet gid instead of a name:
+order_sheet_gid = "0"
+```
+
 ## Territory map
 
 The Territory Map tab accepts a store-location CSV/XLSX upload or a Google Sheet with these columns:

@@ -67,6 +67,7 @@ DATA_DIR = Path("Data")
 DB_PATH = DATA_DIR / "sales_dashboard.sqlite3"
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1kY5e6SXd7eQ7GJx-jg6M1R60WCCZ9I_25Eb7ZmuDKHw/edit?usp=sharing"
 DEFAULT_SHEET_GID = "0"
+DEFAULT_ORDER_SHEET_NAME = "Cultivera Data"
 DEFAULT_TERRITORY_LOCATION_GID = "1421425539"
 DEFAULT_TERRITORY_REP_GID = "1653796501"
 CONTACT_LOG_WORKSHEET = "Contact Log"
@@ -399,6 +400,16 @@ def contact_worksheet_name():
 
 def store_contact_worksheet_name():
     return secret_value("store_contact_worksheet", STORE_CONTACT_WORKSHEET) or STORE_CONTACT_WORKSHEET
+
+def order_sheet_source():
+    secret_url = secret_value("order_sheet_url")
+    saved_url = get_setting("order_sheet_url")
+    sheet_url = secret_url or saved_url or DEFAULT_SHEET_URL
+    sheet_gid = secret_value("order_sheet_gid") or (get_setting("order_sheet_gid") if saved_url else "")
+    sheet_name = secret_value("order_sheet_name") or (get_setting("order_sheet_name") if saved_url else "")
+    if not sheet_gid and not sheet_name:
+        sheet_name = DEFAULT_ORDER_SHEET_NAME
+    return sheet_url, sheet_gid, sheet_name
 
 def territory_location_sheet_url():
     return (
@@ -995,24 +1006,47 @@ def parse_orders(file_obj) -> pd.DataFrame:
     return _enrich_order_df(raw)
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_order_sheet_as_df(sheet_url, gid="0"):
+def load_order_sheet_as_df(sheet_url, gid="", sheet_name=""):
     from io import StringIO as _StringIO
-    csv_url = google_sheet_csv_url(sheet_url, gid)
+    gid = str(gid or "").strip()
+    sheet_name = str(sheet_name or "").strip()
+    csv_url = (
+        google_sheet_csv_url(sheet_url, gid)
+        if gid
+        else google_sheet_csv_url_by_sheet_name(sheet_url, sheet_name or DEFAULT_ORDER_SHEET_NAME)
+    )
     text = _fetch_sheet_csv(csv_url)
     raw = pd.read_csv(_StringIO(text)).dropna(how="all").dropna(axis=1, how="all")
     if raw.empty:
         raise ValueError("The order sheet is empty.")
     return raw, raw.shape
 
-def load_order_sheet_into_session(sheet_url, gid, clear_cache=False):
+def load_order_sheet_into_session(sheet_url, gid="", clear_cache=False, sheet_name=""):
     if clear_cache:
         load_order_sheet_as_df.clear()
         load_cultivera_sync_last_updated.clear()
-    raw, shape = load_order_sheet_as_df(sheet_url, gid)
+    raw, shape = load_order_sheet_as_df(sheet_url, gid, sheet_name)
     order_df = _enrich_order_df(raw)
     st.session_state["order_df"] = order_df
     st.session_state["order_data_label"] = _order_data_label("Google Sheet", order_df, shape[1])
     return order_df.shape
+
+def load_and_save_order_sheet(sheet_url, gid="", sheet_name="", clear_cache=False):
+    sheet_url = str(sheet_url or "").strip()
+    gid = str(gid or "").strip()
+    sheet_name = str(sheet_name or "").strip()
+    if not sheet_url:
+        raise ValueError("Enter a sheet URL.")
+    shape = load_order_sheet_into_session(
+        sheet_url,
+        gid,
+        clear_cache=clear_cache,
+        sheet_name=sheet_name,
+    )
+    set_setting("order_sheet_url", sheet_url)
+    set_setting("order_sheet_gid", gid)
+    set_setting("order_sheet_name", sheet_name)
+    return shape
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_cultivera_sync_last_updated(sheet_url):
@@ -4334,11 +4368,14 @@ with st.sidebar:
 
     # Auto-load from saved default sheet on first run of this session
     if not st.session_state.get("order_sheet_checked"):
-        _saved_url = get_setting("order_sheet_url")
-        _saved_gid = get_setting("order_sheet_gid", "0")
-        if _saved_url and "order_df" not in st.session_state:
+        _order_url, _order_gid, _order_sheet_name = order_sheet_source()
+        if _order_url and "order_df" not in st.session_state:
             try:
-                load_order_sheet_into_session(_saved_url, _saved_gid)
+                load_order_sheet_into_session(
+                    _order_url,
+                    _order_gid,
+                    sheet_name=_order_sheet_name,
+                )
             except Exception as _e:
                 st.session_state["order_sheet_error"] = str(_e)
         st.session_state["order_sheet_checked"] = True
@@ -4349,44 +4386,52 @@ with st.sidebar:
     _odf = st.session_state.get("order_df")
     if _odf is not None:
         st.caption(st.session_state.get("order_data_label", f"✅ {len(_odf)} lines · {_odf['Order #'].nunique()} orders"))
-        _saved_url = get_setting("order_sheet_url")
-        if _saved_url:
-            if st.button("Refresh Order Sheet", width="stretch"):
-                try:
-                    load_order_sheet_into_session(
-                        _saved_url, get_setting("order_sheet_gid", "0"), clear_cache=True
-                    )
-                    st.session_state.pop("order_sheet_error", None)
-                    st.rerun()
-                except Exception as _e:
-                    st.error(f"Could not refresh: {_e}")
+        _order_url, _order_gid, _order_sheet_name = order_sheet_source()
+        if st.button("Refresh Order Sheet", width="stretch"):
+            try:
+                load_order_sheet_into_session(
+                    _order_url,
+                    _order_gid,
+                    clear_cache=True,
+                    sheet_name=_order_sheet_name,
+                )
+                st.session_state.pop("order_sheet_error", None)
+                st.rerun()
+            except Exception as _e:
+                st.error(f"Could not refresh: {_e}")
         if st.button("Clear order data", width="stretch"):
             del st.session_state["order_df"]
             st.session_state.pop("order_data_label", None)
             st.rerun()
 
-    with st.expander("Link a Google Sheet" if not get_setting("order_sheet_url") else "Change order sheet"):
-        _cur_url = get_setting("order_sheet_url", "")
-        _cur_gid = get_setting("order_sheet_gid", "0")
+    _cur_url, _cur_gid, _cur_sheet_name = order_sheet_source()
+    with st.expander("Change order sheet"):
         st.caption("Tip: if you get a 400 error, use a Publish-to-web CSV URL — in Google Sheets: File → Share → Publish to web → select sheet → CSV → Publish.")
         _new_url = st.text_input("Google Sheet URL or published CSV URL", value=_cur_url, key="order_sheet_url_input",
                                   placeholder="https://docs.google.com/spreadsheets/d/…")
         _new_gid = st.text_input("Worksheet gid", value=_cur_gid, key="order_sheet_gid_input",
-                                  help="gid from the sheet tab URL; 0 for first sheet")
+                                  help="gid from the sheet tab URL. Leave blank to use worksheet name.")
+        _new_sheet_name = st.text_input("Worksheet name", value=_cur_sheet_name, key="order_sheet_name_input",
+                                        help="Used when Worksheet gid is blank.")
         if st.button("Load & save as default", width="stretch", key="load_order_sheet"):
             if not _new_url.strip():
                 st.warning("Enter a sheet URL.")
             else:
                 try:
-                    load_order_sheet_into_session(_new_url.strip(), _new_gid.strip(), clear_cache=True)
-                    set_setting("order_sheet_url", _new_url.strip())
-                    set_setting("order_sheet_gid", _new_gid.strip() or "0")
+                    load_and_save_order_sheet(
+                        _new_url,
+                        _new_gid,
+                        _new_sheet_name,
+                        clear_cache=True,
+                    )
                     st.session_state.pop("order_sheet_error", None)
                     st.rerun()
                 except Exception as _e:
                     st.error(f"Could not load sheet: {_e}")
-        if _cur_url and st.button("Remove default sheet", width="stretch", key="remove_order_sheet"):
+        if get_setting("order_sheet_url") and st.button("Remove saved override", width="stretch", key="remove_order_sheet"):
             set_setting("order_sheet_url", "")
+            set_setting("order_sheet_gid", "")
+            set_setting("order_sheet_name", "")
             st.rerun()
 
     st.caption("Or upload a file:")
@@ -6034,7 +6079,7 @@ with tab_orders:
     ord_df = ord_df[ord_df["Brand"] != "Bulk"]
 
     # ── Filters ───────────────────────────────────────────────────────────────
-    _order_sheet_url = get_setting("order_sheet_url", "")
+    _order_sheet_url, _, _ = order_sheet_source()
     if _order_sheet_url:
         try:
             _cultivera_last_updated = load_cultivera_sync_last_updated(_order_sheet_url)
