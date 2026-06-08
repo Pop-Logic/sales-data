@@ -568,6 +568,12 @@ def _fetch_sheet_csv(csv_url: str) -> str:
         f"(URL tried: {csv_url})"
     )
 
+def _sheet_csv_cache_busted_url(csv_url: str, bucket_seconds: int = 30) -> str:
+    """Add a short-lived query param so Google Sheets does not serve stale CSV content."""
+    bucket = int(datetime.now().timestamp() // max(1, bucket_seconds))
+    separator = "&" if "?" in csv_url else "?"
+    return f"{csv_url}{separator}_cb={bucket}"
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_google_sheet_as_tsv(sheet_url, gid="0"):
     from io import StringIO as _StringIO
@@ -979,17 +985,18 @@ def load_order_sheet_as_df(sheet_url, gid="0"):
 def load_order_sheet_into_session(sheet_url, gid, clear_cache=False):
     if clear_cache:
         load_order_sheet_as_df.clear()
+        load_cultivera_sync_last_updated.clear()
     raw, shape = load_order_sheet_as_df(sheet_url, gid)
     order_df = _enrich_order_df(raw)
     st.session_state["order_df"] = order_df
     st.session_state["order_data_label"] = _order_data_label("Google Sheet", order_df, shape[1])
     return order_df.shape
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def load_cultivera_sync_last_updated(sheet_url):
     from io import StringIO as _StringIO
     csv_url = google_sheet_csv_url_by_sheet_name(sheet_url, "Cultivera Sync Log")
-    text = _fetch_sheet_csv(csv_url)
+    text = _fetch_sheet_csv(_sheet_csv_cache_busted_url(csv_url))
     log_df = pd.read_csv(_StringIO(text)).dropna(how="all")
     if log_df.empty or "Timestamp" not in log_df.columns:
         return ""

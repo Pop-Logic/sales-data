@@ -26,6 +26,7 @@ function checkCultiveraSyncSetup() {
   Logger.log(`Spreadsheet: ${spreadsheet.getName()}`);
   Logger.log(`Target sheet: ${sheet.getName()}; rows: ${sheet.getLastRow()}; columns: ${sheet.getLastColumn()}`);
   Logger.log(`${CULTIVERA_CONFIG_SHEET_NAME}: ${CULTIVERA_INCLUDE_CANCELLED_SETTING_LABEL} = ${includeCancelled}`);
+  Logger.log(`Active automatic sync triggers: ${getCultiveraOrderSyncTriggers_().length}`);
   Logger.log(`${CULTIVERA_PROP_TOKEN} configured: ${Boolean(props.getProperty(CULTIVERA_PROP_TOKEN))}`);
   Logger.log(`${CULTIVERA_PROP_USERNAME} configured: ${Boolean(credentials.username)}; length: ${credentials.username.length}`);
   Logger.log(`${CULTIVERA_PROP_PASSWORD} configured: ${Boolean(credentials.password)}; length: ${credentials.password.length}`);
@@ -102,14 +103,30 @@ function createCultiveraOrderSyncTrigger() {
     .timeBased()
     .everyHours(1)
     .create();
+  Logger.log('Created automatic Cultivera order sync trigger: every 1 hour.');
 }
 
 function deleteCultiveraOrderSyncTriggers() {
-  ScriptApp.getProjectTriggers().forEach(trigger => {
-    if (trigger.getHandlerFunction() === 'syncCultiveraOrdersToSheet') {
-      ScriptApp.deleteTrigger(trigger);
-    }
+  const triggers = getCultiveraOrderSyncTriggers_();
+  triggers.forEach(trigger => ScriptApp.deleteTrigger(trigger));
+  Logger.log(`Deleted ${triggers.length} automatic Cultivera order sync trigger(s).`);
+}
+
+function listCultiveraOrderSyncTriggers() {
+  const triggers = getCultiveraOrderSyncTriggers_();
+  Logger.log(`Automatic Cultivera order sync triggers: ${triggers.length}`);
+  triggers.forEach((trigger, i) => {
+    Logger.log(
+      `Trigger ${i + 1}: handler=${trigger.getHandlerFunction()}; ` +
+      `source=${trigger.getTriggerSource()}; event=${trigger.getEventType()}`
+    );
   });
+}
+
+function getCultiveraOrderSyncTriggers_() {
+  return ScriptApp.getProjectTriggers().filter(trigger => (
+    trigger.getHandlerFunction() === 'syncCultiveraOrdersToSheet'
+  ));
 }
 
 function fetchCultiveraExportValues_() {
