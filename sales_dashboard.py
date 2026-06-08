@@ -3503,11 +3503,11 @@ def _contact_sheet_client():
 
     raise RuntimeError("Google Sheets contact logging is not configured in Streamlit secrets.")
 
-def _worksheet_update(worksheet, values):
+def _worksheet_update(worksheet, values, value_input_option="USER_ENTERED"):
     try:
-        worksheet.update(values=values, range_name="A1", value_input_option="USER_ENTERED")
+        worksheet.update(values=values, range_name="A1", value_input_option=value_input_option)
     except TypeError:
-        worksheet.update("A1", values, value_input_option="USER_ENTERED")
+        worksheet.update("A1", values, value_input_option=value_input_option)
 
 @st.cache_resource(show_spinner=False)
 def _contact_worksheet():
@@ -3590,7 +3590,7 @@ def _write_store_contacts_sheet(df):
     old_row_count = len(worksheet.get_all_values())
     if old_row_count > len(values):
         values.extend([[""] * len(STORE_CONTACT_COLUMNS) for _ in range(old_row_count - len(values))])
-    _worksheet_update(worksheet, values)
+    _worksheet_update(worksheet, values, value_input_option="RAW")
 
 def _upsert_store_contact_sheet(row: dict):
     now = datetime.now().isoformat(timespec="seconds")
@@ -5213,7 +5213,10 @@ with tab_contact:
     st.caption("All saved contact entries across all months, visible to the entire team.")
     st.caption(f"Storage: **{contact_log_backend_label()}**")
     if not contact_sheet_configured():
-        st.warning("Contact log is using local SQLite fallback. On Streamlit Cloud this is not durable; configure Google Sheets secrets before relying on it.")
+        st.warning(
+            "Team contact log and store contact details are using local SQLite fallback. "
+            "On Streamlit Cloud this is not durable; configure Google Sheets secrets before relying on it."
+        )
 
     with st.expander("Restore contact log from CSV"):
         restore_file = st.file_uploader(
