@@ -3,7 +3,7 @@ Balaclava Sales Dashboard
 
 ## Streamlit contact-log storage
 
-The sales data loads from the shared Google Sheet automatically. The Store Contact Form can also write its team contact log back to Google Sheets when Streamlit secrets are configured.
+The sales data loads from the shared Google Sheet automatically. The Store Contact Log can also write its team contact log back to Google Sheets when Streamlit secrets are configured.
 
 Preferred option: add these service-account secrets in Streamlit Cloud:
 

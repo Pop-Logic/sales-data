@@ -137,6 +137,12 @@ TERRITORY_SELECTOR_ORDER = [
     "Pitch Mayfield",
     TERRITORY_ALL_OTHER_SELECTOR,
 ]
+CONTACT_LOG_DEFAULT_DESIGNATIONS = {
+    "Open Lane - Medium Priority",
+    "Open Lane - High Priority",
+    "K Savage Lapsed - Medium Priority",
+    "K Savage Lapsed - High Priority",
+}
 TERRITORY_MAP_STROKES = {
     "Leisure Land Placed": "#F28C28",
 }
@@ -4502,7 +4508,7 @@ w_top_lics, _ = compute_pareto(df, window_months, threshold)
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab_contact, tab_sales, tab_territory, tab_orders, tab_goals, tab_mom = st.tabs([
-    "📋 Store Contact Form",
+    "📋 Store Contact Log",
     "📊 Sales by Store",
     "🗺️ Territory Map",
     "📦 Order Activity",
@@ -4769,7 +4775,7 @@ with tab_sales:
             file_name="store-sales-dashboard.pdf", mime="application/pdf")
 
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  TAB — Store Contact Form                                        ║
+# ║  TAB — Store Contact Log                                         ║
 # ╚══════════════════════════════════════════════════════════════════╝
 with tab_contact:
     requested_contact_month = find_last_month_col(months)
@@ -4788,66 +4794,162 @@ with tab_contact:
         st.error(f"Could not load store contact details: {e}")
         _store_contacts = pd.DataFrame(columns=STORE_CONTACT_COLUMNS)
 
-    cf_view = st.radio(
-        "Show",
-        ["Top 30 Stores", "Lapsed Priority", "All Stores"],
-        horizontal=True,
-        key="cf_view_mode",
-    )
-
     all_lics_sorted = df[contact_month].sort_values(ascending=False).index.tolist()
-    top30_lics = all_lics_sorted[:30]
     cf_display_by_lic = {}
     cf_log_revenue_by_lic = {}
 
-    if cf_view == "Top 30 Stores":
-        cf_pool = top30_lics
-        st.caption(f"Top 30 stores by **{contact_month}** revenue · Ranked highest to lowest")
-        if contact_month != requested_contact_month:
-            st.caption(f"Using **{contact_month}** because **{requested_contact_month}** has no loaded revenue yet.")
-    elif cf_view == "Lapsed Priority":
-        lapsed_c1, lapsed_c2 = st.columns([1, 1])
-        cf_lapsed_window = lapsed_c1.number_input(
-            "Lapsed within the last N days",
-            min_value=31,
-            max_value=1095,
-            value=180,
-            step=1,
-            key="cf_lapsed_days",
-            help="Stores whose last active month ended between 30 and N days ago.",
-        )
-        cf_lapsed_totals = build_lapsed_store_df(df, months, _saved_log)
-        cf_lapsed_df = filter_lapsed_store_df(cf_lapsed_totals, cf_lapsed_window)
-        if cf_lapsed_df.empty:
-            cf_pool = []
-            lapsed_c2.caption("No lapsed stores in this window.")
-            st.info(f"No stores lapsed within the last {cf_lapsed_window} days.")
-        else:
-            cf_lapsed_count = lapsed_c2.number_input(
-                "Stores shown",
-                min_value=1,
-                max_value=len(cf_lapsed_df),
-                value=min(30, len(cf_lapsed_df)),
-                step=1,
-                key="cf_lapsed_count",
-            )
-            cf_lapsed_df = cf_lapsed_df.head(int(cf_lapsed_count))
-            cf_pool = cf_lapsed_df["License"].astype(str).tolist()
-            for _, _lapsed_row in cf_lapsed_df.iterrows():
-                _lic = str(_lapsed_row["License"])
-                _risk = float(_lapsed_row["Monthly_Run_Rate"])
-                _days = int(_lapsed_row["Days_Inactive"])
-                _last_active = str(_lapsed_row["Last_Active_Label"])
-                cf_display_by_lic[_lic] = (
-                    f"{fmt_usd(_risk)}/mo risk · {_days} days inactive · last active {_last_active}"
-                )
-                cf_log_revenue_by_lic[_lic] = f"{fmt_usd(_risk)}/mo risk"
-            st.caption(
-                f"Top {len(cf_pool)} lapsed store{'s' if len(cf_pool) != 1 else ''} by estimated monthly revenue at risk."
-            )
+    cf_locations = load_store_locations()
+    cf_locations, cf_location_notice, cf_location_warning = maybe_auto_load_territory_locations(cf_locations)
+    if cf_location_notice:
+        st.success(cf_location_notice)
+    if cf_location_warning:
+        st.warning(cf_location_warning)
+
+    cf_territory_stores = pd.DataFrame()
+    if cf_locations is None or cf_locations.empty:
+        st.info("Load territory locations to use Store Contact Log selectors.")
     else:
-        cf_pool = all_lics_sorted
-        st.caption(f"All {len(all_lics_sorted)} stores by **{contact_month}** revenue · Ranked highest to lowest")
+        try:
+            cf_territory_stores = build_territory_store_table(
+                cf_locations,
+                df,
+                months,
+                st.session_state.get("order_df"),
+                st.session_state.get("territory_active_days", 120),
+            )
+            cf_territory_stores, _ = enrich_territory_proximity(
+                cf_territory_stores,
+                st.session_state.get("territory_radius", 0.25),
+            )
+        except Exception as exc:
+            st.warning(f"Could not build Store Contact Log selectors: {exc}")
+            cf_territory_stores = pd.DataFrame()
+
+    category_values = (
+        set(cf_territory_stores["Map Category"].dropna().astype(str))
+        if not cf_territory_stores.empty and "Map Category" in cf_territory_stores
+        else set()
+    )
+    selector_category_values = (
+        category_values | TERRITORY_SELECTOR_ALWAYS_VISIBLE_CATEGORIES
+    ) - TERRITORY_SELECTOR_EXCLUDED_CATEGORIES
+    cf_designation_options = [
+        category for category in TERRITORY_SELECTOR_ORDER
+        if category in selector_category_values
+    ]
+    cf_designation_options.extend([
+        category for category in TERRITORY_MAP_COLORS
+        if category in selector_category_values and category not in cf_designation_options
+    ])
+    cf_designation_options.extend(sorted(selector_category_values - set(cf_designation_options)))
+    cf_selected_designations = []
+    if cf_designation_options:
+        dot_styles = []
+        for designation in cf_designation_options:
+            designation_key = f"contact_designation_{slugify(designation)}"
+            pin_color = TERRITORY_MAP_COLORS.get(designation, "#6E7781")
+            dot_styles.append(f"""
+              div[class*="st-key-{designation_key}"] [data-testid="stWidgetLabel"] p::before {{
+                content:"";
+                display:inline-block;
+                width:0.65rem;
+                height:0.65rem;
+                border-radius:999px;
+                background:{pin_color};
+                border:1px solid rgba(255,255,255,0.75);
+                margin-right:0.45rem;
+                box-shadow:0 0 0 1px rgba(17,24,39,0.20);
+                vertical-align:-0.05rem;
+              }}
+            """)
+        st.markdown(f"<style>{''.join(dot_styles)}</style>", unsafe_allow_html=True)
+
+        st.markdown("**Show**")
+        action_cols = st.columns([1, 1, 4])
+        select_all_designations = action_cols[0].button("All", key="contact_designations_all")
+        clear_designations = action_cols[1].button("None", key="contact_designations_none")
+        for designation in cf_designation_options:
+            designation_key = f"contact_designation_{slugify(designation)}"
+            if select_all_designations:
+                st.session_state[designation_key] = True
+            elif clear_designations:
+                st.session_state[designation_key] = False
+            elif designation_key not in st.session_state:
+                st.session_state[designation_key] = designation in CONTACT_LOG_DEFAULT_DESIGNATIONS
+
+        designation_cols = st.columns(3)
+        for idx, designation in enumerate(cf_designation_options):
+            designation_key = f"contact_designation_{slugify(designation)}"
+            if designation_cols[idx % 3].checkbox(
+                designation,
+                value=designation in CONTACT_LOG_DEFAULT_DESIGNATIONS,
+                key=designation_key,
+            ):
+                cf_selected_designations.append(designation)
+
+    df_license_by_key = {license_match_key(lic): lic for lic in df.index}
+    cf_pool = []
+    if not cf_territory_stores.empty and cf_selected_designations:
+        filtered_contact_stores = cf_territory_stores.copy()
+        regular_designations = [
+            designation for designation in cf_selected_designations
+            if designation != TERRITORY_ALL_OTHER_SELECTOR
+        ]
+        selector_masks = {
+            designation: territory_selector_mask(filtered_contact_stores, designation)
+            for designation in regular_designations
+        }
+        designation_mask = pd.Series(False, index=filtered_contact_stores.index)
+        selected_category = pd.Series("", index=filtered_contact_stores.index, dtype=object)
+        for designation, selector_mask in selector_masks.items():
+            designation_mask = designation_mask | selector_mask
+            selected_category = selected_category.mask(
+                selected_category.eq("") & selector_mask,
+                designation,
+            )
+        if TERRITORY_ALL_OTHER_SELECTOR in cf_selected_designations:
+            other_mask = ~designation_mask
+            other_mask = other_mask & ~filtered_contact_stores["Map Category"].isin(TERRITORY_SELECTOR_EXCLUDED_CATEGORIES)
+            designation_mask = designation_mask | other_mask
+            selected_category = selected_category.mask(
+                selected_category.eq("") & other_mask,
+                TERRITORY_ALL_OTHER_SELECTOR,
+            )
+        filtered_contact_stores = filtered_contact_stores[designation_mask].copy()
+        selected_category = selected_category.reindex(filtered_contact_stores.index, fill_value="")
+        filtered_contact_stores["_Dashboard License"] = filtered_contact_stores["License"].apply(
+            lambda lic: df_license_by_key.get(license_match_key(lic), "")
+        )
+        filtered_contact_stores = filtered_contact_stores[filtered_contact_stores["_Dashboard License"].ne("")]
+        filtered_contact_stores["_Selected Category"] = selected_category.reindex(filtered_contact_stores.index, fill_value="")
+        filtered_contact_stores["_Contact Month Revenue"] = filtered_contact_stores["_Dashboard License"].apply(
+            lambda lic: pd.to_numeric(df.loc[lic, contact_month], errors="coerce") if lic in df.index else 0
+        ).fillna(0)
+        filtered_contact_stores = filtered_contact_stores.sort_values(
+            ["Priority Score", "_Contact Month Revenue", "Market Sales Last Month", "Store Name"],
+            ascending=[False, False, False, True],
+        )
+
+        for _, _contact_row in filtered_contact_stores.iterrows():
+            _lic = _contact_row["_Dashboard License"]
+            if _lic in cf_pool:
+                continue
+            cf_pool.append(_lic)
+            _category = _contact_row.get("_Selected Category") or _contact_row.get("Map Category", "")
+            _current_revenue = float(_contact_row.get("_Contact Month Revenue", 0) or 0)
+            _risk = float(_contact_row.get("K. Savage Monthly Run Rate", 0) or 0)
+            if str(_category).startswith("K Savage Lapsed") and _risk > 0:
+                cf_display_by_lic[_lic] = f"{_category} · {fmt_usd(_risk)}/mo risk"
+                cf_log_revenue_by_lic[_lic] = f"{fmt_usd(_risk)}/mo risk"
+            else:
+                cf_display_by_lic[_lic] = f"{_category} · {fmt_usd(_current_revenue)}"
+                cf_log_revenue_by_lic[_lic] = fmt_usd(_current_revenue)
+
+    st.caption(
+        f"{len(cf_pool):,} store{'s' if len(cf_pool) != 1 else ''} selected for **{contact_month}** contact work."
+    )
+    if contact_month != requested_contact_month:
+        st.caption(f"Using **{contact_month}** because **{requested_contact_month}** has no loaded revenue yet.")
 
     for _lic in cf_pool:
         if _lic not in cf_display_by_lic:
@@ -5292,7 +5394,7 @@ with tab_contact:
     dl_col.download_button(
         "⬇ Download as CSV",
         data=pd.DataFrame(_csv_rows).to_csv(index=False),
-        file_name=f"store-contacts-{slugify(cf_view)}-{slugify(contact_month)}.csv",
+        file_name=f"store-contact-log-{slugify('-'.join(cf_selected_designations) or 'none')}-{slugify(contact_month)}.csv",
         mime="text/csv",
         width="stretch",
     )
