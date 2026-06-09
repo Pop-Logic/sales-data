@@ -143,6 +143,8 @@ CONTACT_LOG_DEFAULT_DESIGNATIONS = {
     "K Savage Lapsed - Medium Priority",
     "K Savage Lapsed - High Priority",
 }
+CONTACT_LOG_TOP_PARETO_SELECTOR = "Top 30 Pareto Stores"
+CONTACT_LOG_TOP_PARETO_LIMIT = 30
 TERRITORY_MAP_STROKES = {
     "Leisure Land Placed": "#F28C28",
 }
@@ -2200,6 +2202,16 @@ def route_endpoint_from_text(query, api_key):
         "maps_value": text,
         "source": "address",
     }
+
+def resolve_route_endpoint(query, stores_df, api_key):
+    text = str(query or "").strip()
+    if not text:
+        return None, pd.DataFrame(), ""
+    matches = route_store_matches(text, stores_df)
+    if not matches.empty:
+        endpoint = route_endpoint_from_store(matches.iloc[0])
+        return endpoint, matches, route_store_match_label(matches.iloc[0]) if endpoint else ""
+    return route_endpoint_from_text(text, api_key), matches, ""
 
 def route_endpoint_for_input(query, stores_df, api_key, match_label, key):
     text = str(query or "").strip()
@@ -4800,6 +4812,18 @@ with tab_contact:
     all_lics_sorted = df[contact_month].sort_values(ascending=False).index.tolist()
     cf_display_by_lic = {}
     cf_log_revenue_by_lic = {}
+    cf_pareto_months = [m for m in window_months if m in months] or [contact_month]
+    cf_pareto_totals = (
+        df[cf_pareto_months]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0)
+        .sum(axis=1)
+        .sort_values(ascending=False)
+    )
+    cf_top_pareto_lics = cf_pareto_totals.head(CONTACT_LOG_TOP_PARETO_LIMIT).index.tolist()
+    cf_top_pareto_rank_by_lic = {
+        lic: rank for rank, lic in enumerate(cf_top_pareto_lics, start=1)
+    }
 
     cf_locations = load_store_locations()
     cf_locations, cf_location_notice, cf_location_warning = maybe_auto_load_territory_locations(cf_locations)
@@ -4810,7 +4834,7 @@ with tab_contact:
 
     cf_territory_stores = pd.DataFrame()
     if cf_locations is None or cf_locations.empty:
-        st.info("Load territory locations to use Store Contact Log selectors.")
+        st.info("Load territory locations to use Store Contact Log category selectors.")
     else:
         try:
             cf_territory_stores = build_territory_store_table(
@@ -4846,8 +4870,24 @@ with tab_contact:
     ])
     cf_designation_options.extend(sorted(selector_category_values - set(cf_designation_options)))
     cf_selected_designations = []
-    if cf_designation_options:
+    cf_include_top_pareto = False
+    if cf_designation_options or cf_top_pareto_lics:
         dot_styles = []
+        pareto_key = "contact_selector_top_30_pareto"
+        dot_styles.append(f"""
+          div[class*="st-key-{pareto_key}"] [data-testid="stWidgetLabel"] p::before {{
+            content:"";
+            display:inline-block;
+            width:0.65rem;
+            height:0.65rem;
+            border-radius:999px;
+            background:#1558B0;
+            border:1px solid rgba(255,255,255,0.75);
+            margin-right:0.45rem;
+            box-shadow:0 0 0 1px rgba(17,24,39,0.20);
+            vertical-align:-0.05rem;
+          }}
+        """)
         for designation in cf_designation_options:
             designation_key = f"contact_designation_{slugify(designation)}"
             pin_color = TERRITORY_MAP_COLORS.get(designation, "#6E7781")
@@ -4871,6 +4911,12 @@ with tab_contact:
         action_cols = st.columns([1, 1, 4])
         select_all_designations = action_cols[0].button("All", key="contact_designations_all")
         clear_designations = action_cols[1].button("None", key="contact_designations_none")
+        if select_all_designations:
+            st.session_state[pareto_key] = True
+        elif clear_designations:
+            st.session_state[pareto_key] = False
+        elif pareto_key not in st.session_state:
+            st.session_state[pareto_key] = False
         for designation in cf_designation_options:
             designation_key = f"contact_designation_{slugify(designation)}"
             if select_all_designations:
@@ -4880,18 +4926,43 @@ with tab_contact:
             elif designation_key not in st.session_state:
                 st.session_state[designation_key] = designation in CONTACT_LOG_DEFAULT_DESIGNATIONS
 
-        designation_cols = st.columns(3)
-        for idx, designation in enumerate(cf_designation_options):
-            designation_key = f"contact_designation_{slugify(designation)}"
-            if designation_cols[idx % 3].checkbox(
-                designation,
-                value=designation in CONTACT_LOG_DEFAULT_DESIGNATIONS,
+        selector_items = [CONTACT_LOG_TOP_PARETO_SELECTOR] + cf_designation_options
+        selector_cols = st.columns(3)
+        for idx, selector in enumerate(selector_items):
+            if selector == CONTACT_LOG_TOP_PARETO_SELECTOR:
+                cf_include_top_pareto = selector_cols[idx % 3].checkbox(
+                    selector,
+                    value=False,
+                    key=pareto_key,
+                    help=f"Top {CONTACT_LOG_TOP_PARETO_LIMIT} stores by sales across {', '.join(cf_pareto_months)}.",
+                )
+                continue
+
+            designation_key = f"contact_designation_{slugify(selector)}"
+            if selector_cols[idx % 3].checkbox(
+                selector,
+                value=selector in CONTACT_LOG_DEFAULT_DESIGNATIONS,
                 key=designation_key,
             ):
-                cf_selected_designations.append(designation)
+                cf_selected_designations.append(selector)
 
     df_license_by_key = {license_match_key(lic): lic for lic in df.index}
     cf_pool = []
+    if cf_include_top_pareto:
+        for _lic in cf_top_pareto_lics:
+            if _lic in cf_pool:
+                continue
+            cf_pool.append(_lic)
+            _rank = cf_top_pareto_rank_by_lic.get(_lic, len(cf_pool))
+            _window_sales = float(cf_pareto_totals.get(_lic, 0) or 0)
+            _current_revenue = pd.to_numeric(df.loc[_lic, contact_month], errors="coerce")
+            _current_revenue = 0 if pd.isna(_current_revenue) else float(_current_revenue)
+            cf_display_by_lic[_lic] = (
+                f"Pareto #{_rank} · {fmt_usd(_window_sales)} window · "
+                f"{fmt_usd(_current_revenue)} {contact_month}"
+            )
+            cf_log_revenue_by_lic[_lic] = fmt_usd(_current_revenue)
+
     if not cf_territory_stores.empty and cf_selected_designations:
         filtered_contact_stores = cf_territory_stores.copy()
         regular_designations = [
@@ -4951,6 +5022,10 @@ with tab_contact:
     st.caption(
         f"{len(cf_pool):,} store{'s' if len(cf_pool) != 1 else ''} selected for **{contact_month}** contact work."
     )
+    if cf_include_top_pareto:
+        st.caption(
+            f"{CONTACT_LOG_TOP_PARETO_SELECTOR} ranked across **{', '.join(cf_pareto_months)}**."
+        )
     if contact_month != requested_contact_month:
         st.caption(f"Using **{contact_month}** because **{requested_contact_month}** has no loaded revenue yet.")
 
@@ -5397,7 +5472,11 @@ with tab_contact:
     dl_col.download_button(
         "⬇ Download as CSV",
         data=pd.DataFrame(_csv_rows).to_csv(index=False),
-        file_name=f"store-contact-log-{slugify('-'.join(cf_selected_designations) or 'none')}-{slugify(contact_month)}.csv",
+        file_name=(
+            "store-contact-log-"
+            f"{slugify('-'.join(([CONTACT_LOG_TOP_PARETO_SELECTOR] if cf_include_top_pareto else []) + cf_selected_designations) or 'none')}-"
+            f"{slugify(contact_month)}.csv"
+        ),
         mime="text/csv",
         width="stretch",
     )
@@ -5832,240 +5911,300 @@ with tab_territory:
         selected_route_rows = pd.DataFrame()
         trip_summary = None
         route_maps_url = ""
+        route_result_key = "territory_route_result"
 
         with st.expander("Route Planner", expanded=True):
             route_api_key = google_maps_server_key()
-            route_cols = st.columns([1.25, 1.25, 0.55, 0.7])
-            route_start = route_cols[0].text_input(
-                "Start",
-                key="territory_route_start",
-                placeholder="Store, license, address, or lat,lng",
+            previous_route_result = st.session_state.get(route_result_key) or {}
+            previous_route_options = previous_route_result.get("route_options", pd.DataFrame())
+            if not isinstance(previous_route_options, pd.DataFrame):
+                previous_route_options = pd.DataFrame()
+            previous_option_indices = (
+                previous_route_options.index.tolist()
+                if not previous_route_options.empty
+                else []
             )
-            route_destination = route_cols[1].text_input(
-                "Final Destination",
-                key="territory_route_destination",
-                placeholder="Store, license, address, or lat,lng",
-            )
-            route_max_stops = route_cols[2].number_input(
-                "Stops",
-                min_value=1,
-                max_value=9,
-                value=5,
-                step=1,
-                key="territory_route_max_stops",
-            )
-            route_max_detour = route_cols[3].number_input(
-                "Max Detour",
-                min_value=0.0,
-                max_value=50.0,
-                value=8.0,
-                step=0.5,
-                format="%.1f",
-                key="territory_route_max_detour",
-            )
+            selected_route_indices_input = []
 
-            route_start_endpoint = route_endpoint_for_input(
-                route_start,
-                stores,
-                route_api_key,
-                "Start Match",
-                "territory_route_start_match",
-            )
-            route_destination_endpoint = route_endpoint_for_input(
-                route_destination,
-                stores,
-                route_api_key,
-                "Destination Match",
-                "territory_route_destination_match",
-            )
-            route_start_coords = route_start_endpoint.get("coords") if route_start_endpoint else None
-            route_destination_coords = route_destination_endpoint.get("coords") if route_destination_endpoint else None
-            route_candidates = build_route_candidates(
-                mapped_filtered,
-                start_coords=route_start_coords,
-                destination_coords=route_destination_coords,
-                max_detour_miles=route_max_detour,
-            )
-
-            if route_candidates.empty:
-                st.info("No mapped route candidates match the current filters.")
-            else:
-                route_max_stops_int = int(route_max_stops)
-                route_options = route_candidates.head(25).copy()
-                route_option_indices = route_options.index.tolist()
-                route_selection_key = "territory_route_selected_stops"
-                route_stop_count_key = "territory_route_selected_stop_count"
-                route_option_signature_key = "territory_route_option_signature"
-                route_option_signature = tuple(route_option_indices)
-                current_selection = st.session_state.get(route_selection_key)
-                should_auto_select = (
-                    current_selection is None
-                    or st.session_state.get(route_stop_count_key) != route_max_stops_int
-                    or st.session_state.get(route_option_signature_key) != route_option_signature
+            with st.form("territory_route_calculator", clear_on_submit=False):
+                route_cols = st.columns([1.25, 1.25, 0.55, 0.7])
+                route_start = route_cols[0].text_input(
+                    "Start",
+                    key="territory_route_start",
+                    placeholder="Store, license, address, or lat,lng",
                 )
-                if should_auto_select:
-                    st.session_state[route_selection_key] = route_option_indices[:route_max_stops_int]
-                else:
-                    st.session_state[route_selection_key] = [
-                        idx for idx in current_selection
-                        if idx in route_option_indices
-                    ][:route_max_stops_int]
-                st.session_state[route_stop_count_key] = route_max_stops_int
-                st.session_state[route_option_signature_key] = route_option_signature
-                selected_route_indices = st.multiselect(
+                route_destination = route_cols[1].text_input(
+                    "Final Destination",
+                    key="territory_route_destination",
+                    placeholder="Store, license, address, or lat,lng",
+                )
+                route_max_stops = route_cols[2].number_input(
                     "Stops",
-                    route_option_indices,
-                    format_func=lambda idx: territory_route_option_label(route_options.loc[idx]),
-                    key=route_selection_key,
+                    min_value=1,
+                    max_value=9,
+                    value=5,
+                    step=1,
+                    key="territory_route_max_stops",
                 )
-                selected_route_rows = route_options.loc[
-                    [idx for idx in route_option_indices if idx in selected_route_indices]
-                ].head(min(9, route_max_stops_int))
-                selected_route_rows = order_route_waypoint_rows(
-                    selected_route_rows,
-                    start_coords=route_start_coords,
-                    destination_coords=route_destination_coords,
-                )
-                trip_summary = route_trip_summary(
-                    route_start_endpoint,
-                    route_destination_endpoint,
-                    selected_route_rows,
-                    route_api_key,
+                route_max_detour = route_cols[3].number_input(
+                    "Max Detour",
+                    min_value=0.0,
+                    max_value=50.0,
+                    value=8.0,
+                    step=0.5,
+                    format="%.1f",
+                    key="territory_route_max_detour",
                 )
 
-                route_summary_cols = st.columns(5)
-                route_summary_cols[0].metric("Candidates", f"{len(route_candidates):,}")
-                route_summary_cols[1].metric("Selected Stops", f"{len(selected_route_rows):,}")
-                miles_label = "Round Trip Miles"
-                time_label = "Round Trip Drive"
-                if trip_summary and trip_summary.get("source") == "Estimated":
-                    miles_label = "Round Trip Miles Est."
-                    time_label = "Round Trip Drive Est."
-                route_summary_cols[2].metric(
-                    miles_label,
-                    format_route_miles(trip_summary.get("distance_miles") if trip_summary else None),
-                )
-                route_summary_cols[3].metric(
-                    time_label,
-                    format_drive_minutes(trip_summary.get("duration_minutes") if trip_summary else None),
-                )
-                if selected_route_rows["Approx Detour Miles"].notna().any():
-                    max_detour = pd.to_numeric(
-                        selected_route_rows["Approx Detour Miles"],
-                        errors="coerce",
-                    ).max()
-                    route_summary_cols[4].metric("Max Detour", f"{max_detour:.1f} mi")
-                elif selected_route_rows["Miles To Destination"].notna().any():
-                    nearest_destination = pd.to_numeric(
-                        selected_route_rows["Miles To Destination"],
-                        errors="coerce",
-                    ).min()
-                    route_summary_cols[4].metric("Nearest Dest.", f"{nearest_destination:.1f} mi")
-                else:
-                    route_summary_cols[4].metric("Top Score", f"{route_options['Route Score'].max():.1f}")
-                if route_start_endpoint and route_start_endpoint.get("source") == "store":
-                    st.caption(f"Start: {route_start_endpoint['label']}")
-                if route_destination_endpoint and route_destination_endpoint.get("source") == "store":
-                    st.caption(f"Destination: {route_destination_endpoint['label']}")
-
-                route_display_cols = [
-                    "Store Name", "License", "City", "Territory Rep", "Territory",
-                    "Map Category", "Route Score", "Route Priority", "Approx Detour Miles",
-                    "Miles To Destination", "Market Sales Last Month", "Last Order",
-                    "Last Order Amount", "K. Savage Last Order", "K. Savage Last Order Amount",
-                ]
-                route_display_cols = [col for col in route_display_cols if col in route_options.columns]
-                st.dataframe(
-                    route_options[route_display_cols],
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        "Route Score": st.column_config.NumberColumn("Route Score", format="%.1f"),
-                        "Route Priority": st.column_config.NumberColumn("Priority", format="%.1f"),
-                        "Approx Detour Miles": st.column_config.NumberColumn("Detour", format="%.1f mi"),
-                        "Miles To Destination": st.column_config.NumberColumn("To Destination", format="%.1f mi"),
-                        "Market Sales Last Month": st.column_config.NumberColumn("Market Sales", format="$%.0f"),
-                        "Last Order": st.column_config.DatetimeColumn("Last Order", format="MM/DD/YYYY"),
-                        "Last Order Amount": st.column_config.NumberColumn("Last Order Amount", format="$%.0f"),
-                        "K. Savage Last Order": st.column_config.DatetimeColumn("K. Savage Last", format="MM/DD/YYYY"),
-                        "K. Savage Last Order Amount": st.column_config.NumberColumn("K. Savage Last Order", format="$%.0f"),
-                    },
-                )
-                if route_destination.strip():
-                    route_maps_url = google_maps_route_url(
-                        route_start_endpoint.get("maps_value") if route_start_endpoint else route_start,
-                        route_destination_endpoint.get("maps_value") if route_destination_endpoint else route_destination,
-                        selected_route_rows,
-                        round_trip=True,
+                if previous_option_indices:
+                    previous_selected_indices = [
+                        idx for idx in previous_route_result.get("selected_indices", [])
+                        if idx in previous_option_indices
+                    ][:int(route_max_stops)]
+                    if not previous_selected_indices:
+                        previous_selected_indices = previous_option_indices[:int(route_max_stops)]
+                    selected_route_indices_input = st.multiselect(
+                        "Stops to Include",
+                        previous_option_indices,
+                        default=previous_selected_indices,
+                        format_func=lambda idx: territory_route_option_label(previous_route_options.loc[idx]),
+                        key=f"territory_route_selected_stops_{previous_route_result.get('options_key', 'latest')}",
                     )
-                    st.markdown(
-                        (
-                            '<a class="route-maps-button" '
-                            f'href="{html_lib.escape(route_maps_url, quote=True)}" '
-                            'target="_blank" rel="noopener noreferrer">'
-                            "Open Route in Google Maps"
-                            "</a>"
-                        ),
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.caption("Enter a final destination to open the selected stops in Google Maps.")
 
-                route_rep_values = sorted([
-                    rep for rep in stores["Territory Rep"].dropna().astype(str).unique().tolist()
-                    if rep.strip()
-                ])
-                selected_rep_values = [
-                    rep for rep in selected_route_rows.get("Territory Rep", pd.Series(dtype=str)).dropna().astype(str).tolist()
-                    if rep.strip()
-                ]
-                default_log_rep = rep_filter if rep_filter != "All" else ""
-                if not default_log_rep and selected_rep_values:
-                    default_log_rep = pd.Series(selected_rep_values).mode().iloc[0]
-                if default_log_rep and default_log_rep not in route_rep_values:
-                    route_rep_values = [default_log_rep] + route_rep_values
-                route_rep_options = [""] + [rep for rep in route_rep_values if rep]
-                default_log_name = (
-                    f"{default_log_rep or 'Trip'} {datetime.now().strftime('%Y-%m-%d')}"
-                )
-                log_cols = st.columns([1, 1, 1])
-                log_rep = log_cols[0].selectbox(
-                    "Log Rep",
-                    route_rep_options,
-                    index=route_rep_options.index(default_log_rep) if default_log_rep in route_rep_options else 0,
-                    key="territory_route_log_rep",
-                )
-                log_date = log_cols[1].date_input(
-                    "Trip Date",
-                    value=datetime.now().date(),
-                    key="territory_route_log_date",
-                )
-                log_name = log_cols[2].text_input(
-                    "Trip Name",
-                    value=default_log_name,
-                    key="territory_route_log_name",
-                )
-                log_notes = st.text_input("Trip Notes", key="territory_route_log_notes")
-                if st.button(
-                    "Add to Trip Log",
+                calculate_route = st.form_submit_button(
+                    "Calculate Route",
                     type="primary",
                     width="stretch",
-                    key="territory_add_trip_log",
-                    disabled=selected_route_rows.empty,
-                ):
-                    trip_id = save_trip_log(
-                        log_name,
-                        log_rep,
-                        log_date,
-                        route_start_endpoint,
-                        route_destination_endpoint,
-                        selected_route_rows,
-                        trip_summary,
-                        route_maps_url,
-                        notes=log_notes,
+                )
+
+            if calculate_route:
+                with st.spinner("Calculating route..."):
+                    route_max_stops_int = int(route_max_stops)
+                    route_start_endpoint, route_start_matches, route_start_match_label = resolve_route_endpoint(
+                        route_start,
+                        stores,
+                        route_api_key,
                     )
-                    st.session_state["territory_notice"] = f"Trip log saved #{trip_id}."
-                    st.rerun()
+                    route_destination_endpoint, route_destination_matches, route_destination_match_label = resolve_route_endpoint(
+                        route_destination,
+                        stores,
+                        route_api_key,
+                    )
+                    route_start_coords = route_start_endpoint.get("coords") if route_start_endpoint else None
+                    route_destination_coords = route_destination_endpoint.get("coords") if route_destination_endpoint else None
+                    route_candidates = build_route_candidates(
+                        mapped_filtered,
+                        start_coords=route_start_coords,
+                        destination_coords=route_destination_coords,
+                        max_detour_miles=route_max_detour,
+                    )
+                    route_options = route_candidates.head(25).copy()
+                    route_option_indices = route_options.index.tolist()
+                    selected_route_indices = []
+                    selected_route_rows = route_options.copy()
+                    trip_summary = None
+                    route_maps_url = ""
+                    if not route_options.empty:
+                        selected_route_indices = [
+                            idx for idx in selected_route_indices_input
+                            if idx in route_option_indices
+                        ][:route_max_stops_int]
+                        if not selected_route_indices:
+                            selected_route_indices = route_option_indices[:route_max_stops_int]
+                        selected_route_rows = route_options.loc[
+                            [idx for idx in route_option_indices if idx in selected_route_indices]
+                        ].head(min(9, route_max_stops_int))
+                        selected_route_rows = order_route_waypoint_rows(
+                            selected_route_rows,
+                            start_coords=route_start_coords,
+                            destination_coords=route_destination_coords,
+                        )
+                        trip_summary = route_trip_summary(
+                            route_start_endpoint,
+                            route_destination_endpoint,
+                            selected_route_rows,
+                            route_api_key,
+                        )
+                        if route_destination.strip():
+                            route_maps_url = google_maps_route_url(
+                                route_start_endpoint.get("maps_value") if route_start_endpoint else route_start,
+                                route_destination_endpoint.get("maps_value") if route_destination_endpoint else route_destination,
+                                selected_route_rows,
+                                round_trip=True,
+                            )
+                    options_key = f"{len(route_option_indices)}-" + "-".join(
+                        str(idx) for idx in route_option_indices[:8]
+                    )
+                    st.session_state[route_result_key] = {
+                        "start": route_start,
+                        "destination": route_destination,
+                        "max_stops": route_max_stops_int,
+                        "max_detour": float(route_max_detour),
+                        "start_endpoint": route_start_endpoint,
+                        "destination_endpoint": route_destination_endpoint,
+                        "start_match_label": route_start_match_label,
+                        "destination_match_label": route_destination_match_label,
+                        "start_match_count": len(route_start_matches),
+                        "destination_match_count": len(route_destination_matches),
+                        "candidate_count": len(route_candidates),
+                        "route_options": route_options,
+                        "selected_indices": selected_route_indices,
+                        "selected_route_rows": selected_route_rows,
+                        "trip_summary": trip_summary,
+                        "route_maps_url": route_maps_url,
+                        "filter_count": len(mapped_filtered),
+                        "options_key": options_key or "none",
+                    }
+                st.rerun()
+
+            route_result = st.session_state.get(route_result_key) or {}
+            if not route_result:
+                st.caption("Enter route parameters, then calculate the route.")
+            else:
+                route_start_endpoint = route_result.get("start_endpoint")
+                route_destination_endpoint = route_result.get("destination_endpoint")
+                selected_route_rows = route_result.get("selected_route_rows", pd.DataFrame())
+                route_options = route_result.get("route_options", pd.DataFrame())
+                if not isinstance(selected_route_rows, pd.DataFrame):
+                    selected_route_rows = pd.DataFrame()
+                if not isinstance(route_options, pd.DataFrame):
+                    route_options = pd.DataFrame()
+                trip_summary = route_result.get("trip_summary")
+                route_maps_url = route_result.get("route_maps_url", "")
+
+                if route_result.get("filter_count") != len(mapped_filtered):
+                    st.caption("Route results reflect the last calculation. Recalculate after changing map filters.")
+
+                if route_options.empty:
+                    st.info("No mapped route candidates match the current filters.")
+                else:
+                    route_summary_cols = st.columns(5)
+                    route_summary_cols[0].metric("Candidates", f"{route_result.get('candidate_count', len(route_options)):,}")
+                    route_summary_cols[1].metric("Selected Stops", f"{len(selected_route_rows):,}")
+                    miles_label = "Round Trip Miles"
+                    time_label = "Round Trip Drive"
+                    if trip_summary and trip_summary.get("source") == "Estimated":
+                        miles_label = "Round Trip Miles Est."
+                        time_label = "Round Trip Drive Est."
+                    route_summary_cols[2].metric(
+                        miles_label,
+                        format_route_miles(trip_summary.get("distance_miles") if trip_summary else None),
+                    )
+                    route_summary_cols[3].metric(
+                        time_label,
+                        format_drive_minutes(trip_summary.get("duration_minutes") if trip_summary else None),
+                    )
+                    if selected_route_rows["Approx Detour Miles"].notna().any():
+                        max_detour = pd.to_numeric(
+                            selected_route_rows["Approx Detour Miles"],
+                            errors="coerce",
+                        ).max()
+                        route_summary_cols[4].metric("Max Detour", f"{max_detour:.1f} mi")
+                    elif selected_route_rows["Miles To Destination"].notna().any():
+                        nearest_destination = pd.to_numeric(
+                            selected_route_rows["Miles To Destination"],
+                            errors="coerce",
+                        ).min()
+                        route_summary_cols[4].metric("Nearest Dest.", f"{nearest_destination:.1f} mi")
+                    else:
+                        route_summary_cols[4].metric("Top Score", f"{route_options['Route Score'].max():.1f}")
+                    if route_result.get("start_match_label"):
+                        st.caption(f"Start matched: {route_result['start_match_label']}")
+                    if route_result.get("destination_match_label"):
+                        st.caption(f"Destination matched: {route_result['destination_match_label']}")
+
+                    route_display_cols = [
+                        "Store Name", "License", "City", "Territory Rep", "Territory",
+                        "Map Category", "Route Score", "Route Priority", "Approx Detour Miles",
+                        "Miles To Destination", "Market Sales Last Month", "Last Order",
+                        "Last Order Amount", "K. Savage Last Order", "K. Savage Last Order Amount",
+                    ]
+                    route_display_cols = [col for col in route_display_cols if col in route_options.columns]
+                    st.dataframe(
+                        route_options[route_display_cols],
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "Route Score": st.column_config.NumberColumn("Route Score", format="%.1f"),
+                            "Route Priority": st.column_config.NumberColumn("Priority", format="%.1f"),
+                            "Approx Detour Miles": st.column_config.NumberColumn("Detour", format="%.1f mi"),
+                            "Miles To Destination": st.column_config.NumberColumn("To Destination", format="%.1f mi"),
+                            "Market Sales Last Month": st.column_config.NumberColumn("Market Sales", format="$%.0f"),
+                            "Last Order": st.column_config.DatetimeColumn("Last Order", format="MM/DD/YYYY"),
+                            "Last Order Amount": st.column_config.NumberColumn("Last Order Amount", format="$%.0f"),
+                            "K. Savage Last Order": st.column_config.DatetimeColumn("K. Savage Last", format="MM/DD/YYYY"),
+                            "K. Savage Last Order Amount": st.column_config.NumberColumn("K. Savage Last Order", format="$%.0f"),
+                        },
+                    )
+                    if route_result.get("destination"):
+                        st.markdown(
+                            (
+                                '<a class="route-maps-button" '
+                                f'href="{html_lib.escape(route_maps_url, quote=True)}" '
+                                'target="_blank" rel="noopener noreferrer">'
+                                "Open Route in Google Maps"
+                                "</a>"
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("Enter a final destination to open the selected stops in Google Maps.")
+
+                    route_rep_values = sorted([
+                        rep for rep in stores["Territory Rep"].dropna().astype(str).unique().tolist()
+                        if rep.strip()
+                    ])
+                    selected_rep_values = [
+                        rep for rep in selected_route_rows.get("Territory Rep", pd.Series(dtype=str)).dropna().astype(str).tolist()
+                        if rep.strip()
+                    ]
+                    default_log_rep = rep_filter if rep_filter != "All" else ""
+                    if not default_log_rep and selected_rep_values:
+                        default_log_rep = pd.Series(selected_rep_values).mode().iloc[0]
+                    if default_log_rep and default_log_rep not in route_rep_values:
+                        route_rep_values = [default_log_rep] + route_rep_values
+                    route_rep_options = [""] + [rep for rep in route_rep_values if rep]
+                    default_log_name = (
+                        f"{default_log_rep or 'Trip'} {datetime.now().strftime('%Y-%m-%d')}"
+                    )
+                    log_cols = st.columns([1, 1, 1])
+                    log_rep = log_cols[0].selectbox(
+                        "Log Rep",
+                        route_rep_options,
+                        index=route_rep_options.index(default_log_rep) if default_log_rep in route_rep_options else 0,
+                        key="territory_route_log_rep",
+                    )
+                    log_date = log_cols[1].date_input(
+                        "Trip Date",
+                        value=datetime.now().date(),
+                        key="territory_route_log_date",
+                    )
+                    log_name = log_cols[2].text_input(
+                        "Trip Name",
+                        value=default_log_name,
+                        key="territory_route_log_name",
+                    )
+                    log_notes = st.text_input("Trip Notes", key="territory_route_log_notes")
+                    if st.button(
+                        "Add to Trip Log",
+                        type="primary",
+                        width="stretch",
+                        key="territory_add_trip_log",
+                        disabled=selected_route_rows.empty,
+                    ):
+                        trip_id = save_trip_log(
+                            log_name,
+                            log_rep,
+                            log_date,
+                            route_start_endpoint,
+                            route_destination_endpoint,
+                            selected_route_rows,
+                            trip_summary,
+                            route_maps_url,
+                            notes=log_notes,
+                        )
+                        st.session_state["territory_notice"] = f"Trip log saved #{trip_id}."
+                        st.rerun()
 
         active_route_overlay = route_map_overlay(
             route_start_endpoint,
