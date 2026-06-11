@@ -68,6 +68,7 @@ PRODUCT_COLORS = {
     "Trim":    "#E8844C",
 }
 DEFAULT_COSTS_GID = "154377878"
+DEFAULT_INVENTORY_GID = "1120425056"
 COST_SUMMARY_COLUMNS = [
     "Total Income",
     "Total Cost of Goods Sold",
@@ -198,6 +199,103 @@ def strain_ppg_data(source_df: pd.DataFrame, group_cols: list[str]) -> pd.DataFr
     summary = summary[summary["Units"] > 0].copy()
     summary["$/gram"] = summary["Revenue"] / summary["Units"]
     return summary[[*group_cols, "$/gram"]]
+
+def normalize_inventory_facility(value) -> str:
+    text = str(value or "").strip()
+    normalized = re.sub(r"[^a-z0-9]+", "", text.casefold())
+    if normalized in {"b13", "block13"}:
+        return "Block 13"
+    if normalized in {"b9", "b09"}:
+        return "B-9"
+    return text or "Unassigned"
+
+def parse_inventory_tab(raw: pd.DataFrame) -> pd.DataFrame:
+    inventory = raw.copy()
+    inventory.columns = [str(c).strip() for c in inventory.columns]
+    required = {"Product", "Strain", "Quantity"}
+    missing = required - set(inventory.columns)
+    if missing:
+        raise ValueError(f"Inventory tab must include: {', '.join(sorted(missing))}.")
+
+    inventory = inventory.dropna(how="all").copy()
+    for col in ["Type", "Category", "Product", "Strain"]:
+        if col in inventory.columns:
+            inventory[col] = inventory[col].astype(str).str.strip()
+
+    for col in ["Quantity", "Age (Weeks)", "Avg Sales/Week", "# Packages", "Stock Coverage Ratio"]:
+        if col in inventory.columns:
+            inventory[col] = _clean_numeric(inventory[col])
+
+    facility_col = next(
+        (
+            col for col in [
+                "Facility",
+                "Source",
+                "Location",
+                "Unnamed: 10",
+                "Unnamed: 9",
+            ]
+            if col in inventory.columns
+        ),
+        "",
+    )
+    if facility_col:
+        inventory["Facility"] = inventory[facility_col].apply(normalize_inventory_facility)
+    else:
+        inventory["Facility"] = "Unassigned"
+
+    inventory["Product"] = inventory["Product"].map(PRODUCT_ALIASES).fillna(inventory["Product"])
+    inventory = inventory[
+        inventory["Product"].ne("")
+        & inventory["Product"].str.lower().ne("nan")
+        & inventory["Strain"].ne("")
+        & inventory["Strain"].str.lower().ne("nan")
+    ].copy()
+    return inventory
+
+def sales_ppg_summary(source_df: pd.DataFrame, group_cols: list[str], price_col: str) -> pd.DataFrame:
+    if source_df.empty:
+        return pd.DataFrame(columns=[*group_cols, price_col])
+    grams = source_df[source_df["Units UOM"] == "Grams"].copy()
+    if grams.empty:
+        return pd.DataFrame(columns=[*group_cols, price_col])
+    summary = (
+        grams.groupby(group_cols, as_index=False)
+        .agg(Revenue=("Total", "sum"), Grams=("Units", "sum"))
+    )
+    summary = summary[summary["Grams"] > 0].copy()
+    summary[price_col] = summary["Revenue"] / summary["Grams"]
+    return summary[[*group_cols, price_col]]
+
+def add_inventory_revenue_estimates(inventory_df: pd.DataFrame, sales_df: pd.DataFrame) -> pd.DataFrame:
+    inventory = inventory_df.copy()
+    exact = sales_ppg_summary(sales_df, ["Product", "Strain", "Brand"], "Exact $/gram")
+    product_strain = sales_ppg_summary(sales_df, ["Product", "Strain"], "Product + Strain $/gram")
+    product_brand = sales_ppg_summary(sales_df, ["Product", "Brand"], "Product + Brand $/gram")
+    product = sales_ppg_summary(sales_df, ["Product"], "Product $/gram")
+
+    inventory = inventory.merge(exact, on=["Product", "Strain", "Brand"], how="left")
+    inventory = inventory.merge(product_strain, on=["Product", "Strain"], how="left")
+    inventory = inventory.merge(product_brand, on=["Product", "Brand"], how="left")
+    inventory = inventory.merge(product, on=["Product"], how="left")
+
+    price_sources = [
+        ("Exact $/gram", "Product + Strain + Brand"),
+        ("Product + Strain $/gram", "Product + Strain"),
+        ("Product + Brand $/gram", "Product + Brand"),
+        ("Product $/gram", "Product"),
+    ]
+    inventory["Avg $/gram"] = pd.NA
+    inventory["Price Source"] = "No sales match"
+    for col, label in price_sources:
+        missing_price = inventory["Avg $/gram"].isna()
+        has_price = inventory[col].notna()
+        inventory.loc[missing_price & has_price, "Avg $/gram"] = inventory.loc[missing_price & has_price, col]
+        inventory.loc[missing_price & has_price, "Price Source"] = label
+
+    inventory["Avg $/gram"] = pd.to_numeric(inventory["Avg $/gram"], errors="coerce")
+    inventory["Estimated Revenue"] = inventory["Quantity"] * inventory["Avg $/gram"].fillna(0)
+    return inventory
 
 def parse_costs_tab(raw: pd.DataFrame) -> pd.DataFrame:
     costs = raw.copy()
@@ -451,6 +549,147 @@ def render_costs_tab(
                 if col not in {"Month", "Company"}
             },
         )
+
+def render_inventory_tab(
+    inventory_df: pd.DataFrame,
+    inventory_error: str,
+    sales_df: pd.DataFrame,
+    strain_map: dict,
+    selected_facility: str,
+):
+    if inventory_error:
+        st.error(inventory_error)
+        return
+    if inventory_df.empty:
+        st.info("No inventory data loaded.")
+        return
+
+    inventory_view = inventory_df.copy()
+    if selected_facility != "Both":
+        inventory_view = inventory_view[inventory_view["Facility"] == selected_facility].copy()
+    if inventory_view.empty:
+        st.caption("No inventory data for the selected facility.")
+        return
+
+    inventory_view["Brand"] = inventory_view["Strain"].map(strain_map).where(
+        lambda s: s.isin(BRANDS_NAMED),
+        "Unassigned",
+    )
+    inventory_view = add_inventory_revenue_estimates(inventory_view, sales_df)
+
+    selected_products = product_type_multiselect(inventory_view, "inventory_product_types")
+    if not selected_products:
+        st.caption("No product types selected.")
+        return
+    inventory_view = inventory_view[inventory_view["Product"].isin(selected_products)].copy()
+    if inventory_view.empty:
+        st.caption("No inventory rows for the selected product types.")
+        return
+
+    priced = inventory_view[inventory_view["Avg $/gram"].notna()].copy()
+    total_quantity = inventory_view["Quantity"].sum()
+    priced_quantity = priced["Quantity"].sum()
+    estimated_revenue = inventory_view["Estimated Revenue"].sum()
+    avg_ppg = estimated_revenue / priced_quantity if priced_quantity > 0 else 0
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Estimated Unrealized Revenue", fmt_usd(estimated_revenue))
+    k2.metric("Priced Quantity", fmt_g(priced_quantity), f"{pct_value(priced_quantity, total_quantity):.1f}% of inventory")
+    k3.metric("Weighted Avg $/gram", f"${avg_ppg:.2f}")
+    k4.metric("Inventory Rows", f"{len(inventory_view):,}", f"{len(priced):,} priced")
+
+    st.divider()
+
+    product_summary = (
+        inventory_view.groupby(["Product", "Brand"], as_index=False)
+        .agg(
+            Quantity=("Quantity", "sum"),
+            Estimated_Revenue=("Estimated Revenue", "sum"),
+        )
+    )
+    product_summary["Avg $/gram"] = product_summary.apply(
+        lambda row: row["Estimated_Revenue"] / row["Quantity"] if row["Quantity"] > 0 else 0,
+        axis=1,
+    )
+
+    st.subheader("Estimated Value by Product")
+    valued_summary = product_summary[product_summary["Estimated_Revenue"] > 0].copy()
+    if not valued_summary.empty:
+        fig_inv = px.bar(
+            valued_summary.sort_values("Estimated_Revenue", ascending=True),
+            x="Estimated_Revenue",
+            y="Product",
+            color="Brand",
+            orientation="h",
+            text=valued_summary.sort_values("Estimated_Revenue", ascending=True)["Estimated_Revenue"].apply(fmt_usd),
+            color_discrete_map=BRAND_COLORS,
+        )
+        fig_inv.update_layout(
+            barmode="stack",
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#e3e3d8",
+            height=max(320, valued_summary["Product"].nunique() * 70),
+            margin=dict(l=0, r=70, t=10, b=10),
+            xaxis_title="Estimated Unrealized Revenue", yaxis_title="",
+            legend_title="Brand",
+        )
+        fig_inv.update_xaxes(tickprefix="$")
+        fig_inv.update_traces(textposition="outside", cliponaxis=False)
+        st.plotly_chart(fig_inv, width="stretch")
+    else:
+        st.caption("No selected inventory rows have a matching historical sales price.")
+
+    st.divider()
+
+    st.subheader("Inventory Detail")
+    detail_cols = [
+        "Facility",
+        "Type",
+        "Category",
+        "Product",
+        "Strain",
+        "Brand",
+        "Quantity",
+        "Avg $/gram",
+        "Estimated Revenue",
+        "Price Source",
+        "Age (Weeks)",
+        "Avg Sales/Week",
+        "# Packages",
+        "Stock Coverage Ratio",
+    ]
+    detail_cols = [col for col in detail_cols if col in inventory_view.columns]
+    st.dataframe(
+        inventory_view.sort_values("Estimated Revenue", ascending=False)[detail_cols],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Quantity": st.column_config.NumberColumn("Quantity", format="%.0f"),
+            "Avg $/gram": st.column_config.NumberColumn("Avg $/gram", format="$%.2f"),
+            "Estimated Revenue": st.column_config.NumberColumn("Estimated Revenue", format="$%.0f"),
+            "Age (Weeks)": st.column_config.NumberColumn("Age (Weeks)", format="%.1f"),
+            "Avg Sales/Week": st.column_config.NumberColumn("Avg Sales/Week", format="%.2f"),
+            "# Packages": st.column_config.NumberColumn("# Packages", format="%.0f"),
+            "Stock Coverage Ratio": st.column_config.NumberColumn("Stock Coverage Ratio", format="%.1f"),
+        },
+    )
+
+    unpriced = inventory_view[
+        inventory_view["Avg $/gram"].isna()
+        & (inventory_view["Quantity"] > 0)
+    ].copy()
+    if not unpriced.empty:
+        with st.expander("Inventory without a sales price match"):
+            st.dataframe(
+                unpriced.sort_values("Quantity", ascending=False)[detail_cols],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Quantity": st.column_config.NumberColumn("Quantity", format="%.0f"),
+                    "Avg $/gram": st.column_config.NumberColumn("Avg $/gram", format="$%.2f"),
+                    "Estimated Revenue": st.column_config.NumberColumn("Estimated Revenue", format="$%.0f"),
+                },
+            )
 
 def render_material_ppg_metrics(view_g: pd.DataFrame):
     if view_g.empty or not {"Product", "Total", "Units"}.issubset(view_g.columns):
@@ -748,6 +987,7 @@ PROD_CONFIG_KEYS = {
     "gid_b9": ("production_gid_b9", "prod_gid_b9", "PRODUCTION_GID_B9"),
     "gid_assign": ("production_gid_assign", "prod_gid_assign", "PRODUCTION_GID_ASSIGN"),
     "gid_costs": ("production_gid_costs", "prod_gid_costs", "PRODUCTION_GID_COSTS"),
+    "gid_inventory": ("production_gid_inventory", "prod_gid_inventory", "PRODUCTION_GID_INVENTORY"),
 }
 
 def _config_secret_or_env(key: str, default: str = "") -> str:
@@ -846,6 +1086,7 @@ _default_gid_b13 = saved_or_configured_setting(_saved, "gid_b13", "0")
 _default_gid_b9 = saved_or_configured_setting(_saved, "gid_b9")
 _default_gid_assign = saved_or_configured_setting(_saved, "gid_assign")
 _default_gid_costs = saved_or_configured_setting(_saved, "gid_costs", DEFAULT_COSTS_GID)
+_default_gid_inventory = saved_or_configured_setting(_saved, "gid_inventory", DEFAULT_INVENTORY_GID)
 
 with st.sidebar:
     st.header("Data Source")
@@ -870,6 +1111,11 @@ with st.sidebar:
         value=_default_gid_costs,
         key="prod_gid_costs",
     )
+    gid_inventory = st.text_input(
+        "Inventory GID",
+        value=_default_gid_inventory,
+        key="prod_gid_inventory",
+    )
 
     if st.button("Load / Refresh", type="primary", width="stretch"):
         if sheet_url.strip():
@@ -878,6 +1124,7 @@ with st.sidebar:
             save_setting("gid_b9",     gid_b9.strip())
             save_setting("gid_assign", gid_assign.strip())
             save_setting("gid_costs",  gid_costs.strip())
+            save_setting("gid_inventory", gid_inventory.strip())
         st.cache_data.clear()
         st.rerun()
 
@@ -922,6 +1169,15 @@ if gid_costs.strip():
         costs_df = parse_costs_tab(costs_raw)
     except Exception as e:
         costs_error = f"**Costs**: {e}"
+
+inventory_df = pd.DataFrame()
+inventory_error = ""
+if gid_inventory.strip():
+    try:
+        inventory_raw = load_tab(sheet_url, gid_inventory.strip())
+        inventory_df = parse_inventory_tab(inventory_raw)
+    except Exception as e:
+        inventory_error = f"**Inventory**: {e}"
 
 # ── Sidebar — Brand Assignments ───────────────────────────────────────────────
 # Brand assignments label brand-vendor rows by named brand. Non-brand vendors
@@ -1059,10 +1315,11 @@ combined_df = pd.concat(
 )
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_brand, tab_wholesale, tab_both, tab_costs = st.tabs([
+tab_brand, tab_wholesale, tab_both, tab_inventory, tab_costs = st.tabs([
     "🏷️ Brand Sales",
     "🏪 Wholesale",
     "📊 Both",
+    "📦 Inventory",
     "💸 Costs",
 ])
 
@@ -1533,6 +1790,18 @@ with tab_both:
             st.plotly_chart(fig_c_m, width="stretch")
         else:
             st.caption("Monthly trend unavailable — Transfer Date not parsed.")
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  TAB — Inventory                                                ║
+# ╚══════════════════════════════════════════════════════════════════╝
+with tab_inventory:
+    render_inventory_tab(
+        inventory_df,
+        inventory_error,
+        combined_df,
+        strain_map,
+        sel_facility,
+    )
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Costs                                                     ║
