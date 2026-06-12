@@ -7137,6 +7137,37 @@ with tab_goals:
         saved_brand_eom = saved_goals.get("brand_eom", {})
         saved_brand_weeks = saved_goals.get("brand_weeks", {})
         legacy_eom_fallback = _clean_goal_amount(saved_goals.get("eom", 0)) if not saved_brand_eom else 0.0
+        brand_week_actuals = {
+            week["id"]: {brand: 0.0 for brand in goal_brands}
+            for week in goal_weeks
+        }
+        if "Brand" in goal_order_df.columns:
+            goal_actual_source = goal_order_df.copy()
+            goal_actual_source["Submitted Date"] = pd.to_datetime(
+                goal_actual_source["Submitted Date"],
+                errors="coerce",
+            )
+            goal_actual_source["Line Total"] = pd.to_numeric(
+                goal_actual_source["Line Total"],
+                errors="coerce",
+            ).fillna(0)
+            goal_actual_source = goal_actual_source[
+                goal_actual_source["Submitted Date"].notna()
+                & goal_actual_source["Submitted Date"].dt.date.between(goal_month_start, goal_month_end)
+                & goal_actual_source["Brand"].isin(goal_brands)
+                & (goal_actual_source["Line Total"] > 0)
+            ].copy()
+            for week in goal_weeks:
+                week_actuals = (
+                    goal_actual_source[
+                        goal_actual_source["Submitted Date"].dt.date.between(week["start"], week["end"])
+                    ]
+                    .groupby("Brand")["Line Total"]
+                    .sum()
+                )
+                for brand in goal_brands:
+                    brand_week_actuals[week["id"]][brand] = float(week_actuals.get(brand, 0) or 0)
+
         weekly_goal_rows = []
         for week in goal_weeks:
             saved_week_brand_goals = saved_brand_weeks.get(week["id"], {})
@@ -7144,15 +7175,18 @@ with tab_goals:
                 _clean_goal_amount(saved_week_brand_goals.get(brand, 0))
                 for brand in goal_brands
             )
-            weekly_goal_rows.append({
-                "Week": week["label"],
-                **{
-                    brand: _clean_goal_amount(saved_week_brand_goals.get(brand, 0))
-                    for brand in goal_brands
-                },
+            weekly_goal_row = {"Week": week["label"]}
+            for brand in goal_brands:
+                brand_goal = _clean_goal_amount(saved_week_brand_goals.get(brand, 0))
+                brand_actual = brand_week_actuals.get(week["id"], {}).get(brand, 0.0)
+                weekly_goal_row[brand] = brand_goal
+                weekly_goal_row[f"{brand} Week Actual"] = brand_actual
+                weekly_goal_row[f"{brand} Delta"] = brand_actual - brand_goal
+            weekly_goal_row.update({
                 "Total Weekly Goal": saved_week_brand_total,
                 "Notes": saved_goals.get("notes", {}).get(week["id"], ""),
             })
+            weekly_goal_rows.append(weekly_goal_row)
         with st.form(f"sales_goal_form_{goal_month_key}", clear_on_submit=False):
             eom_cols = st.columns([1] * len(goal_brands))
             brand_eom_inputs = {}
@@ -7166,12 +7200,20 @@ with tab_goals:
                     key=f"goal_eom_{slugify(brand)}_{goal_month_key}",
                 )
             st.caption("Edit brand goals, then save once.")
+            weekly_actual_cols = [
+                f"{brand} Week Actual"
+                for brand in goal_brands
+            ]
+            weekly_delta_cols = [
+                f"{brand} Delta"
+                for brand in goal_brands
+            ]
             weekly_goal_input = st.data_editor(
                 pd.DataFrame(weekly_goal_rows),
                 width="stretch",
                 hide_index=True,
-                key=f"goal_weekly_brand_editor_{goal_month_key}",
-                disabled=["Week", "Total Weekly Goal"],
+                key=f"goal_weekly_brand_actual_editor_{goal_month_key}",
+                disabled=["Week", "Total Weekly Goal", *weekly_actual_cols, *weekly_delta_cols],
                 column_config={
                     "Week": st.column_config.TextColumn("Week"),
                     **{
@@ -7182,6 +7224,14 @@ with tab_goals:
                             format="$%.0f",
                         )
                         for brand in goal_brands
+                    },
+                    **{
+                        col: st.column_config.NumberColumn(col, format="$%.0f")
+                        for col in weekly_actual_cols
+                    },
+                    **{
+                        col: st.column_config.NumberColumn(col, format="$%.0f")
+                        for col in weekly_delta_cols
                     },
                     "Total Weekly Goal": st.column_config.NumberColumn("Total Weekly Goal", format="$%.0f"),
                     "Notes": st.column_config.TextColumn("Notes"),
