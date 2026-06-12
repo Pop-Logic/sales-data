@@ -7,8 +7,14 @@ import sqlite3
 import os
 import re
 from datetime import datetime
-from io import StringIO
+from io import BytesIO, StringIO
 from urllib.parse import urlparse
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import landscape, letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 st.set_page_config(page_title="Production Sales", layout="wide")
 
@@ -134,6 +140,149 @@ def fmt_g(v):
 
 def pct_value(n, t):
     return n / t * 100 if t else 0.0
+
+def slugify_filename(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value).casefold()).strip("-")
+    return slug or "section"
+
+def pdf_value(value, column: str = ""):
+    if value is None or pd.isna(value):
+        return ""
+    column_key = str(column).casefold()
+    if isinstance(value, (int, float)):
+        if "$/gram" in column_key or "price" in column_key:
+            return f"${value:,.2f}"
+        if any(token in column_key for token in [
+            "amount",
+            "revenue",
+            "total",
+            "income",
+            "cost",
+            "profit",
+            "expenses",
+            "estimated",
+        ]):
+            return f"${value:,.0f}"
+        if abs(value) >= 1000:
+            return f"{value:,.0f}"
+        return f"{value:,.2f}".rstrip("0").rstrip(".")
+    text = str(value)
+    return text if len(text) <= 70 else f"{text[:67]}..."
+
+def pdf_table_data(df: pd.DataFrame, max_rows: int = 120) -> tuple[list[list[str]], int]:
+    if df is None or df.empty:
+        return [["No rows"]], 0
+    export_df = df.head(max_rows).copy()
+    headers = [str(col) for col in export_df.columns]
+    rows = [
+        [pdf_value(row[col], col) for col in export_df.columns]
+        for _, row in export_df.iterrows()
+    ]
+    return [headers, *rows], max(0, len(df) - len(export_df))
+
+def build_section_pdf(title: str, table_df: pd.DataFrame | None = None, fig=None) -> bytes:
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(letter),
+        leftMargin=0.35 * inch,
+        rightMargin=0.35 * inch,
+        topMargin=0.35 * inch,
+        bottomMargin=0.35 * inch,
+    )
+    styles = getSampleStyleSheet()
+    story = [Paragraph(str(title), styles["Title"]), Spacer(1, 0.15 * inch)]
+
+    if fig is not None:
+        try:
+            image_bytes = fig.to_image(format="png", width=1200, height=700, scale=2)
+            chart = Image(BytesIO(image_bytes))
+            chart._restrictSize(10.2 * inch, 5.6 * inch)
+            story.extend([chart, Spacer(1, 0.18 * inch)])
+        except Exception as err:
+            story.extend([
+                Paragraph(
+                    f"Chart image could not be rendered in this environment: {err}",
+                    styles["Italic"],
+                ),
+                Spacer(1, 0.12 * inch),
+            ])
+
+    if table_df is not None:
+        table_data, truncated_rows = pdf_table_data(table_df)
+        usable_width = landscape(letter)[0] - (0.7 * inch)
+        col_count = max(1, len(table_data[0]))
+        table = Table(
+            table_data,
+            repeatRows=1,
+            colWidths=[usable_width / col_count] * col_count,
+        )
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2b2b2b")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 6),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d0d0")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f6f6f6")]),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(table)
+        if truncated_rows:
+            story.extend([
+                Spacer(1, 0.12 * inch),
+                Paragraph(f"{truncated_rows:,} additional rows omitted from this PDF.", styles["Italic"]),
+            ])
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+def section_pdf_signature(title: str, table_df: pd.DataFrame | None = None) -> str:
+    if table_df is None:
+        return f"{title}|none"
+    try:
+        sample = pd.concat([table_df.head(20), table_df.tail(20)]).drop_duplicates()
+        data_hash = int(pd.util.hash_pandas_object(sample, index=True).sum())
+    except Exception:
+        data_hash = hash(str(table_df.head(5).to_dict()))
+    return f"{title}|{table_df.shape}|{tuple(map(str, table_df.columns))}|{data_hash}"
+
+def section_pdf_export(
+    title: str,
+    key: str,
+    table_df: pd.DataFrame | None = None,
+    fig=None,
+):
+    state_key = f"pdf_export_{key}"
+    err_key = f"pdf_export_error_{key}"
+    sig_key = f"pdf_export_signature_{key}"
+    signature = section_pdf_signature(title, table_df)
+    if st.session_state.get(sig_key) != signature:
+        st.session_state.pop(state_key, None)
+        st.session_state.pop(err_key, None)
+        st.session_state[sig_key] = signature
+
+    c1, c2 = st.columns([1, 5])
+    if c1.button("Prepare PDF", key=f"prepare_pdf_{key}"):
+        try:
+            st.session_state[state_key] = build_section_pdf(title, table_df=table_df, fig=fig)
+            st.session_state.pop(err_key, None)
+        except Exception as err:
+            st.session_state.pop(state_key, None)
+            st.session_state[err_key] = str(err)
+    if state_key in st.session_state:
+        c1.download_button(
+            "Download PDF",
+            data=st.session_state[state_key],
+            file_name=f"{slugify_filename(title)}.pdf",
+            mime="application/pdf",
+            key=f"download_pdf_{key}",
+        )
+    if err_key in st.session_state:
+        c2.caption(f"PDF export unavailable: {st.session_state[err_key]}")
 
 def normalize_vendor_name(vendor) -> str:
     text = re.sub(r"\s+", " ", str(vendor or "")).strip()
@@ -479,6 +628,12 @@ def render_costs_tab(
             hovertemplate="%{x|%b %Y}<br>%{fullData.name}: $%{y:,.0f}<extra></extra>"
         )
         st.plotly_chart(fig, width="stretch")
+        section_pdf_export(
+            "Costs Monthly Performance",
+            "costs_monthly_performance",
+            table_df=trend,
+            fig=fig,
+        )
 
     st.divider()
 
@@ -514,6 +669,12 @@ def render_costs_tab(
         fig_costs.update_xaxes(tickprefix="$")
         fig_costs.update_traces(textposition="outside", cliponaxis=False)
         st.plotly_chart(fig_costs, width="stretch")
+        section_pdf_export(
+            "Costs Top Cost Lines",
+            "costs_top_lines",
+            table_df=top_detail,
+            fig=fig_costs,
+        )
     else:
         st.caption("No nonzero cost lines for the selected filters.")
 
@@ -523,8 +684,9 @@ def render_costs_tab(
     summary_cols = ["Month", "Company"] + [
         col for col in COST_SUMMARY_COLUMNS if col in costs_view.columns
     ]
+    statement_df = costs_view.sort_values(["Statement Month", "Company"])[summary_cols]
     st.dataframe(
-        costs_view.sort_values(["Statement Month", "Company"])[summary_cols],
+        statement_df,
         width="stretch",
         hide_index=True,
         column_config={
@@ -533,14 +695,20 @@ def render_costs_tab(
             if col not in {"Month", "Company"}
         },
     )
+    section_pdf_export(
+        "Costs Monthly Statement",
+        "costs_monthly_statement",
+        table_df=statement_df,
+    )
 
     with st.expander("Detailed income statement"):
         detail_cols = [
             col for col in costs_view.columns
             if col != "Statement Month"
         ]
+        income_statement_df = costs_view.sort_values(["Statement Month", "Company"])[detail_cols]
         st.dataframe(
-            costs_view.sort_values(["Statement Month", "Company"])[detail_cols],
+            income_statement_df,
             width="stretch",
             hide_index=True,
             column_config={
@@ -548,6 +716,11 @@ def render_costs_tab(
                 for col in detail_cols
                 if col not in {"Month", "Company"}
             },
+        )
+        section_pdf_export(
+            "Detailed Income Statement",
+            "costs_detailed_income_statement",
+            table_df=income_statement_df,
         )
 
 def render_inventory_tab(
@@ -636,6 +809,12 @@ def render_inventory_tab(
         fig_inv.update_xaxes(tickprefix="$")
         fig_inv.update_traces(textposition="outside", cliponaxis=False)
         st.plotly_chart(fig_inv, width="stretch")
+        section_pdf_export(
+            "Inventory Estimated Value by Product",
+            "inventory_value_by_product",
+            table_df=valued_summary,
+            fig=fig_inv,
+        )
     else:
         st.caption("No selected inventory rows have a matching historical sales price.")
 
@@ -659,8 +838,9 @@ def render_inventory_tab(
         "Stock Coverage Ratio",
     ]
     detail_cols = [col for col in detail_cols if col in inventory_view.columns]
+    inventory_detail = inventory_view.sort_values("Estimated Revenue", ascending=False)[detail_cols]
     st.dataframe(
-        inventory_view.sort_values("Estimated Revenue", ascending=False)[detail_cols],
+        inventory_detail,
         width="stretch",
         hide_index=True,
         column_config={
@@ -673,6 +853,11 @@ def render_inventory_tab(
             "Stock Coverage Ratio": st.column_config.NumberColumn("Stock Coverage Ratio", format="%.1f"),
         },
     )
+    section_pdf_export(
+        "Inventory Detail",
+        "inventory_detail",
+        table_df=inventory_detail,
+    )
 
     unpriced = inventory_view[
         inventory_view["Avg $/gram"].isna()
@@ -680,8 +865,9 @@ def render_inventory_tab(
     ].copy()
     if not unpriced.empty:
         with st.expander("Inventory without a sales price match"):
+            unpriced_detail = unpriced.sort_values("Quantity", ascending=False)[detail_cols]
             st.dataframe(
-                unpriced.sort_values("Quantity", ascending=False)[detail_cols],
+                unpriced_detail,
                 width="stretch",
                 hide_index=True,
                 column_config={
@@ -689,6 +875,11 @@ def render_inventory_tab(
                     "Avg $/gram": st.column_config.NumberColumn("Avg $/gram", format="$%.2f"),
                     "Estimated Revenue": st.column_config.NumberColumn("Estimated Revenue", format="$%.0f"),
                 },
+            )
+            section_pdf_export(
+                "Inventory without a Sales Price Match",
+                "inventory_unpriced",
+                table_df=unpriced_detail,
             )
 
 def render_material_ppg_metrics(view_g: pd.DataFrame):
@@ -818,6 +1009,12 @@ def render_ppg_over_time_chart(source_df: pd.DataFrame, key_prefix: str):
         "<br>Grams: %{customdata[1]:,.0f}<extra></extra>"
     )
     st.plotly_chart(fig, width="stretch")
+    section_pdf_export(
+        f"{key_prefix.title()} PPG Over Time",
+        f"{key_prefix}_ppg_over_time",
+        table_df=trend,
+        fig=fig,
+    )
 
 def is_brand_vendor(vendor) -> bool:
     return normalize_vendor_name(vendor).casefold() in BRAND_VENDOR_KEYS
@@ -1405,6 +1602,11 @@ with tab_brand:
                 "$/gram":   st.column_config.NumberColumn("$/gram",   format="$%.2f"),
             },
         )
+        section_pdf_export(
+            "Brand Sales Strain by Brand",
+            "brand_strain_by_brand",
+            table_df=strain_tbl,
+        )
 
         # ── Diagnostic: raw data search ────────────────────────────────────────
         with st.expander("🔍 Raw data lookup (troubleshoot missing rows)"):
@@ -1425,7 +1627,13 @@ with tab_brand:
                 )
                 st.caption(f"Active tab filters — Brand: `{sel_b_brand}` · Product: `{sel_b_type}` · Table brand: `{_tbl_brand}` · Table product: `{_tbl_product}` · Table strain: `{_tbl_strain}`")
                 if not _d2.empty:
-                    st.dataframe(_d2[_dcols + ["Brand"]], width="stretch", hide_index=True)
+                    diagnostic_df = _d2[_dcols + ["Brand"]]
+                    st.dataframe(diagnostic_df, width="stretch", hide_index=True)
+                    section_pdf_export(
+                        "Brand Sales Raw Data Lookup",
+                        "brand_raw_data_lookup",
+                        table_df=diagnostic_df,
+                    )
                 else:
                     _close = [k for k in strain_map if _diag_q.lower() in k.lower()]
                     st.warning(f"strain_map keys matching '{_diag_q}': {_close or 'none — not assigned'}")
@@ -1456,6 +1664,12 @@ with tab_brand:
             )
             fig_s.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_s, width="stretch")
+            section_pdf_export(
+                "Brand Sales Revenue by Strain",
+                "brand_revenue_by_strain",
+                table_df=strain_chart,
+                fig=fig_s,
+            )
 
         st.divider()
 
@@ -1468,6 +1682,12 @@ with tab_brand:
             fig_ppg = ppg_band_chart(ppg_data, product_col="Product", brand_col="Brand")
             if fig_ppg is not None:
                 st.plotly_chart(fig_ppg, width="stretch")
+                section_pdf_export(
+                    "Brand Sales $/gram by Strain",
+                    "brand_ppg_by_strain",
+                    table_df=ppg_data,
+                    fig=fig_ppg,
+                )
         else:
             st.caption("No gram-denominated sales for the selected product types.")
 
@@ -1506,6 +1726,12 @@ with tab_brand:
             )
             fig_m.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_m, width="stretch")
+            section_pdf_export(
+                "Brand Sales Monthly Revenue",
+                "brand_monthly_revenue",
+                table_df=monthly,
+                fig=fig_m,
+            )
         else:
             st.caption("Monthly trend unavailable — Transfer Date not parsed.")
 
@@ -1577,6 +1803,11 @@ with tab_wholesale:
                 "$/gram":  st.column_config.NumberColumn("$/gram",  format="$%.2f"),
             },
         )
+        section_pdf_export(
+            "Wholesale Strain Summary",
+            "wholesale_strain_summary",
+            table_df=w_strain_tbl,
+        )
 
         st.divider()
 
@@ -1589,6 +1820,12 @@ with tab_wholesale:
             fig_wppg = ppg_band_chart(w_ppg_data, product_col="Product")
             if fig_wppg is not None:
                 st.plotly_chart(fig_wppg, width="stretch")
+                section_pdf_export(
+                    "Wholesale $/gram by Strain",
+                    "wholesale_ppg_by_strain",
+                    table_df=w_ppg_data,
+                    fig=fig_wppg,
+                )
         else:
             st.caption("No gram-denominated sales for the selected product types.")
 
@@ -1625,6 +1862,12 @@ with tab_wholesale:
             )
             fig_vol.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_vol, width="stretch")
+            section_pdf_export(
+                "Wholesale Volume by Vendor",
+                "wholesale_volume_by_vendor",
+                table_df=w_vol,
+                fig=fig_vol,
+            )
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  TAB — Both                                                      ║
@@ -1711,6 +1954,11 @@ with tab_both:
                 "$/gram": st.column_config.NumberColumn("$/gram", format="$%.2f"),
             },
         )
+        section_pdf_export(
+            "Combined Strain Summary",
+            "both_combined_strain_summary",
+            table_df=c_strain_tbl,
+        )
 
         st.divider()
 
@@ -1738,6 +1986,12 @@ with tab_both:
             )
             fig_c_s.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_c_s, width="stretch")
+            section_pdf_export(
+                "Combined Revenue by Strain",
+                "both_revenue_by_strain",
+                table_df=c_strain_chart,
+                fig=fig_c_s,
+            )
 
         st.divider()
 
@@ -1750,6 +2004,12 @@ with tab_both:
             fig_c_ppg = ppg_band_chart(c_ppg_data, product_col="Product", brand_col="Brand")
             if fig_c_ppg is not None:
                 st.plotly_chart(fig_c_ppg, width="stretch")
+                section_pdf_export(
+                    "Combined $/gram by Strain",
+                    "both_ppg_by_strain",
+                    table_df=c_ppg_data,
+                    fig=fig_c_ppg,
+                )
         else:
             st.caption("No gram-denominated sales for the selected product types.")
 
@@ -1788,6 +2048,12 @@ with tab_both:
             )
             fig_c_m.update_traces(textposition="outside", cliponaxis=False)
             st.plotly_chart(fig_c_m, width="stretch")
+            section_pdf_export(
+                "Combined Monthly Revenue",
+                "both_monthly_revenue",
+                table_df=c_monthly,
+                fig=fig_c_m,
+            )
         else:
             st.caption("Monthly trend unavailable — Transfer Date not parsed.")
 

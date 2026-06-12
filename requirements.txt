@@ -4,6 +4,7 @@
 streamlit
 pandas
 plotly
+kaleido
 matplotlib
 reportlab
 openpyxl
