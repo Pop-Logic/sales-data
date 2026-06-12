@@ -7144,17 +7144,13 @@ with tab_goals:
                 _clean_goal_amount(saved_week_brand_goals.get(brand, 0))
                 for brand in goal_brands
             )
-            legacy_week_goal = (
-                _clean_goal_amount(saved_goals.get("weeks", {}).get(week["id"], 0))
-                if not saved_week_brand_goals else 0.0
-            )
             weekly_goal_rows.append({
                 "Week": week["label"],
                 **{
                     brand: _clean_goal_amount(saved_week_brand_goals.get(brand, 0))
                     for brand in goal_brands
                 },
-                "Goal": saved_week_brand_total or legacy_week_goal,
+                "Total Weekly Goal": saved_week_brand_total,
                 "Notes": saved_goals.get("notes", {}).get(week["id"], ""),
             })
         with st.form(f"sales_goal_form_{goal_month_key}", clear_on_submit=False):
@@ -7174,8 +7170,8 @@ with tab_goals:
                 pd.DataFrame(weekly_goal_rows),
                 width="stretch",
                 hide_index=True,
-                key=f"goal_weekly_editor_{goal_month_key}",
-                disabled=["Week", "Goal"],
+                key=f"goal_weekly_brand_editor_{goal_month_key}",
+                disabled=["Week", "Total Weekly Goal"],
                 column_config={
                     "Week": st.column_config.TextColumn("Week"),
                     **{
@@ -7187,7 +7183,7 @@ with tab_goals:
                         )
                         for brand in goal_brands
                     },
-                    "Goal": st.column_config.NumberColumn("Total Weekly Goal", format="$%.0f"),
+                    "Total Weekly Goal": st.column_config.NumberColumn("Total Weekly Goal", format="$%.0f"),
                     "Notes": st.column_config.TextColumn("Notes"),
                 },
             )
@@ -7210,10 +7206,6 @@ with tab_goals:
             if brand_amounts:
                 brand_week_goals[week["id"]] = brand_amounts
                 weekly_goals[week["id"]] = sum(brand_amounts.values())
-            elif not saved_brand_weeks.get(week["id"], {}):
-                legacy_week_goal = _clean_goal_amount(row.get("Goal", 0))
-                if legacy_week_goal > 0:
-                    weekly_goals[week["id"]] = legacy_week_goal
             note = str(row.get("Notes", "") or "").strip()
             if note:
                 weekly_notes[week["id"]] = note
@@ -7253,9 +7245,8 @@ with tab_goals:
             view_eom_goal = total_brand_eom_goal or _clean_goal_amount(active_goals.get("eom", 0))
             view_weekly_goals = {}
             for week in goal_weeks:
-                total_week_goal = _clean_goal_amount(weekly_goals.get(week["id"], 0))
                 brand_week_total = _brand_week_goal_total(week["id"], goal_brands)
-                effective_week_goal = total_week_goal or brand_week_total
+                effective_week_goal = brand_week_total
                 if effective_week_goal > 0:
                     view_weekly_goals[week["id"]] = effective_week_goal
         else:
