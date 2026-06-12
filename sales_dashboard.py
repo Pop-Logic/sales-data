@@ -7137,20 +7137,26 @@ with tab_goals:
         saved_brand_eom = saved_goals.get("brand_eom", {})
         saved_brand_weeks = saved_goals.get("brand_weeks", {})
         legacy_eom_fallback = _clean_goal_amount(saved_goals.get("eom", 0)) if not saved_brand_eom else 0.0
-        weekly_goal_rows = [
-            dict({
+        weekly_goal_rows = []
+        for week in goal_weeks:
+            saved_week_brand_goals = saved_brand_weeks.get(week["id"], {})
+            saved_week_brand_total = sum(
+                _clean_goal_amount(saved_week_brand_goals.get(brand, 0))
+                for brand in goal_brands
+            )
+            legacy_week_goal = (
+                _clean_goal_amount(saved_goals.get("weeks", {}).get(week["id"], 0))
+                if not saved_week_brand_goals else 0.0
+            )
+            weekly_goal_rows.append({
                 "Week": week["label"],
-                "Goal": _clean_goal_amount(saved_goals.get("weeks", {}).get(week["id"], 0)),
                 **{
-                    brand: _clean_goal_amount(
-                        saved_brand_weeks.get(week["id"], {}).get(brand, 0)
-                    )
+                    brand: _clean_goal_amount(saved_week_brand_goals.get(brand, 0))
                     for brand in goal_brands
                 },
+                "Goal": saved_week_brand_total or legacy_week_goal,
                 "Notes": saved_goals.get("notes", {}).get(week["id"], ""),
             })
-            for week in goal_weeks
-        ]
         with st.form(f"sales_goal_form_{goal_month_key}", clear_on_submit=False):
             eom_cols = st.columns([1] * len(goal_brands))
             brand_eom_inputs = {}
@@ -7169,10 +7175,9 @@ with tab_goals:
                 width="stretch",
                 hide_index=True,
                 key=f"goal_weekly_editor_{goal_month_key}",
-                disabled=["Week"],
+                disabled=["Week", "Goal"],
                 column_config={
                     "Week": st.column_config.TextColumn("Week"),
-                    "Goal": st.column_config.NumberColumn("Total Weekly Goal", min_value=0.0, step=500.0, format="$%.0f"),
                     **{
                         brand: st.column_config.NumberColumn(
                             f"{brand} Weekly Goal",
@@ -7182,6 +7187,7 @@ with tab_goals:
                         )
                         for brand in goal_brands
                     },
+                    "Goal": st.column_config.NumberColumn("Total Weekly Goal", format="$%.0f"),
                     "Notes": st.column_config.TextColumn("Notes"),
                 },
             )
@@ -7196,9 +7202,6 @@ with tab_goals:
             if cleaned > 0:
                 brand_eom_goals[brand] = cleaned
         for week, row in zip(goal_weeks, weekly_goal_input.to_dict("records")):
-            amount = _clean_goal_amount(row.get("Goal", 0))
-            if amount > 0:
-                weekly_goals[week["id"]] = amount
             brand_amounts = {}
             for brand in goal_brands:
                 brand_amount = _clean_goal_amount(row.get(brand, 0))
@@ -7206,6 +7209,11 @@ with tab_goals:
                     brand_amounts[brand] = brand_amount
             if brand_amounts:
                 brand_week_goals[week["id"]] = brand_amounts
+                weekly_goals[week["id"]] = sum(brand_amounts.values())
+            elif not saved_brand_weeks.get(week["id"], {}):
+                legacy_week_goal = _clean_goal_amount(row.get("Goal", 0))
+                if legacy_week_goal > 0:
+                    weekly_goals[week["id"]] = legacy_week_goal
             note = str(row.get("Notes", "") or "").strip()
             if note:
                 weekly_notes[week["id"]] = note
