@@ -11,12 +11,17 @@ from io import BytesIO, StringIO
 from urllib.parse import urlparse
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 st.set_page_config(page_title="Production Sales", layout="wide")
+
+PDF_EXPORT_VERSION = "portrait-v3"
+PDF_MARGIN = 0.35 * inch
+PDF_PAGE_SIZE = (8.5 * inch, 11 * inch)
+PDF_USABLE_WIDTH = PDF_PAGE_SIZE[0] - (2 * PDF_MARGIN)
+PDF_USABLE_HEIGHT = PDF_PAGE_SIZE[1] - (2 * PDF_MARGIN)
 
 # ── Password guard ────────────────────────────────────────────────────────────
 def _configured_password() -> str:
@@ -184,20 +189,20 @@ def build_section_pdf(title: str, table_df: pd.DataFrame | None = None, fig=None
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=landscape(letter),
-        leftMargin=0.35 * inch,
-        rightMargin=0.35 * inch,
-        topMargin=0.35 * inch,
-        bottomMargin=0.35 * inch,
+        pagesize=PDF_PAGE_SIZE,
+        leftMargin=PDF_MARGIN,
+        rightMargin=PDF_MARGIN,
+        topMargin=PDF_MARGIN,
+        bottomMargin=PDF_MARGIN,
     )
     styles = getSampleStyleSheet()
     story = [Paragraph(str(title), styles["Title"]), Spacer(1, 0.15 * inch)]
 
     if fig is not None:
         try:
-            image_bytes = fig.to_image(format="png", width=1200, height=700, scale=2)
+            image_bytes = fig.to_image(format="png", width=1600, height=900, scale=2)
             chart = Image(BytesIO(image_bytes))
-            chart._restrictSize(10.2 * inch, 5.6 * inch)
+            chart._restrictSize(PDF_USABLE_WIDTH, min(PDF_USABLE_HEIGHT - 1.2 * inch, 5.9 * inch))
             story.extend([chart, Spacer(1, 0.18 * inch)])
         except Exception as err:
             story.extend([
@@ -210,12 +215,11 @@ def build_section_pdf(title: str, table_df: pd.DataFrame | None = None, fig=None
 
     if table_df is not None:
         table_data, truncated_rows = pdf_table_data(table_df)
-        usable_width = landscape(letter)[0] - (0.7 * inch)
         col_count = max(1, len(table_data[0]))
         table = Table(
             table_data,
             repeatRows=1,
-            colWidths=[usable_width / col_count] * col_count,
+            colWidths=[PDF_USABLE_WIDTH / col_count] * col_count,
         )
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2b2b2b")),
@@ -242,13 +246,13 @@ def build_section_pdf(title: str, table_df: pd.DataFrame | None = None, fig=None
 
 def section_pdf_signature(title: str, table_df: pd.DataFrame | None = None) -> str:
     if table_df is None:
-        return f"{title}|none"
+        return f"{PDF_EXPORT_VERSION}|{title}|none"
     try:
         sample = pd.concat([table_df.head(20), table_df.tail(20)]).drop_duplicates()
         data_hash = int(pd.util.hash_pandas_object(sample, index=True).sum())
     except Exception:
         data_hash = hash(str(table_df.head(5).to_dict()))
-    return f"{title}|{table_df.shape}|{tuple(map(str, table_df.columns))}|{data_hash}"
+    return f"{PDF_EXPORT_VERSION}|{title}|{table_df.shape}|{tuple(map(str, table_df.columns))}|{data_hash}"
 
 def section_pdf_export(
     title: str,
@@ -283,6 +287,14 @@ def section_pdf_export(
         )
     if err_key in st.session_state:
         c2.caption(f"PDF export unavailable: {st.session_state[err_key]}")
+
+def metrics_pdf_table(metrics: list[tuple[str, str, str]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"Metric": label, "Value": value, "Detail": detail}
+            for label, value, detail in metrics
+        ]
+    )
 
 def normalize_vendor_name(vendor) -> str:
     text = re.sub(r"\s+", " ", str(vendor or "")).strip()
@@ -584,6 +596,17 @@ def render_costs_tab(
     k3.metric("Gross Profit", fmt_usd(gross_profit), f"{pct_value(gross_profit, income):.1f}% margin")
     k4.metric("Expenses", fmt_usd(expenses), f"{pct_value(expenses, income):.1f}% of income")
     k5.metric("Net Income", fmt_usd(net_income), f"{pct_value(net_income, income):.1f}% margin")
+    section_pdf_export(
+        "Costs KPIs",
+        "costs_kpis",
+        table_df=metrics_pdf_table([
+            ("Total Income", fmt_usd(income), ""),
+            ("COGS", fmt_usd(cogs), f"{pct_value(cogs, income):.1f}% of income"),
+            ("Gross Profit", fmt_usd(gross_profit), f"{pct_value(gross_profit, income):.1f}% margin"),
+            ("Expenses", fmt_usd(expenses), f"{pct_value(expenses, income):.1f}% of income"),
+            ("Net Income", fmt_usd(net_income), f"{pct_value(net_income, income):.1f}% margin"),
+        ]),
+    )
 
     st.divider()
 
@@ -770,6 +793,16 @@ def render_inventory_tab(
     k2.metric("Priced Quantity", fmt_g(priced_quantity), f"{pct_value(priced_quantity, total_quantity):.1f}% of inventory")
     k3.metric("Weighted Avg $/gram", f"${avg_ppg:.2f}")
     k4.metric("Inventory Rows", f"{len(inventory_view):,}", f"{len(priced):,} priced")
+    section_pdf_export(
+        "Inventory KPIs",
+        "inventory_kpis",
+        table_df=metrics_pdf_table([
+            ("Estimated Unrealized Revenue", fmt_usd(estimated_revenue), ""),
+            ("Priced Quantity", fmt_g(priced_quantity), f"{pct_value(priced_quantity, total_quantity):.1f}% of inventory"),
+            ("Weighted Avg $/gram", f"${avg_ppg:.2f}", ""),
+            ("Inventory Rows", f"{len(inventory_view):,}", f"{len(priced):,} priced"),
+        ]),
+    )
 
     st.divider()
 
@@ -882,7 +915,7 @@ def render_inventory_tab(
                 table_df=unpriced_detail,
             )
 
-def render_material_ppg_metrics(view_g: pd.DataFrame):
+def render_material_ppg_metrics(view_g: pd.DataFrame, key_prefix: str, title: str):
     if view_g.empty or not {"Product", "Total", "Units"}.issubset(view_g.columns):
         return
 
@@ -909,6 +942,11 @@ def render_material_ppg_metrics(view_g: pd.DataFrame):
                 f"${item['$/gram']:.2f}/g",
                 fmt_g(item["Grams"]),
             )
+    section_pdf_export(
+        title,
+        f"{key_prefix}_material_ppg_metrics",
+        table_df=ppg[["Product", "$/gram", "Grams", "Revenue"]],
+    )
 
 def render_ppg_over_time_chart(source_df: pd.DataFrame, key_prefix: str):
     trend_df = source_df[source_df["Units UOM"] == "Grams"].copy()
@@ -1561,7 +1599,21 @@ with tab_brand:
         k2.metric("Total Volume",  fmt_g(b_grams))
         k3.metric("Avg $/gram",    f"${b_ppg:.2f}")
         k4.metric("Strains",       b_strains)
-        render_material_ppg_metrics(bview_g)
+        section_pdf_export(
+            "Brand Sales KPIs",
+            "brand_kpis",
+            table_df=metrics_pdf_table([
+                ("Total Revenue", fmt_usd(b_rev), ""),
+                ("Total Volume", fmt_g(b_grams), ""),
+                ("Avg $/gram", f"${b_ppg:.2f}", ""),
+                ("Strains", f"{b_strains:,}", ""),
+            ]),
+        )
+        render_material_ppg_metrics(
+            bview_g,
+            "brand",
+            "Brand Sales Product $/gram Metrics",
+        )
 
         st.divider()
 
@@ -1775,7 +1827,21 @@ with tab_wholesale:
         k2.metric("Total Volume",  fmt_g(w_grams))
         k3.metric("Avg $/gram",    f"${w_ppg:.2f}")
         k4.metric("Vendors",       wview["Vendor"].nunique())
-        render_material_ppg_metrics(wview_g)
+        section_pdf_export(
+            "Wholesale KPIs",
+            "wholesale_kpis",
+            table_df=metrics_pdf_table([
+                ("Total Revenue", fmt_usd(w_rev), ""),
+                ("Total Volume", fmt_g(w_grams), ""),
+                ("Avg $/gram", f"${w_ppg:.2f}", ""),
+                ("Vendors", f"{wview['Vendor'].nunique():,}", ""),
+            ]),
+        )
+        render_material_ppg_metrics(
+            wview_g,
+            "wholesale",
+            "Wholesale Product $/gram Metrics",
+        )
 
         st.divider()
 
@@ -1909,7 +1975,21 @@ with tab_both:
         k2.metric("Total Volume", fmt_g(c_grams))
         k3.metric("Avg $/gram", f"${c_ppg:.2f}")
         k4.metric("Vendors", cview["Vendor"].nunique())
-        render_material_ppg_metrics(cview_g)
+        section_pdf_export(
+            "Combined KPIs",
+            "both_kpis",
+            table_df=metrics_pdf_table([
+                ("Total Revenue", fmt_usd(c_rev), ""),
+                ("Total Volume", fmt_g(c_grams), ""),
+                ("Avg $/gram", f"${c_ppg:.2f}", ""),
+                ("Vendors", f"{cview['Vendor'].nunique():,}", ""),
+            ]),
+        )
+        render_material_ppg_metrics(
+            cview_g,
+            "both",
+            "Combined Product $/gram Metrics",
+        )
 
         st.divider()
 
