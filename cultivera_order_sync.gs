@@ -134,6 +134,7 @@ function fetchCultiveraExportValues_() {
   const standardValues = responseToSheetValues_(
     fetchCultiveraExport_(standardPayload, 'Standard Cultivera export')
   );
+  validateCultiveraExportTable_(standardValues, 'Standard Cultivera export');
 
   if (!getCultiveraIncludeCancelledOrders_()) {
     return standardValues;
@@ -154,7 +155,21 @@ function fetchCultiveraExportValues_() {
   const cancelledValues = responseToSheetValues_(
     fetchCultiveraExport_(cancelledPayload, 'Cancelled Cultivera export')
   );
+  validateCultiveraExportTable_(cancelledValues, 'Cancelled Cultivera export');
   return combineCultiveraSheetValues_([standardValues, cancelledValues]);
+}
+
+function validateCultiveraExportTable_(values, label) {
+  const headers = values && values.length ? values[0] : [];
+  if (
+    headers.length === 1 &&
+    String(headers[0] || '').trim().toLowerCase() === 'response'
+  ) {
+    throw new Error(
+      `${label} returned transaction status JSON instead of an order detail file. ` +
+      'The sync stopped before overwriting Cultivera Data with an incomplete export.'
+    );
+  }
 }
 
 function getCultiveraIncludeCancelledOrders_() {
@@ -701,7 +716,17 @@ function pollCultiveraTransaction_(transactionId) {
       return fetchCultiveraDownloadUrl_(info.downloadUrl);
     }
     if (info.done) {
-      return lastResponse;
+      if (info.waitingForDownload) {
+        Logger.log(
+          `Transaction ${transactionId} reported complete without a download URL; ` +
+          'continuing to wait for the exported file.'
+        );
+      } else {
+        return lastResponse;
+      }
+    }
+    if (info.waitingForDownload) {
+      Logger.log(`Transaction ${transactionId} is still preparing the download file.`);
     }
     Utilities.sleep(CULTIVERA_TRANSACTION_POLL_SLEEP_MS);
   }
@@ -717,7 +742,8 @@ function transactionStatusInfo_(response) {
     status: '',
     done: false,
     failed: false,
-    downloadUrl: ''
+    downloadUrl: '',
+    waitingForDownload: false
   };
   const contentType = String(
     headerValue_(response.getAllHeaders(), 'Content-Type') ||
@@ -739,24 +765,43 @@ function transactionStatusInfo_(response) {
       ''
     );
     const lowerStatus = info.status.toLowerCase();
-    const update = String(json.Update || json.update || '').toLowerCase();
     const pct = Number(json.Pct || json.pct || 0);
     info.failed = (
       Boolean(json.Failed || json.failed || json.HasError || json.hasError) ||
       /fail|error|cancel/.test(lowerStatus)
     );
+    info.downloadUrl = downloadUrlFromJson_(json);
     info.done = (
       Boolean(json.IsComplete || json.isComplete || json.Completed || json.completed || json.Done || json.done) ||
       Number(json.Status || json.status) === 2 ||
       pct >= 1 ||
-      /complete|completed|success|succeeded|done|finished/.test(lowerStatus) ||
-      /complete|completed|success|succeeded|done|finished/.test(update)
+      /complete|completed|success|succeeded|done|finished/.test(lowerStatus)
     );
-    info.downloadUrl = downloadUrlFromJson_(json);
+    info.waitingForDownload = cultiveraJsonLooksLikeTransactionStatus_(json) && !info.downloadUrl;
   } catch (err) {
     info.done = false;
   }
   return info;
+}
+
+function cultiveraJsonLooksLikeTransactionStatus_(json) {
+  if (!json || Array.isArray(json) || typeof json !== 'object') {
+    return false;
+  }
+  return [
+    'Status',
+    'status',
+    'State',
+    'state',
+    'TransactionStatus',
+    'transactionStatus',
+    'Pct',
+    'pct',
+    'Update',
+    'update',
+    'FinalValue',
+    'finalValue'
+  ].some(key => Object.prototype.hasOwnProperty.call(json, key));
 }
 
 function downloadUrlFromJson_(json) {
