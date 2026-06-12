@@ -7136,6 +7136,7 @@ with tab_goals:
 
         saved_brand_eom = saved_goals.get("brand_eom", {})
         saved_brand_weeks = saved_goals.get("brand_weeks", {})
+        legacy_eom_fallback = _clean_goal_amount(saved_goals.get("eom", 0)) if not saved_brand_eom else 0.0
         weekly_goal_rows = [
             dict({
                 "Week": week["label"],
@@ -7151,17 +7152,9 @@ with tab_goals:
             for week in goal_weeks
         ]
         with st.form(f"sales_goal_form_{goal_month_key}", clear_on_submit=False):
-            eom_cols = st.columns([1] * (len(goal_brands) + 1))
-            eom_goal = eom_cols[0].number_input(
-                "Total EOM Goal",
-                min_value=0.0,
-                value=float(saved_goals.get("eom", 0)),
-                step=1000.0,
-                format="%.0f",
-                key=f"goal_eom_{goal_month_key}",
-            )
+            eom_cols = st.columns([1] * len(goal_brands))
             brand_eom_inputs = {}
-            for idx, brand in enumerate(goal_brands, start=1):
+            for idx, brand in enumerate(goal_brands):
                 brand_eom_inputs[brand] = eom_cols[idx].number_input(
                     f"{brand} EOM",
                     min_value=0.0,
@@ -7170,7 +7163,7 @@ with tab_goals:
                     format="%.0f",
                     key=f"goal_eom_{slugify(brand)}_{goal_month_key}",
                 )
-            st.caption("Edit total and brand goals, then save once.")
+            st.caption("Edit brand goals, then save once.")
             weekly_goal_input = st.data_editor(
                 pd.DataFrame(weekly_goal_rows),
                 width="stretch",
@@ -7217,8 +7210,12 @@ with tab_goals:
             if note:
                 weekly_notes[week["id"]] = note
 
+        submitted_eom_goal = sum(brand_eom_goals.values())
+        if submitted_eom_goal <= 0 and legacy_eom_fallback:
+            submitted_eom_goal = legacy_eom_fallback
+
         current_goals = {
-            "eom": _clean_goal_amount(eom_goal),
+            "eom": submitted_eom_goal,
             "weeks": weekly_goals,
             "brand_eom": brand_eom_goals,
             "brand_weeks": brand_week_goals,
@@ -7233,13 +7230,19 @@ with tab_goals:
         elif current_normalized != saved_normalized:
             st.caption("Goal changes are not saved yet. Use Save Goals to record all values.")
 
+        active_goals = saved_normalized
+        weekly_goals = active_goals.get("weeks", {})
+        brand_eom_goals = active_goals.get("brand_eom", {})
+        brand_week_goals = active_goals.get("brand_weeks", {})
+        weekly_notes = active_goals.get("notes", {})
+
         def _brand_week_goal_total(week_id, brands):
             brand_map = brand_week_goals.get(week_id, {})
             return sum(_clean_goal_amount(brand_map.get(brand, 0)) for brand in brands)
 
         if goal_brand_view == "All Brands":
             total_brand_eom_goal = sum(_clean_goal_amount(brand_eom_goals.get(brand, 0)) for brand in goal_brands)
-            view_eom_goal = _clean_goal_amount(eom_goal) or total_brand_eom_goal
+            view_eom_goal = total_brand_eom_goal or _clean_goal_amount(active_goals.get("eom", 0))
             view_weekly_goals = {}
             for week in goal_weeks:
                 total_week_goal = _clean_goal_amount(weekly_goals.get(week["id"], 0))
