@@ -431,26 +431,56 @@ def parse_inventory_tab(raw: pd.DataFrame) -> pd.DataFrame:
     ].copy()
     return inventory
 
-def sales_ppg_summary(source_df: pd.DataFrame, group_cols: list[str], price_col: str) -> pd.DataFrame:
+def latest_sales_ppg_summary(
+    source_df: pd.DataFrame,
+    group_cols: list[str],
+    price_col: str,
+    date_col: str,
+) -> pd.DataFrame:
+    out_cols = [*group_cols, price_col, date_col]
     if source_df.empty:
-        return pd.DataFrame(columns=[*group_cols, price_col])
-    grams = source_df[source_df["Units UOM"] == "Grams"].copy()
+        return pd.DataFrame(columns=out_cols)
+    required = {"Units UOM", "Units", "Total", "Transfer Date", *group_cols}
+    if not required.issubset(source_df.columns):
+        return pd.DataFrame(columns=out_cols)
+
+    grams = source_df[source_df["Units UOM"].astype(str).str.strip().eq("Grams")].copy()
     if grams.empty:
-        return pd.DataFrame(columns=[*group_cols, price_col])
-    summary = (
-        grams.groupby(group_cols, as_index=False)
-        .agg(Revenue=("Total", "sum"), Grams=("Units", "sum"))
+        return pd.DataFrame(columns=out_cols)
+
+    grams["Units"] = pd.to_numeric(grams["Units"], errors="coerce")
+    grams["Total"] = pd.to_numeric(grams["Total"], errors="coerce")
+    grams["Transfer Date"] = pd.to_datetime(grams["Transfer Date"], errors="coerce")
+    grams = grams[(grams["Units"] > 0) & (grams["Total"] > 0)].copy()
+    if grams.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    grams[price_col] = grams["Total"] / grams["Units"]
+    grams = grams[grams[price_col].notna() & (grams[price_col] > 0)].copy()
+    grams["_source_order"] = range(len(grams))
+    grams = grams.sort_values(
+        ["Transfer Date", "_source_order"],
+        ascending=[False, False],
+        na_position="last",
     )
-    summary = summary[summary["Grams"] > 0].copy()
-    summary[price_col] = summary["Revenue"] / summary["Grams"]
-    return summary[[*group_cols, price_col]]
+    latest = grams.drop_duplicates(subset=group_cols, keep="first").copy()
+    latest[date_col] = latest["Transfer Date"]
+    return latest[out_cols]
 
 def add_inventory_revenue_estimates(inventory_df: pd.DataFrame, sales_df: pd.DataFrame) -> pd.DataFrame:
     inventory = inventory_df.copy()
-    exact = sales_ppg_summary(sales_df, ["Product", "Strain", "Brand"], "Exact $/gram")
-    product_strain = sales_ppg_summary(sales_df, ["Product", "Strain"], "Product + Strain $/gram")
-    product_brand = sales_ppg_summary(sales_df, ["Product", "Brand"], "Product + Brand $/gram")
-    product = sales_ppg_summary(sales_df, ["Product"], "Product $/gram")
+    exact = latest_sales_ppg_summary(
+        sales_df, ["Product", "Strain", "Brand"], "Exact $/gram", "Exact Price Date"
+    )
+    product_strain = latest_sales_ppg_summary(
+        sales_df, ["Product", "Strain"], "Product + Strain $/gram", "Product + Strain Price Date"
+    )
+    product_brand = latest_sales_ppg_summary(
+        sales_df, ["Product", "Brand"], "Product + Brand $/gram", "Product + Brand Price Date"
+    )
+    product = latest_sales_ppg_summary(
+        sales_df, ["Product"], "Product $/gram", "Product Price Date"
+    )
 
     inventory = inventory.merge(exact, on=["Product", "Strain", "Brand"], how="left")
     inventory = inventory.merge(product_strain, on=["Product", "Strain"], how="left")
@@ -458,21 +488,24 @@ def add_inventory_revenue_estimates(inventory_df: pd.DataFrame, sales_df: pd.Dat
     inventory = inventory.merge(product, on=["Product"], how="left")
 
     price_sources = [
-        ("Exact $/gram", "Product + Strain + Brand"),
-        ("Product + Strain $/gram", "Product + Strain"),
-        ("Product + Brand $/gram", "Product + Brand"),
-        ("Product $/gram", "Product"),
+        ("Exact $/gram", "Exact Price Date", "Product + Strain + Brand"),
+        ("Product + Strain $/gram", "Product + Strain Price Date", "Product + Strain"),
+        ("Product + Brand $/gram", "Product + Brand Price Date", "Product + Brand"),
+        ("Product $/gram", "Product Price Date", "Product"),
     ]
-    inventory["Avg $/gram"] = pd.NA
+    inventory["Recent $/gram"] = pd.NA
+    inventory["Price Date"] = pd.NaT
     inventory["Price Source"] = "No sales match"
-    for col, label in price_sources:
-        missing_price = inventory["Avg $/gram"].isna()
+    for col, source_date_col, label in price_sources:
+        missing_price = inventory["Recent $/gram"].isna()
         has_price = inventory[col].notna()
-        inventory.loc[missing_price & has_price, "Avg $/gram"] = inventory.loc[missing_price & has_price, col]
-        inventory.loc[missing_price & has_price, "Price Source"] = label
+        price_mask = missing_price & has_price
+        inventory.loc[price_mask, "Recent $/gram"] = inventory.loc[price_mask, col]
+        inventory.loc[price_mask, "Price Date"] = inventory.loc[price_mask, source_date_col]
+        inventory.loc[price_mask, "Price Source"] = label
 
-    inventory["Avg $/gram"] = pd.to_numeric(inventory["Avg $/gram"], errors="coerce")
-    inventory["Estimated Revenue"] = inventory["Quantity"] * inventory["Avg $/gram"].fillna(0)
+    inventory["Recent $/gram"] = pd.to_numeric(inventory["Recent $/gram"], errors="coerce")
+    inventory["Estimated Revenue"] = inventory["Quantity"] * inventory["Recent $/gram"].fillna(0)
     return inventory
 
 def parse_costs_tab(raw: pd.DataFrame) -> pd.DataFrame:
@@ -799,16 +832,16 @@ def render_inventory_tab(
         st.caption("No inventory rows for the selected product types.")
         return
 
-    priced = inventory_view[inventory_view["Avg $/gram"].notna()].copy()
+    priced = inventory_view[inventory_view["Recent $/gram"].notna()].copy()
     total_quantity = inventory_view["Quantity"].sum()
     priced_quantity = priced["Quantity"].sum()
     estimated_revenue = inventory_view["Estimated Revenue"].sum()
-    avg_ppg = estimated_revenue / priced_quantity if priced_quantity > 0 else 0
+    weighted_recent_ppg = estimated_revenue / priced_quantity if priced_quantity > 0 else 0
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Estimated Unrealized Revenue", fmt_usd(estimated_revenue))
     k2.metric("Priced Quantity", fmt_g(priced_quantity), f"{pct_value(priced_quantity, total_quantity):.1f}% of inventory")
-    k3.metric("Weighted Avg $/gram", f"${avg_ppg:.2f}")
+    k3.metric("Weighted Recent $/gram", f"${weighted_recent_ppg:.2f}")
     k4.metric("Inventory Rows", f"{len(inventory_view):,}", f"{len(priced):,} priced")
     section_pdf_export(
         "Inventory KPIs",
@@ -816,7 +849,7 @@ def render_inventory_tab(
         table_df=metrics_pdf_table([
             ("Estimated Unrealized Revenue", fmt_usd(estimated_revenue), ""),
             ("Priced Quantity", fmt_g(priced_quantity), f"{pct_value(priced_quantity, total_quantity):.1f}% of inventory"),
-            ("Weighted Avg $/gram", f"${avg_ppg:.2f}", ""),
+            ("Weighted Recent $/gram", f"${weighted_recent_ppg:.2f}", ""),
             ("Inventory Rows", f"{len(inventory_view):,}", f"{len(priced):,} priced"),
         ]),
     )
@@ -830,7 +863,7 @@ def render_inventory_tab(
             Estimated_Revenue=("Estimated Revenue", "sum"),
         )
     )
-    product_summary["Avg $/gram"] = product_summary.apply(
+    product_summary["Weighted Recent $/gram"] = product_summary.apply(
         lambda row: row["Estimated_Revenue"] / row["Quantity"] if row["Quantity"] > 0 else 0,
         axis=1,
     )
@@ -866,7 +899,7 @@ def render_inventory_tab(
             fig=fig_inv,
         )
     else:
-        st.caption("No selected inventory rows have a matching historical sales price.")
+        st.caption("No selected inventory rows have a matching recent historical sales price.")
 
     st.divider()
 
@@ -879,8 +912,9 @@ def render_inventory_tab(
         "Strain",
         "Brand",
         "Quantity",
-        "Avg $/gram",
+        "Recent $/gram",
         "Estimated Revenue",
+        "Price Date",
         "Price Source",
         "Age (Weeks)",
         "Avg Sales/Week",
@@ -902,8 +936,9 @@ def render_inventory_tab(
         hide_index=True,
         column_config={
             "Quantity": st.column_config.NumberColumn("Quantity", format="%.0f"),
-            "Avg $/gram": st.column_config.NumberColumn("Avg $/gram", format="$%.2f"),
+            "Recent $/gram": st.column_config.NumberColumn("Recent $/gram", format="$%.2f"),
             "Estimated Revenue": st.column_config.NumberColumn("Estimated Revenue", format="$%.0f"),
+            "Price Date": st.column_config.DateColumn("Price Date", format="YYYY-MM-DD"),
             "Age (Weeks)": st.column_config.NumberColumn("Age (Weeks)", format="%.1f"),
             "Avg Sales/Week": st.column_config.NumberColumn("Avg Sales/Week", format="%.2f"),
             "# Packages": st.column_config.NumberColumn("# Packages", format="%.0f"),
@@ -917,7 +952,7 @@ def render_inventory_tab(
     )
 
     unpriced = inventory_view[
-        inventory_view["Avg $/gram"].isna()
+        inventory_view["Recent $/gram"].isna()
         & (inventory_view["Quantity"] > 0)
     ].copy()
     if not unpriced.empty:
@@ -929,8 +964,9 @@ def render_inventory_tab(
                 hide_index=True,
                 column_config={
                     "Quantity": st.column_config.NumberColumn("Quantity", format="%.0f"),
-                    "Avg $/gram": st.column_config.NumberColumn("Avg $/gram", format="$%.2f"),
+                    "Recent $/gram": st.column_config.NumberColumn("Recent $/gram", format="$%.2f"),
                     "Estimated Revenue": st.column_config.NumberColumn("Estimated Revenue", format="$%.0f"),
+                    "Price Date": st.column_config.DateColumn("Price Date", format="YYYY-MM-DD"),
                 },
             )
             section_pdf_export(
