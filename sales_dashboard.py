@@ -7542,6 +7542,24 @@ with tab_mom:
                     return text
             return ""
 
+        def _combine_mom_names(values):
+            names = []
+            seen_names = set()
+            for value in values:
+                text = clean_reference(value)
+                key = store_match_key(text)
+                if text and key and key not in seen_names:
+                    names.append(text)
+                    seen_names.add(key)
+            return " / ".join(names)
+
+        def _mom_name_keys(value):
+            return {
+                key
+                for key in (store_match_key(part) for part in str(value or "").split("/"))
+                if key
+            }
+
         _curr_rev = (
             _curr_paid.groupby("_MoM Key", dropna=False)
             .agg(
@@ -7590,12 +7608,30 @@ with tab_mom:
         _rev = _rev.reset_index()
         _rev["License"] = _rev["License"].astype(str)
         _rev["_MoM Key"] = _rev["License"].apply(license_match_key)
+        _rev = (
+            _rev.groupby("_MoM Key", dropna=False)
+            .agg(
+                **{
+                    prev_month: (prev_month, "sum"),
+                    "License": ("License", _first_mom_text),
+                    "Monthly Store Name": ("Store Name", _combine_mom_names),
+                }
+            )
+            .reset_index()
+        )
 
         # Outer join so neither source drops rows
         mom = _curr_rev.merge(_rev, on="_MoM Key", how="outer")
         mom["License"] = mom["License"].combine_first(mom["_ord_license"])
-        # Prefer revenue-dashboard store name; fall back to order-sheet name
-        mom["Store Name"] = mom["Store Name"].combine_first(mom["_ord_name"])
+        mom["Current Order Name"] = mom["_ord_name"].fillna("")
+        mom["Monthly Store Name"] = mom["Monthly Store Name"].fillna("")
+        has_current_order_name = mom["Current Order Name"].astype(str).str.strip().ne("")
+        mom["Store Name"] = mom["Monthly Store Name"]
+        mom.loc[has_current_order_name, "Store Name"] = mom.loc[has_current_order_name, "Current Order Name"]
+        mom["Store Name"] = mom["Store Name"].where(
+            mom["Store Name"].astype(str).str.strip().ne(""),
+            mom["License"].fillna("").astype(str),
+        )
         mom = mom.drop(columns=["_ord_license", "_ord_name"])
         mom = mom.rename(columns={prev_month: "Last Month"})
         mom["Current Month"] = mom["Current Month"].fillna(0)
@@ -7648,6 +7684,25 @@ with tab_mom:
             _mom_match_notes.append(
                 f"{fmt_usd(_blank_license_sales)} current sales had blank licenses and were grouped by store name"
             )
+        _name_mismatch = mom[
+            (pd.to_numeric(mom["Current Month"], errors="coerce").fillna(0) > 0)
+            & mom["Current Order Name"].astype(str).str.strip().ne("")
+            & mom["Monthly Store Name"].astype(str).str.strip().ne("")
+            & ~(
+                mom.apply(
+                    lambda row: bool(
+                        _mom_name_keys(row["Current Order Name"])
+                        & _mom_name_keys(row["Monthly Store Name"])
+                    ),
+                    axis=1,
+                )
+            )
+        ]
+        if _name_mismatch.shape[0]:
+            _mom_match_notes.append(
+                f"{_name_mismatch.shape[0]} current-selling store"
+                f"{'s' if _name_mismatch.shape[0] != 1 else ''} matched by license but have different order/monthly names"
+            )
         if _mom_match_notes:
             st.caption("MoM matching note: " + " · ".join(_mom_match_notes))
 
@@ -7660,6 +7715,8 @@ with tab_mom:
             _q = mom_search.lower()
             disp_mom = disp_mom[
                 disp_mom["Store Name"].str.lower().str.contains(_q, na=False)
+                | disp_mom["Current Order Name"].str.lower().str.contains(_q, na=False)
+                | disp_mom["Monthly Store Name"].str.lower().str.contains(_q, na=False)
                 | disp_mom["License"].astype(str).str.contains(_q, na=False)
             ]
 
@@ -7679,7 +7736,16 @@ with tab_mom:
                     return ["background-color: rgba(255,150,150,0.25)"] * len(row)
             return [""] * len(row)
 
-        _mom_display_columns = ["Store Name", "License", "Last Month", "Current Month", "$ Change", "% Change"]
+        _mom_display_columns = [
+            "Store Name",
+            "Monthly Store Name",
+            "Current Order Name",
+            "License",
+            "Last Month",
+            "Current Month",
+            "$ Change",
+            "% Change",
+        ]
         styled_mom = (
             disp_mom[[col for col in _mom_display_columns if col in disp_mom.columns]]
             .rename(columns={"Last Month": prev_month, "Current Month": _curr_label})
