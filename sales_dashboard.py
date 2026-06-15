@@ -7762,6 +7762,10 @@ with tab_mom:
             _latest_order_month_start = _ord_max.replace(day=1)
             _cm_from_default = max(_ord_min, _latest_order_month_start)
             _cm_to_default = _ord_max
+        if st.session_state.pop("_mom_reset_to_latest_range", False):
+            st.session_state["_mom_date_range_manual"] = False
+            st.session_state["mom_from"] = _cm_from_default
+            st.session_state["mom_to"] = _cm_to_default
         _mom_range_signature = f"{_ord_min.isoformat()}:{_ord_max.isoformat()}"
         _mom_seen_signature = st.session_state.get("_mom_order_range_signature")
         _mom_manual_range = bool(st.session_state.get("_mom_date_range_manual", False))
@@ -7795,9 +7799,7 @@ with tab_mom:
                                       on_change=_mark_mom_date_range_manual)
         mc4.markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
         if mc4.button("Use latest order range", key="mom_use_latest_range", width="stretch"):
-            st.session_state["_mom_date_range_manual"] = False
-            st.session_state["mom_from"] = _cm_from_default
-            st.session_state["mom_to"] = _cm_to_default
+            st.session_state["_mom_reset_to_latest_range"] = True
             st.rerun()
 
         _curr_label = f"{_cm_from.strftime('%b %-d')} – {_cm_to.strftime('%b %-d, %Y')}"
