@@ -84,6 +84,11 @@ STORE_CONTACT_WORKSHEET = "Store Contacts"
 STORE_CONTACT_COLUMNS = [
     "License Key", "License", "Store Name", "Contact Name", "Phone Number", "Updated At",
 ]
+SALES_GOALS_WORKSHEET = "Sales Goals"
+SALES_GOAL_COLUMNS = [
+    "Month", "Month Label", "Goal Type", "Week ID", "Week",
+    "Brand", "Goal", "Notes", "Updated At",
+]
 ALERT_RECIPIENTS = {
     "DK": "danny@balaclavabrands.com",
     "CH": "chris@balaclavabrands.com",
@@ -408,6 +413,9 @@ def contact_worksheet_name():
 
 def store_contact_worksheet_name():
     return secret_value("store_contact_worksheet", STORE_CONTACT_WORKSHEET) or STORE_CONTACT_WORKSHEET
+
+def sales_goals_worksheet_name():
+    return secret_value("sales_goals_worksheet", SALES_GOALS_WORKSHEET) or SALES_GOALS_WORKSHEET
 
 def order_sheet_source():
     secret_url = secret_value("order_sheet_url")
@@ -877,7 +885,7 @@ def _sales_goal_key(month_key):
 
 def _clean_goal_amount(value):
     try:
-        return max(0.0, float(value or 0))
+        return max(0.0, parse_amount(value, strict=False))
     except Exception:
         return 0.0
 
@@ -890,7 +898,7 @@ def _clean_brand_goal_map(value):
         if _clean_goal_amount(amount) > 0
     }
 
-def _load_sales_goals(month_key):
+def _load_sales_goals_local(month_key):
     raw = get_setting(_sales_goal_key(month_key), "{}")
     try:
         data = json.loads(raw) if raw else {}
@@ -912,6 +920,45 @@ def _load_sales_goals(month_key):
         "brand_weeks": brand_weeks,
         "notes": {str(k): str(v or "") for k, v in notes.items()},
     }
+
+def _sales_goals_empty(goals):
+    normalized = _normalize_sales_goals(goals or {})
+    return not (
+        normalized.get("eom")
+        or normalized.get("weeks")
+        or normalized.get("brand_eom")
+        or normalized.get("brand_weeks")
+        or normalized.get("notes")
+    )
+
+def _load_sales_goals(month_key):
+    local_goals = _load_sales_goals_local(month_key)
+    if not contact_sheet_configured():
+        st.session_state["sales_goal_storage_warning"] = (
+            "Sales goals are using local fallback storage. Configure Google Sheets credentials "
+            "to persist goals in the shared sheet."
+        )
+        return local_goals
+
+    try:
+        sheet_goals = _load_sales_goals_sheet(month_key)
+    except Exception as exc:
+        st.session_state["sales_goal_storage_warning"] = (
+            f"Could not load goals from Google Sheets; using local fallback for now: {exc}"
+        )
+        return local_goals
+
+    if _sales_goals_empty(sheet_goals) and not _sales_goals_empty(local_goals):
+        try:
+            _write_sales_goals_sheet_month(month_key, local_goals)
+            return local_goals
+        except Exception as exc:
+            st.session_state["sales_goal_storage_warning"] = (
+                f"Could not migrate local goals to Google Sheets; using local fallback for now: {exc}"
+            )
+            return local_goals
+
+    return sheet_goals
 
 def _normalize_sales_goals(goals):
     brand_weeks = {}
@@ -945,6 +992,18 @@ def _normalize_sales_goals(goals):
 
 def _save_sales_goals(month_key, goals):
     normalized = _normalize_sales_goals(goals)
+    if contact_sheet_configured():
+        try:
+            _write_sales_goals_sheet_month(month_key, normalized)
+        except Exception as exc:
+            st.session_state["sales_goal_storage_warning"] = (
+                f"Could not save goals to Google Sheets; kept a local backup for now: {exc}"
+            )
+    else:
+        st.session_state["sales_goal_storage_warning"] = (
+            "Sales goals were saved locally only. Configure Google Sheets credentials "
+            "to persist goals in the shared sheet."
+        )
     set_setting(_sales_goal_key(month_key), json.dumps(normalized, sort_keys=True))
 
 def _month_label(month_key):
@@ -3680,6 +3739,215 @@ def _store_contacts_worksheet():
         _worksheet_update(worksheet, [STORE_CONTACT_COLUMNS])
     return worksheet
 
+@st.cache_resource(show_spinner=False)
+def _sales_goals_worksheet():
+    client = _contact_sheet_client()
+    spreadsheet = client.open_by_key(contact_sheet_id())
+    title = sales_goals_worksheet_name()
+    try:
+        worksheet = spreadsheet.worksheet(title)
+    except Exception:
+        worksheet = spreadsheet.add_worksheet(title=title, rows=500, cols=len(SALES_GOAL_COLUMNS))
+    values = worksheet.get_all_values()
+    if not values:
+        _worksheet_update(worksheet, [SALES_GOAL_COLUMNS])
+    return worksheet
+
+def _sales_goal_month_key(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(pd.Period(text, freq="M"))
+    except Exception:
+        return text
+
+def _normalize_sales_goals_sheet_df(df):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=SALES_GOAL_COLUMNS)
+
+    aliases = {
+        "Month": ["Month", "month", "Month Key"],
+        "Month Label": ["Month Label", "month_label", "Month Name"],
+        "Goal Type": ["Goal Type", "goal_type", "Type"],
+        "Week ID": ["Week ID", "week_id", "Week Start"],
+        "Week": ["Week", "Week Label", "week_label"],
+        "Brand": ["Brand", "brand"],
+        "Goal": ["Goal", "goal", "Amount", "amount"],
+        "Notes": ["Notes", "notes", "Note"],
+        "Updated At": ["Updated At", "updated_at", "Saved At"],
+    }
+
+    out = pd.DataFrame()
+    source_cols = {str(c).strip(): c for c in df.columns}
+    lower_source_cols = {str(c).strip().lower(): c for c in df.columns}
+    for target, source_names in aliases.items():
+        source = next((source_cols[name] for name in source_names if name in source_cols), None)
+        if source is None:
+            source = next((lower_source_cols[name.lower()] for name in source_names if name.lower() in lower_source_cols), None)
+        out[target] = df[source] if source is not None else ""
+
+    out = out.fillna("").astype(str)
+    for col in SALES_GOAL_COLUMNS:
+        out[col] = out[col].str.strip()
+    missing_month = out["Month"].eq("")
+    out.loc[missing_month, "Month"] = out.loc[missing_month, "Month Label"]
+    out["Month"] = out["Month"].apply(_sales_goal_month_key)
+    out["Month Label"] = out["Month"].apply(lambda value: _month_label(value) if value else "")
+    goal_type_labels = {
+        "eom": "EOM",
+        "week": "Week",
+        "weekly": "Week",
+        "week note": "Week Note",
+        "note": "Week Note",
+    }
+    out["Goal Type"] = out["Goal Type"].apply(
+        lambda value: goal_type_labels.get(str(value or "").strip().lower(), str(value or "").strip().title())
+    )
+    out["Week ID"] = out["Week ID"].apply(lambda value: str(value or "").strip())
+    out["Brand"] = out["Brand"].str.strip()
+    out = out[out["Month"].ne("")]
+    return out[SALES_GOAL_COLUMNS]
+
+def _sales_goals_sheet_df():
+    worksheet = _sales_goals_worksheet()
+    values = worksheet.get_all_values()
+    if not values or len(values) == 1:
+        return pd.DataFrame(columns=SALES_GOAL_COLUMNS)
+    headers = values[0]
+    rows = [
+        row[:len(headers)] + [""] * max(0, len(headers) - len(row))
+        for row in values[1:]
+    ]
+    return _normalize_sales_goals_sheet_df(pd.DataFrame(rows, columns=headers))
+
+def _load_sales_goals_sheet(month_key):
+    month_key = _sales_goal_month_key(month_key)
+    goal_df = _sales_goals_sheet_df()
+    if goal_df.empty:
+        return _normalize_sales_goals({})
+
+    view = goal_df[goal_df["Month"].eq(month_key)].copy()
+    if view.empty:
+        return _normalize_sales_goals({})
+
+    brand_eom = {}
+    brand_weeks = {}
+    weekly_totals = {}
+    notes = {}
+    for _, row in view.iterrows():
+        goal_type = str(row.get("Goal Type", "") or "").strip().lower()
+        week_id = str(row.get("Week ID", "") or "").strip()
+        brand = str(row.get("Brand", "") or "").strip()
+        goal = _clean_goal_amount(row.get("Goal", 0))
+        note = str(row.get("Notes", "") or "").strip()
+
+        if goal_type == "eom" and brand and goal > 0:
+            brand_eom[brand] = goal
+        elif goal_type in {"week", "weekly"} and week_id:
+            if brand and goal > 0:
+                brand_weeks.setdefault(week_id, {})[brand] = goal
+                weekly_totals[week_id] = weekly_totals.get(week_id, 0) + goal
+            if note:
+                notes[week_id] = note
+        elif goal_type in {"week note", "note"} and week_id and note:
+            notes[week_id] = note
+
+    return _normalize_sales_goals({
+        "eom": sum(brand_eom.values()),
+        "weeks": weekly_totals,
+        "brand_eom": brand_eom,
+        "brand_weeks": brand_weeks,
+        "notes": notes,
+    })
+
+def _sales_goal_rows_from_goals(month_key, goals):
+    month_key = _sales_goal_month_key(month_key)
+    normalized = _normalize_sales_goals(goals or {})
+    updated_at = datetime.now().isoformat(timespec="seconds")
+    month_label = _month_label(month_key)
+    week_labels = {
+        week["id"]: week["label"]
+        for week in _month_weeks(*_month_bounds(month_key))
+    }
+    rows = []
+
+    brand_order = list(TERRITORY_BRANDS)
+    for brand in sorted(normalized.get("brand_eom", {}), key=lambda value: (brand_order.index(value) if value in brand_order else 999, value)):
+        goal = _clean_goal_amount(normalized["brand_eom"].get(brand, 0))
+        if goal > 0:
+            rows.append({
+                "Month": month_key,
+                "Month Label": month_label,
+                "Goal Type": "EOM",
+                "Week ID": "",
+                "Week": "",
+                "Brand": brand,
+                "Goal": goal,
+                "Notes": "",
+                "Updated At": updated_at,
+            })
+
+    for week_id in sorted(normalized.get("brand_weeks", {})):
+        brand_map = normalized["brand_weeks"].get(week_id, {})
+        for brand in sorted(brand_map, key=lambda value: (brand_order.index(value) if value in brand_order else 999, value)):
+            goal = _clean_goal_amount(brand_map.get(brand, 0))
+            if goal > 0:
+                rows.append({
+                    "Month": month_key,
+                    "Month Label": month_label,
+                    "Goal Type": "Week",
+                    "Week ID": week_id,
+                    "Week": week_labels.get(week_id, week_id),
+                    "Brand": brand,
+                    "Goal": goal,
+                    "Notes": "",
+                    "Updated At": updated_at,
+                })
+
+    for week_id, note in sorted((normalized.get("notes", {}) or {}).items()):
+        note = str(note or "").strip()
+        if note:
+            rows.append({
+                "Month": month_key,
+                "Month Label": month_label,
+                "Goal Type": "Week Note",
+                "Week ID": week_id,
+                "Week": week_labels.get(week_id, week_id),
+                "Brand": "",
+                "Goal": "",
+                "Notes": note,
+                "Updated At": updated_at,
+            })
+
+    return rows
+
+def _write_sales_goals_sheet_month(month_key, goals):
+    worksheet = _sales_goals_worksheet()
+    month_key = _sales_goal_month_key(month_key)
+    existing = _sales_goals_sheet_df()
+    keep = existing[existing["Month"].ne(month_key)] if not existing.empty else existing
+    incoming = pd.DataFrame(_sales_goal_rows_from_goals(month_key, goals), columns=SALES_GOAL_COLUMNS)
+    combined = pd.concat([keep, incoming], ignore_index=True)
+    combined = _normalize_sales_goals_sheet_df(combined)
+    if not combined.empty:
+        type_order = {"EOM": 0, "Week": 1, "Weekly": 1, "Week Note": 2, "Note": 2}
+        combined["_type_order"] = combined["Goal Type"].map(type_order).fillna(9)
+        combined["_brand_order"] = combined["Brand"].apply(
+            lambda brand: TERRITORY_BRANDS.index(brand) if brand in TERRITORY_BRANDS else 999
+        )
+        combined = combined.sort_values(
+            ["Month", "_type_order", "Week ID", "_brand_order", "Brand"],
+            ascending=[False, True, True, True, True],
+        ).drop(columns=["_type_order", "_brand_order"])
+
+    rows = combined.fillna("").astype(str).values.tolist()
+    values = [SALES_GOAL_COLUMNS] + rows
+    old_row_count = len(worksheet.get_all_values())
+    if old_row_count > len(values):
+        values.extend([[""] * len(SALES_GOAL_COLUMNS) for _ in range(old_row_count - len(values))])
+    _worksheet_update(worksheet, values, value_input_option="USER_ENTERED")
+
 def _contact_log_from_sheet() -> pd.DataFrame:
     worksheet = _contact_worksheet()
     values = worksheet.get_all_values()
@@ -3751,6 +4019,14 @@ def contact_log_backend_label():
         return f"Google Sheets · {contact_worksheet_name()} · service account"
     if mode == "oauth":
         return f"Google Sheets · {contact_worksheet_name()} · OAuth"
+    return "Local SQLite fallback"
+
+def sales_goals_backend_label():
+    mode = contact_auth_mode()
+    if mode == "service_account":
+        return f"Google Sheets · {sales_goals_worksheet_name()} · service account"
+    if mode == "oauth":
+        return f"Google Sheets · {sales_goals_worksheet_name()} · OAuth"
     return "Local SQLite fallback"
 
 def upsert_contact_log_rows(rows: list[dict]):
@@ -7127,6 +7403,9 @@ with tab_goals:
         saved_goals = _load_sales_goals(goal_month_key)
         if st.session_state.get("sales_goal_notice"):
             st.success(st.session_state.pop("sales_goal_notice"))
+        if st.session_state.get("sales_goal_storage_warning"):
+            st.warning(st.session_state.pop("sales_goal_storage_warning"))
+        st.caption(f"Goal storage: **{sales_goals_backend_label()}**")
 
         goal_controls[2].markdown(
             "<div style='height:1.85rem'></div>"
