@@ -1662,14 +1662,39 @@ def growflow_inventory_sources_config() -> tuple[tuple[str, str, str], ...]:
         deduped.append(source)
     return tuple(deduped)
 
-def growflow_inventory_api_config() -> tuple[str, str, tuple[tuple[str, str, str], ...]]:
-    client_id = secret_or_env("growflow_client_id", "GROWFLOW_CLIENT_ID")
-    client_secret = secret_or_env("growflow_client_secret", "GROWFLOW_CLIENT_SECRET")
-    return client_id, client_secret, growflow_inventory_sources_config()
+def growflow_inventory_api_config() -> tuple[str, str, str, str, str, tuple[tuple[str, str, str], ...]]:
+    client_id = secret_or_env(
+        "growflow_client_id",
+        "growflow_api_key",
+        "GROWFLOW_CLIENT_ID",
+        "GROWFLOW_API_KEY",
+    )
+    client_secret = secret_or_env(
+        "growflow_client_secret",
+        "growflow_api_secret",
+        "GROWFLOW_CLIENT_SECRET",
+        "GROWFLOW_API_SECRET",
+    )
+    token_url = secret_or_env(
+        "growflow_token_url",
+        "growflow_auth_url",
+        "GROWFLOW_TOKEN_URL",
+        "GROWFLOW_AUTH_URL",
+        default=GROWFLOW_TOKEN_URL,
+    )
+    audience = secret_or_env("growflow_audience", "GROWFLOW_AUDIENCE", default=GROWFLOW_AUDIENCE)
+    graphql_url = secret_or_env(
+        "growflow_graphql_url",
+        "growflow_api_url",
+        "GROWFLOW_GRAPHQL_URL",
+        "GROWFLOW_API_URL",
+        default=GROWFLOW_GRAPHQL_URL,
+    )
+    return client_id, client_secret, token_url, audience, graphql_url, growflow_inventory_sources_config()
 
 def growflow_inventory_api_ready() -> bool:
-    client_id, client_secret, sources = growflow_inventory_api_config()
-    return bool(client_id and client_secret and sources)
+    client_id, client_secret, token_url, audience, graphql_url, sources = growflow_inventory_api_config()
+    return bool(client_id and client_secret and token_url and audience and graphql_url and sources)
 
 def growflow_api_error_preview(response: requests.Response, limit: int = 500) -> str:
     text = (response.text or response.reason or "")[:limit]
@@ -1697,11 +1722,11 @@ def growflow_post_json(url: str, payload: dict, label: str, headers: dict | None
     response = requests.post(url, json=payload, headers=headers or {}, timeout=timeout)
     return growflow_json_response(response, label)
 
-def fetch_growflow_access_token(client_id: str, client_secret: str) -> str:
+def fetch_growflow_access_token(client_id: str, client_secret: str, token_url: str, audience: str) -> str:
     payload = {
         "client_id": client_id,
         "client_secret": client_secret,
-        "audience": GROWFLOW_AUDIENCE,
+        "audience": audience,
         "grant_type": "client_credentials",
     }
     attempts = (
@@ -1719,7 +1744,7 @@ def fetch_growflow_access_token(client_id: str, client_secret: str) -> str:
     )
     failures = []
     for request_type, request_kwargs in attempts:
-        response = requests.post(GROWFLOW_TOKEN_URL, timeout=20, **request_kwargs)
+        response = requests.post(token_url, timeout=20, **request_kwargs)
         if response.status_code < 200 or response.status_code >= 300:
             failures.append(
                 f"{request_type} HTTP {response.status_code}: {growflow_api_error_preview(response)}"
@@ -1740,7 +1765,8 @@ def fetch_growflow_access_token(client_id: str, client_secret: str) -> str:
         return token
 
     raise ValueError(
-        "GrowFlow token request failed. Tried JSON and form-encoded client_credentials auth. "
+        f"GrowFlow token request failed for audience {audience!r} at {token_url}. "
+        "Tried JSON and form-encoded client_credentials auth. "
         + " | ".join(failures)
     )
 
@@ -1769,7 +1795,13 @@ def flatten_growflow_inventory_item(item: dict, facility_label: str) -> dict:
         row["Facility"] = facility_label
     return row
 
-def fetch_growflow_inventory_source(token: str, region_code: str, license_number: str, facility_label: str) -> list[dict]:
+def fetch_growflow_inventory_source(
+    token: str,
+    graphql_url: str,
+    region_code: str,
+    license_number: str,
+    facility_label: str,
+) -> list[dict]:
     rows = []
     skip = 0
     take = GROWFLOW_MAX_PAGE_SIZE
@@ -1785,7 +1817,7 @@ def fetch_growflow_inventory_source(token: str, region_code: str, license_number
             "take": take,
         }
         data = growflow_post_json(
-            GROWFLOW_GRAPHQL_URL,
+            graphql_url,
             {"query": GROWFLOW_INVENTORY_QUERY, "variables": variables},
             f"GrowFlow inventory request for {region_code.upper()} license {license_number}",
             headers=headers,
@@ -1811,12 +1843,15 @@ def fetch_growflow_inventory_source(token: str, region_code: str, license_number
 def load_growflow_inventory_api(
     client_id: str,
     client_secret: str,
+    token_url: str,
+    audience: str,
+    graphql_url: str,
     sources: tuple[tuple[str, str, str], ...],
 ) -> pd.DataFrame:
-    token = fetch_growflow_access_token(client_id, client_secret)
+    token = fetch_growflow_access_token(client_id, client_secret, token_url, audience)
     rows = []
     for region_code, license_number, facility_label in sources:
-        rows.extend(fetch_growflow_inventory_source(token, region_code, license_number, facility_label))
+        rows.extend(fetch_growflow_inventory_source(token, graphql_url, region_code, license_number, facility_label))
     if not rows:
         raise ValueError("GrowFlow inventory returned no rows.")
     return pd.DataFrame(rows)
@@ -1898,9 +1933,21 @@ _default_gid_b9 = saved_or_configured_setting(_saved, "gid_b9")
 _default_gid_assign = saved_or_configured_setting(_saved, "gid_assign")
 _default_gid_costs = saved_or_configured_setting(_saved, "gid_costs", DEFAULT_COSTS_GID)
 _default_gid_inventory = saved_or_configured_setting(_saved, "gid_inventory", DEFAULT_INVENTORY_GID)
-_growflow_client_id, _growflow_client_secret, _growflow_inventory_sources = growflow_inventory_api_config()
+(
+    _growflow_client_id,
+    _growflow_client_secret,
+    _growflow_token_url,
+    _growflow_audience,
+    _growflow_graphql_url,
+    _growflow_inventory_sources,
+) = growflow_inventory_api_config()
 _growflow_inventory_ready = bool(
-    _growflow_client_id and _growflow_client_secret and _growflow_inventory_sources
+    _growflow_client_id
+    and _growflow_client_secret
+    and _growflow_token_url
+    and _growflow_audience
+    and _growflow_graphql_url
+    and _growflow_inventory_sources
 )
 
 with st.sidebar:
@@ -1939,8 +1986,9 @@ with st.sidebar:
         )
     elif _growflow_client_id or _growflow_client_secret or _growflow_inventory_sources:
         st.caption(
-            "GrowFlow inventory API is partially configured. Add client id, client secret, "
-            "and license number to Streamlit secrets to bypass the Inventory GID."
+            "GrowFlow inventory API is partially configured. Add API key/client id, "
+            "API secret/client secret, and license number to Streamlit secrets to bypass "
+            "the Inventory GID."
         )
 
     if st.button("Load / Refresh", type="primary", width="stretch"):
@@ -2003,6 +2051,9 @@ if _growflow_inventory_ready:
         inventory_raw = load_growflow_inventory_api(
             _growflow_client_id,
             _growflow_client_secret,
+            _growflow_token_url,
+            _growflow_audience,
+            _growflow_graphql_url,
             _growflow_inventory_sources,
         )
         inventory_df = parse_inventory_tab(inventory_raw)

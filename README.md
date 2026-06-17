@@ -79,6 +79,14 @@ growflow_license_number = "000021"
 growflow_facility_label = "B-9"
 ```
 
+`growflow_api_key` and `growflow_api_secret` are accepted as aliases for `growflow_client_id` and `growflow_client_secret`. The dashboard defaults to the GrowFlow Wholesale Partner API docs values below, but they can be overridden if GrowFlow provides tenant-specific endpoints or audience values:
+
+```toml
+growflow_token_url = "https://token.growflow.com/oauth/token"
+growflow_audience = "https://growflow.com"
+growflow_graphql_url = "https://partnerapi.growflow.com/"
+```
+
 For multiple GrowFlow licenses/facilities, use `growflow_inventory_sources` instead of the single `growflow_license_number` fields:
 
 ```toml
