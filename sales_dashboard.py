@@ -70,6 +70,8 @@ DEFAULT_SHEET_GID = "0"
 DEFAULT_ORDER_SHEET_NAME = "Cultivera Data"
 DEFAULT_TERRITORY_LOCATION_GID = "1421425539"
 DEFAULT_TERRITORY_REP_GID = "1653796501"
+MASTER_STORE_SOURCE_NAME = "Top Shelf Data"
+MASTER_STORE_SHEET_GID = DEFAULT_TERRITORY_LOCATION_GID
 CONTACT_LOG_WORKSHEET = "Contact Log"
 CONTACT_LOG_COLUMNS = [
     "License", "Store Name", "Month", "Revenue",
@@ -440,6 +442,12 @@ def territory_location_sheet_gid():
         or get_setting("location_sheet_gid")
         or DEFAULT_TERRITORY_LOCATION_GID
     )
+
+def master_store_sheet_url():
+    return secret_value("master_store_sheet_url") or DEFAULT_SHEET_URL
+
+def master_store_sheet_gid():
+    return secret_value("master_store_sheet_gid") or MASTER_STORE_SHEET_GID
 
 def is_totals_col(header, values, other_cols):
     header_text = str(header).strip()
@@ -1406,6 +1414,88 @@ def load_location_sheet_as_df(sheet_url, gid="0"):
     if raw.empty:
         raise ValueError("The location sheet is empty.")
     return normalize_store_locations(raw), raw.shape
+
+def load_master_store_universe():
+    return load_location_sheet_as_df(master_store_sheet_url(), master_store_sheet_gid())
+
+def apply_master_store_universe(df, months, master_locations):
+    if df is None or df.empty or master_locations is None or master_locations.empty:
+        return df, {"total": 0, "added": 0, "renamed": 0}
+
+    stores = normalize_store_locations(master_locations)
+    if stores.empty:
+        return df, {"total": 0, "added": 0, "renamed": 0}
+
+    sales_rows = df.copy()
+    sales_rows.index.name = "License"
+    sales_rows = sales_rows.reset_index()
+    sales_rows["License"] = sales_rows["License"].apply(lambda value: clean_reference(value) or str(value).strip())
+    sales_rows["Store Name"] = sales_rows["Store Name"].fillna("").astype(str)
+    for month in months:
+        sales_rows[month] = pd.to_numeric(sales_rows[month], errors="coerce").fillna(0)
+
+    merged_rows = {}
+    for _, row in sales_rows.iterrows():
+        license_value = row["License"]
+        if not license_value:
+            continue
+        if license_value not in merged_rows:
+            merged_rows[license_value] = {"License": license_value, "Store Name": row["Store Name"]}
+            for month in months:
+                merged_rows[license_value][month] = row[month]
+        else:
+            existing_name = str(merged_rows[license_value].get("Store Name", "") or "")
+            new_name = str(row["Store Name"] or "")
+            if new_name and new_name not in existing_name:
+                merged_rows[license_value]["Store Name"] = (
+                    f"{existing_name} / {new_name}" if existing_name else new_name
+                )
+            for month in months:
+                merged_rows[license_value][month] += row[month]
+
+    out = pd.DataFrame(list(merged_rows.values())).set_index("License")
+    out["Store Name"] = out["Store Name"].fillna("").astype(str)
+
+    existing_by_key = {}
+    for license_value in out.index:
+        key = license_match_key(license_value)
+        if key and key not in existing_by_key:
+            existing_by_key[key] = license_value
+
+    added = 0
+    renamed = 0
+    for _, store in stores.iterrows():
+        master_license = clean_reference(store.get("License", ""))
+        master_name = str(store.get("Store Name", "") or master_license).strip()
+        master_key = license_match_key(master_license)
+        if not master_key:
+            continue
+
+        existing_license = existing_by_key.get(master_key)
+        if existing_license is not None:
+            if master_name and out.at[existing_license, "Store Name"] != master_name:
+                out.at[existing_license, "Store Name"] = master_name
+                renamed += 1
+            continue
+
+        license_value = master_license or master_key
+        if license_value in out.index:
+            suffix = 2
+            base_license = license_value
+            while license_value in out.index:
+                license_value = f"{base_license}-{suffix}"
+                suffix += 1
+
+        out.loc[license_value, "Store Name"] = master_name or license_value
+        for month in months:
+            out.loc[license_value, month] = 0.0
+        existing_by_key[master_key] = license_value
+        added += 1
+
+    for month in months:
+        out[month] = pd.to_numeric(out[month], errors="coerce").fillna(0)
+    out.index.name = "License"
+    return out, {"total": len(stores), "added": added, "renamed": renamed}
 
 def load_and_save_location_sheet(sheet_url, gid="0", clear_cache=False):
     sheet_url = str(sheet_url or "").strip()
@@ -4780,9 +4870,17 @@ with st.sidebar:
 
 # ── Parse ──────────────────────────────────────────────────────────────────────
 df, months, stripped, rev_exact_dup_ids = None, [], [], []
+master_store_stats = {"total": 0, "added": 0, "renamed": 0}
+master_store_warning = ""
 if raw_input.strip():
     try:
         df, months, stripped, rev_exact_dup_ids = parse_input(raw_input)
+        try:
+            _master_locations, _master_shape = load_master_store_universe()
+            df, master_store_stats = apply_master_store_universe(df, months, _master_locations)
+            master_store_stats["source_rows"] = _master_shape[0]
+        except Exception as master_exc:
+            master_store_warning = str(master_exc)
     except Exception as e:
         st.error(str(e))
 
@@ -4798,6 +4896,19 @@ if rev_exact_dup_ids:
     st.warning(
         f"⚠️ Revenue data: {len(rev_exact_dup_ids)} exact duplicate row{'s' if len(rev_exact_dup_ids)!=1 else ''} removed — "
         f"{'; '.join(rev_exact_dup_ids)}"
+    )
+
+if master_store_warning:
+    st.warning(
+        f"Could not load {MASTER_STORE_SOURCE_NAME} master store list; "
+        f"using the monthly sales sheet store list only. {master_store_warning}"
+    )
+elif master_store_stats.get("total"):
+    st.caption(
+        f"Master store universe: {MASTER_STORE_SOURCE_NAME} "
+        f"({master_store_stats['total']:,} licenses; "
+        f"{master_store_stats['added']:,} added with zero sales; "
+        f"{master_store_stats['renamed']:,} names matched to master)."
     )
 
 _order_df_check = st.session_state.get("order_df")
