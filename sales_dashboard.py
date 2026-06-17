@@ -5784,13 +5784,7 @@ with tab_contact:
             "alert_sent_week":   _saved(lic, "Alert Sent Week"),
         }, bool(alert_interval and not alert_recipient)
 
-    contact_filter_cols = st.columns([1, 2])
-    contact_sort_by = contact_filter_cols[0].selectbox(
-        "Sort By",
-        ["Selector Priority", "Monthly Store Revenue", "Monthly Balaclava Sales"],
-        key="contact_sort_by",
-    )
-    contact_search = contact_filter_cols[1].text_input(
+    contact_search = st.text_input(
         "Search stores", placeholder="Store name or license…", key="contact_search"
     )
     _q = contact_search.lower()
@@ -5815,27 +5809,6 @@ with tab_contact:
 
     def _contact_balaclava_sales(lic):
         return float(cf_monthly_balaclava_sales_by_lic.get(lic, 0) or 0)
-
-    if contact_sort_by == "Monthly Store Revenue":
-        display_lics = sorted(
-            display_lics,
-            key=lambda lic: (
-                -_contact_store_revenue(lic),
-                -_contact_balaclava_sales(lic),
-                _contact_sort_name(lic),
-                _selector_rank_by_lic.get(lic, 0),
-            ),
-        )
-    elif contact_sort_by == "Monthly Balaclava Sales":
-        display_lics = sorted(
-            display_lics,
-            key=lambda lic: (
-                -_contact_balaclava_sales(lic),
-                -_contact_store_revenue(lic),
-                _contact_sort_name(lic),
-                _selector_rank_by_lic.get(lic, 0),
-            ),
-        )
 
     def _contact_label_text(value, default="-"):
         text = str(value or "").strip()
@@ -5880,14 +5853,52 @@ with tab_contact:
             d2.dataframe(_logged_sample, width="stretch", hide_index=True)
 
     contact_list_columns = [
-        ("Name", 46),
-        ("License #", 13),
-        ("Category", 28),
-        ("Balaclava Revenue", 20),
-        ("Store Revenue", 19),
-        ("Zip Code", 13),
-        ("Sales Rep", 14),
+        ("Name", 46, "name"),
+        ("License #", 13, "license"),
+        ("Category", 28, "category"),
+        ("Balaclava Revenue", 20, "balaclava_revenue"),
+        ("Store Revenue", 19, "store_revenue"),
+        ("Zip Code", 13, "zip"),
+        ("Sales Rep", 14, "sales_rep"),
     ]
+    contact_sort_specs = {
+        "selector": {"default_desc": False},
+        "name": {"default_desc": False},
+        "license": {"default_desc": False},
+        "category": {"default_desc": False},
+        "balaclava_revenue": {"default_desc": True},
+        "store_revenue": {"default_desc": True},
+        "zip": {"default_desc": False},
+        "sales_rep": {"default_desc": False},
+    }
+    legacy_contact_sort_keys = {
+        "Selector Priority": "selector",
+        "Monthly Store Revenue": "store_revenue",
+        "Monthly Balaclava Sales": "balaclava_revenue",
+    }
+
+    def _contact_sort_state_key():
+        raw_key = st.session_state.get("contact_sort_by", "selector")
+        sort_key = legacy_contact_sort_keys.get(raw_key, raw_key)
+        if sort_key not in contact_sort_specs:
+            sort_key = "selector"
+        st.session_state["contact_sort_by"] = sort_key
+        if "contact_sort_desc" not in st.session_state:
+            st.session_state["contact_sort_desc"] = contact_sort_specs[sort_key]["default_desc"]
+        return sort_key
+
+    def _set_contact_sort(sort_key):
+        current_key = _contact_sort_state_key()
+        if current_key == sort_key:
+            st.session_state["contact_sort_desc"] = not bool(st.session_state.get("contact_sort_desc", False))
+        else:
+            st.session_state["contact_sort_by"] = sort_key
+            st.session_state["contact_sort_desc"] = contact_sort_specs[sort_key]["default_desc"]
+
+    def _contact_sort_header_label(label, sort_key):
+        if _contact_sort_state_key() != sort_key:
+            return label
+        return f"{label} {'↓' if st.session_state.get('contact_sort_desc', False) else '↑'}"
 
     def _contact_list_cell(value, width):
         text = re.sub(r"\s+", " ", str(value or "").strip())
@@ -5898,17 +5909,13 @@ with tab_contact:
     def _contact_list_row(values):
         return "  ".join(
             _contact_list_cell(value, width)
-            for value, (_, width) in zip(values, contact_list_columns)
+            for value, (_, width, _) in zip(values, contact_list_columns)
         )
 
     def _contact_expander_label(value):
         return str(value).replace("\\", "\\\\").replace("$", "\\$")
 
-    contact_list_grid = " ".join(f"{width}ch" for _, width in contact_list_columns)
-    contact_list_header_cells = "".join(
-        f"<div>{html_lib.escape(label)}</div>"
-        for label, _ in contact_list_columns
-    )
+    contact_list_grid = " ".join(f"{width}ch" for _, width, _ in contact_list_columns)
     st.markdown(
         f"""
         <style>
@@ -5919,17 +5926,111 @@ with tab_contact:
             line-height: 1.35;
             white-space: pre;
           }}
+          div[class*="st-key-contact_list_header"] {{
+            border-bottom:1px solid rgba(107,114,128,0.28);
+            margin:0.35rem 0 0.15rem;
+            padding:0.25rem 0.2rem 0.35rem 2.35rem;
+            overflow-x:auto;
+          }}
+          div[class*="st-key-contact_list_header"] [data-testid="stHorizontalBlock"] {{
+            display:grid;
+            grid-template-columns:{contact_list_grid};
+            column-gap:2ch;
+            align-items:end;
+            min-width:max-content;
+          }}
+          div[class*="st-key-contact_list_header"] [data-testid="column"] {{
+            width:auto !important;
+            min-width:0 !important;
+          }}
+          div[class*="st-key-contact_list_header"] div[data-testid="stButton"] > button {{
+            background:transparent;
+            border:0;
+            box-shadow:none;
+            color:#4B5563;
+            font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+            font-size:0.88rem;
+            font-weight:700;
+            justify-content:flex-start;
+            letter-spacing:0;
+            min-height:1.4rem;
+            padding:0;
+            text-align:left;
+            text-transform:uppercase;
+            white-space:nowrap;
+          }}
+          div[class*="st-key-contact_list_header"] div[data-testid="stButton"] > button:hover {{
+            color:#E5E7EB;
+            background:transparent;
+            border:0;
+          }}
         </style>
-        <div style="display:grid;grid-template-columns:{contact_list_grid};column-gap:2ch;
-                    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono',monospace;
-                    font-size:0.88rem;font-weight:700;color:#4B5563;text-transform:uppercase;letter-spacing:0;
-                    border-bottom:1px solid rgba(107,114,128,0.28);padding:0.25rem 0.2rem 0.35rem 2.35rem;
-                    margin:0.35rem 0 0.15rem;align-items:end;overflow-x:auto;">
-          {contact_list_header_cells}
-        </div>
         """,
         unsafe_allow_html=True,
     )
+    with st.container(key="contact_list_header"):
+        header_cols = st.columns([width for _, width, _ in contact_list_columns], gap="small")
+        for header_col, (label, _, sort_key) in zip(header_cols, contact_list_columns):
+            header_col.button(
+                _contact_sort_header_label(label, sort_key),
+                key=f"contact_sort_header_{sort_key}",
+                on_click=_set_contact_sort,
+                args=(sort_key,),
+                width="stretch",
+            )
+
+    contact_sort_by = _contact_sort_state_key()
+    contact_sort_desc = bool(st.session_state.get("contact_sort_desc", False))
+    if contact_sort_by == "store_revenue":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (
+                -_contact_store_revenue(lic) if contact_sort_desc else _contact_store_revenue(lic),
+                -_contact_balaclava_sales(lic) if contact_sort_desc else _contact_balaclava_sales(lic),
+                _contact_sort_name(lic),
+                _selector_rank_by_lic.get(lic, 0),
+            ),
+        )
+    elif contact_sort_by == "balaclava_revenue":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (
+                -_contact_balaclava_sales(lic) if contact_sort_desc else _contact_balaclava_sales(lic),
+                -_contact_store_revenue(lic) if contact_sort_desc else _contact_store_revenue(lic),
+                _contact_sort_name(lic),
+                _selector_rank_by_lic.get(lic, 0),
+            ),
+        )
+    elif contact_sort_by == "name":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (_contact_sort_name(lic), _selector_rank_by_lic.get(lic, 0)),
+            reverse=contact_sort_desc,
+        )
+    elif contact_sort_by == "license":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (license_match_key(lic) or str(lic).lower(), _contact_sort_name(lic)),
+            reverse=contact_sort_desc,
+        )
+    elif contact_sort_by == "category":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (_contact_category(lic).lower(), _contact_sort_name(lic)),
+            reverse=contact_sort_desc,
+        )
+    elif contact_sort_by == "zip":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (_contact_zip(lic).lower(), _contact_sort_name(lic)),
+            reverse=contact_sort_desc,
+        )
+    elif contact_sort_by == "sales_rep":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (_contact_sales_rep(lic).lower(), _contact_sort_name(lic)),
+            reverse=contact_sort_desc,
+        )
 
     for rank, lic in enumerate(display_lics, 1):
         store_name = df.loc[lic, "Store Name"]
