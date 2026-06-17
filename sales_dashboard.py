@@ -5219,6 +5219,10 @@ with tab_contact:
     contact_month = find_latest_populated_month_col(df, months, requested_contact_month)
     today_date = datetime.now().date()
 
+    def _contact_month_sales_value(lic):
+        value = pd.to_numeric(df.loc[lic, contact_month], errors="coerce") if lic in df.index else 0
+        return 0.0 if pd.isna(value) else float(value)
+
     try:
         _saved_log = load_contact_log()
     except Exception as e:
@@ -5231,9 +5235,13 @@ with tab_contact:
         st.error(f"Could not load store contact details: {e}")
         _store_contacts = pd.DataFrame(columns=STORE_CONTACT_COLUMNS)
 
-    all_lics_sorted = df[contact_month].sort_values(ascending=False).index.tolist()
     cf_display_by_lic = {}
     cf_log_revenue_by_lic = {}
+    cf_monthly_store_revenue_by_lic = {}
+    cf_monthly_balaclava_sales_by_lic = {
+        lic: _contact_month_sales_value(lic)
+        for lic in df.index
+    }
     cf_pareto_months = [m for m in window_months if m in months] or [contact_month]
     cf_pareto_totals = (
         df[cf_pareto_months]
@@ -5369,6 +5377,28 @@ with tab_contact:
                 cf_selected_designations.append(selector)
 
     df_license_by_key = {license_match_key(lic): lic for lic in df.index}
+    if not cf_territory_stores.empty:
+        _store_revenue_source = cf_territory_stores.copy()
+        _store_revenue_source["_Dashboard License"] = _store_revenue_source["License"].apply(
+            lambda lic: df_license_by_key.get(license_match_key(lic), "")
+        )
+        _store_revenue_source = _store_revenue_source[_store_revenue_source["_Dashboard License"].ne("")]
+        if "Market Sales Last Month" in _store_revenue_source:
+            _store_revenue_source["_Monthly Store Revenue"] = pd.to_numeric(
+                _store_revenue_source["Market Sales Last Month"],
+                errors="coerce",
+            ).fillna(0)
+        else:
+            _store_revenue_source["_Monthly Store Revenue"] = _store_revenue_source.get(
+                "Sales Last Month",
+                pd.Series(0, index=_store_revenue_source.index),
+            ).apply(parse_market_sales)
+        cf_monthly_store_revenue_by_lic = (
+            _store_revenue_source
+            .groupby("_Dashboard License")["_Monthly Store Revenue"]
+            .max()
+            .to_dict()
+        )
     cf_pool = []
     if cf_include_top_pareto:
         for _lic in cf_top_pareto_lics:
@@ -5677,8 +5707,13 @@ with tab_contact:
             "alert_sent_week":   _saved(lic, "Alert Sent Week"),
         }, bool(alert_interval and not alert_recipient)
 
-    # Search filter
-    contact_search = st.text_input(
+    contact_filter_cols = st.columns([1, 2])
+    contact_sort_by = contact_filter_cols[0].selectbox(
+        "Sort By",
+        ["Selector Priority", "Monthly Store Revenue", "Monthly Balaclava Sales"],
+        key="contact_sort_by",
+    )
+    contact_search = contact_filter_cols[1].text_input(
         "Search stores", placeholder="Store name or license…", key="contact_search"
     )
     _q = contact_search.lower()
@@ -5688,6 +5723,42 @@ with tab_contact:
         or _q in df.loc[lic, "Store Name"].lower()
         or _q in lic.lower()
     ]
+    _selector_rank_by_lic = {lic: i for i, lic in enumerate(cf_pool)}
+
+    def _contact_sort_name(lic):
+        try:
+            return str(df.loc[lic, "Store Name"] or "").lower()
+        except Exception:
+            return ""
+
+    def _contact_store_revenue(lic):
+        value = cf_monthly_store_revenue_by_lic.get(lic, 0)
+        value = pd.to_numeric(value, errors="coerce")
+        return 0.0 if pd.isna(value) else float(value)
+
+    def _contact_balaclava_sales(lic):
+        return float(cf_monthly_balaclava_sales_by_lic.get(lic, 0) or 0)
+
+    if contact_sort_by == "Monthly Store Revenue":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (
+                -_contact_store_revenue(lic),
+                -_contact_balaclava_sales(lic),
+                _contact_sort_name(lic),
+                _selector_rank_by_lic.get(lic, 0),
+            ),
+        )
+    elif contact_sort_by == "Monthly Balaclava Sales":
+        display_lics = sorted(
+            display_lics,
+            key=lambda lic: (
+                -_contact_balaclava_sales(lic),
+                -_contact_store_revenue(lic),
+                _contact_sort_name(lic),
+                _selector_rank_by_lic.get(lic, 0),
+            ),
+        )
     _visible_saved_matches = sum(1 for lic in display_lics if _has_logged_contact(lic))
     if not _saved_log.empty:
         with st.expander("Contact log match diagnostics"):
