@@ -125,6 +125,7 @@ TERRITORY_MAP_COLORS = {
     "Needs location": "#A8ADB3",
 }
 TERRITORY_SELECTOR_EXCLUDED_CATEGORIES = {"Needs location"}
+CONTACT_LOG_SELECTOR_EXCLUDED_CATEGORIES = set()
 TERRITORY_ALL_OTHER_SELECTOR = "All Other Retailers"
 TERRITORY_K_SAVAGE_LAPSED_CATEGORIES = [
     "K Savage Lapsed - High Priority",
@@ -1396,6 +1397,51 @@ def normalize_store_locations(raw_df):
     out = out[out["_license_key"].ne("")]
     out = out.drop_duplicates("_license_key", keep="last").drop(columns=["_license_key"])
     return out[TERRITORY_LOCATION_COLUMNS].reset_index(drop=True)
+
+def merge_store_locations_with_master(base_locations, master_locations):
+    base = normalize_store_locations(base_locations)
+    master = normalize_store_locations(master_locations)
+    if master.empty:
+        return base
+    if base.empty:
+        return master
+
+    def _blank(value):
+        if value is None:
+            return True
+        try:
+            if pd.isna(value):
+                return True
+        except Exception:
+            pass
+        return str(value).strip().lower() in {"", "nan", "none"}
+
+    merged_rows = {}
+    for _, row in base.iterrows():
+        key = license_match_key(row.get("License", ""))
+        if key:
+            merged_rows[key] = row.to_dict()
+
+    geocode_cols = {"Latitude", "Longitude", "Google Place ID", "Geocoded At", "Geocode Status"}
+    for _, row in master.iterrows():
+        key = license_match_key(row.get("License", ""))
+        if not key:
+            continue
+        if key not in merged_rows:
+            merged_rows[key] = row.to_dict()
+            continue
+
+        current = merged_rows[key]
+        for col in TERRITORY_LOCATION_COLUMNS:
+            master_value = row.get(col, "")
+            current_value = current.get(col, "")
+            if col in geocode_cols:
+                if _blank(current_value) and not _blank(master_value):
+                    current[col] = master_value
+            elif not _blank(master_value):
+                current[col] = master_value
+
+    return normalize_store_locations(pd.DataFrame(merged_rows.values()))
 
 def read_store_location_file(file_obj):
     name = getattr(file_obj, "name", "")
@@ -5260,6 +5306,11 @@ with tab_contact:
 
     cf_locations = load_store_locations()
     cf_locations, cf_location_notice, cf_location_warning = maybe_auto_load_territory_locations(cf_locations)
+    try:
+        cf_master_locations, _ = load_master_store_universe()
+        cf_locations = merge_store_locations_with_master(cf_locations, cf_master_locations)
+    except Exception as exc:
+        st.warning(f"Could not merge {MASTER_STORE_SOURCE_NAME} into Store Contact Log: {exc}")
     if cf_location_notice:
         st.success(cf_location_notice)
     if cf_location_warning:
@@ -5298,7 +5349,7 @@ with tab_contact:
     )
     selector_category_values = (
         category_values | TERRITORY_SELECTOR_ALWAYS_VISIBLE_CATEGORIES
-    ) - TERRITORY_SELECTOR_EXCLUDED_CATEGORIES
+    ) - CONTACT_LOG_SELECTOR_EXCLUDED_CATEGORIES
     cf_designation_options = [
         category for category in TERRITORY_SELECTOR_ORDER
         if category in selector_category_values
@@ -5510,7 +5561,7 @@ with tab_contact:
             )
         if TERRITORY_ALL_OTHER_SELECTOR in cf_selected_designations:
             other_mask = ~designation_mask
-            other_mask = other_mask & ~filtered_contact_stores["Map Category"].isin(TERRITORY_SELECTOR_EXCLUDED_CATEGORIES)
+            other_mask = other_mask & ~filtered_contact_stores["Map Category"].isin(CONTACT_LOG_SELECTOR_EXCLUDED_CATEGORIES)
             designation_mask = designation_mask | other_mask
             selected_category = selected_category.mask(
                 selected_category.eq("") & other_mask,
@@ -6037,7 +6088,7 @@ with tab_contact:
         has_saved = _has_logged_contact(lic)
         balaclava_revenue = _contact_balaclava_sales(lic)
         store_revenue = _contact_store_revenue(lic)
-        label_store = f"{'OK' if has_saved else '  '} #{rank} {store_name}"
+        label_store = f"{'✅' if has_saved else '  '} #{rank} {store_name}"
         label = _contact_list_row([
             label_store,
             lic,
