@@ -2283,6 +2283,24 @@ def territory_selector_mask(stores_df, designation):
         )
     return stores_df.get("Map Category", pd.Series("", index=stores_df.index)).eq(designation)
 
+def territory_all_other_mask(stores_df, designation_options, excluded_categories=None):
+    false_mask = pd.Series(False, index=stores_df.index)
+    if stores_df is None or stores_df.empty:
+        return false_mask
+
+    named_mask = pd.Series(False, index=stores_df.index)
+    for designation in designation_options or []:
+        if designation == TERRITORY_ALL_OTHER_SELECTOR:
+            continue
+        named_mask = named_mask | territory_selector_mask(stores_df, designation)
+
+    other_mask = ~named_mask
+    excluded_categories = set(excluded_categories or set())
+    if excluded_categories:
+        map_category = stores_df.get("Map Category", pd.Series("", index=stores_df.index))
+        other_mask = other_mask & ~map_category.isin(excluded_categories)
+    return other_mask
+
 def parse_lat_lng_text(value):
     text = str(value or "").strip()
     match = re.fullmatch(r"(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)", text)
@@ -5399,7 +5417,7 @@ with tab_contact:
 
         st.markdown("**Show**")
         action_cols = st.columns([1, 1, 4])
-        select_all_designations = action_cols[0].button("All", key="contact_designations_all")
+        select_all_designations = action_cols[0].button("All Retailers", key="contact_designations_all")
         clear_designations = action_cols[1].button("None", key="contact_designations_none")
         if select_all_designations:
             st.session_state[pareto_key] = True
@@ -5560,8 +5578,11 @@ with tab_contact:
                 designation,
             )
         if TERRITORY_ALL_OTHER_SELECTOR in cf_selected_designations:
-            other_mask = ~designation_mask
-            other_mask = other_mask & ~filtered_contact_stores["Map Category"].isin(CONTACT_LOG_SELECTOR_EXCLUDED_CATEGORIES)
+            other_mask = territory_all_other_mask(
+                filtered_contact_stores,
+                cf_designation_options,
+                CONTACT_LOG_SELECTOR_EXCLUDED_CATEGORIES,
+            )
             designation_mask = designation_mask | other_mask
             selected_category = selected_category.mask(
                 selected_category.eq("") & other_mask,
@@ -6665,7 +6686,7 @@ with tab_territory:
             st.markdown(f"<style>{''.join(dot_styles)}</style>", unsafe_allow_html=True)
 
             action_cols = st.columns([1, 1, 4])
-            select_all_designations = action_cols[0].button("All", key="territory_designations_all")
+            select_all_designations = action_cols[0].button("All Retailers", key="territory_designations_all")
             clear_designations = action_cols[1].button("None", key="territory_designations_none")
             for designation in designation_options:
                 designation_key = f"territory_pending_designation_{slugify(designation)}"
@@ -6793,8 +6814,11 @@ with tab_territory:
                     designation,
                 )
             if TERRITORY_ALL_OTHER_SELECTOR in selected_designations:
-                other_mask = ~designation_mask
-                other_mask = other_mask & ~filtered_stores["Map Category"].isin(territory_selector_excluded_categories)
+                other_mask = territory_all_other_mask(
+                    filtered_stores,
+                    designation_options,
+                    territory_selector_excluded_categories,
+                )
                 all_other_mask = other_mask
                 designation_mask = designation_mask | other_mask
             if include_missing:
