@@ -2116,6 +2116,7 @@ def build_brand_store_profile(order_df, active_days=120):
     })
     return out[columns]
 
+@st.cache_data(ttl=300, show_spinner=False)
 def build_territory_store_table(locations_df, revenue_df, months, order_df, active_days):
     locations = normalize_store_locations(locations_df)
     if locations.empty:
@@ -3207,6 +3208,7 @@ def render_trip_log_panel(stores):
                 st.session_state["territory_notice"] = "Trip stop added."
                 st.rerun()
 
+@st.cache_data(ttl=300, show_spinner=False)
 def enrich_territory_proximity(stores_df, radius_miles):
     if stores_df is None or stores_df.empty:
         return pd.DataFrame(), pd.DataFrame()
