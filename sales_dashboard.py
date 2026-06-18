@@ -6572,6 +6572,8 @@ with tab_territory:
             "brand": str(st.session_state.get("territory_brand_filter", "All") or "All"),
             "use_google_map": bool(st.session_state.get("territory_use_google_map", bool(google_maps_browser_key()))),
             "designations": None,
+            "load_event": 0,
+            "loaded_at": "",
         }
         applied_filters = st.session_state.get(territory_filter_state_key)
         if not isinstance(applied_filters, dict):
@@ -6783,6 +6785,8 @@ with tab_territory:
                 "brand": pending_brand_filter,
                 "use_google_map": bool(pending_use_google_map),
                 "designations": pending_selected_designations,
+                "load_event": int(applied_filters.get("load_event", 0) or 0) + 1,
+                "loaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             st.session_state["territory_radius"] = pending_radius
             st.session_state["territory_active_days"] = int(pending_active_days)
@@ -6858,6 +6862,24 @@ with tab_territory:
         mapped_filtered = filtered_stores[
             filtered_stores["Latitude"].notna() & filtered_stores["Longitude"].notna()
         ]
+        displayed_store_count = len(filtered_stores)
+        displayed_mapped_count = len(mapped_filtered)
+        applied_filters["displayed_store_count"] = displayed_store_count
+        applied_filters["displayed_mapped_count"] = displayed_mapped_count
+        display_count_cols = st.columns([1, 1, 3])
+        display_count_cols[0].metric("Displayed Stores", f"{displayed_store_count:,}")
+        display_count_cols[1].metric("Displayed Mapped", f"{displayed_mapped_count:,}")
+        load_event = int(applied_filters.get("load_event", 0) or 0)
+        load_label = (
+            f"Load Map #{load_event}"
+            if load_event
+            else "Initial map load"
+        )
+        loaded_at = str(applied_filters.get("loaded_at", "") or "").strip()
+        display_count_cols[2].caption(
+            f"{load_label}{f' · {loaded_at}' if loaded_at else ''}. "
+            "Counts reflect the last submitted map filters."
+        )
         territory_map_container = st.container()
         route_start_endpoint = None
         route_destination_endpoint = None
