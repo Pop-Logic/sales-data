@@ -1,5 +1,15 @@
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import type { StoreRollup } from "@/lib/rules";
+import { TERRITORY_BRANDS, type StoreRollup } from "@/lib/rules";
+
+type TerritoryBrand = (typeof TERRITORY_BRANDS)[number];
+
+type LatestMonthBrandSummary = {
+  latestBrandMonth?: string | null;
+  latestMonthBrandRevenue: number;
+  kSavageLatestMonthRevenue: number;
+  mayfieldLatestMonthRevenue: number;
+  leisureLandLatestMonthRevenue: number;
+};
 
 export type DashboardSnapshot = {
   source: "demo" | "supabase";
@@ -31,6 +41,11 @@ const demoStores: StoreRollup[] = [
     priorityLevel: "",
     revenueTotal: 61200,
     latestMonthRevenue: 14620,
+    latestBrandMonth: "2026-06-01",
+    latestMonthBrandRevenue: 14620,
+    kSavageLatestMonthRevenue: 14620,
+    mayfieldLatestMonthRevenue: 0,
+    leisureLandLatestMonthRevenue: 0,
     marketSalesLastMonth: 93000,
     orders: 8,
     brandRevenue: 18600,
@@ -74,6 +89,11 @@ const demoStores: StoreRollup[] = [
     priorityLevel: "High",
     revenueTotal: 42000,
     latestMonthRevenue: 0,
+    latestBrandMonth: "2026-05-01",
+    latestMonthBrandRevenue: 2100,
+    kSavageLatestMonthRevenue: 0,
+    mayfieldLatestMonthRevenue: 2100,
+    leisureLandLatestMonthRevenue: 0,
     marketSalesLastMonth: 122000,
     orders: 4,
     brandRevenue: 7800,
@@ -117,6 +137,11 @@ const demoStores: StoreRollup[] = [
     priorityLevel: "High",
     revenueTotal: 0,
     latestMonthRevenue: 0,
+    latestBrandMonth: null,
+    latestMonthBrandRevenue: 0,
+    kSavageLatestMonthRevenue: 0,
+    mayfieldLatestMonthRevenue: 0,
+    leisureLandLatestMonthRevenue: 0,
     marketSalesLastMonth: 151000,
     orders: 0,
     brandRevenue: 0,
@@ -186,6 +211,43 @@ type SampleDropSummary = {
   latestSampleProduct?: string | null;
 };
 
+function emptyLatestMonthBrandSummary(month?: string | null): LatestMonthBrandSummary {
+  return {
+    latestBrandMonth: month ?? null,
+    latestMonthBrandRevenue: 0,
+    kSavageLatestMonthRevenue: 0,
+    mayfieldLatestMonthRevenue: 0,
+    leisureLandLatestMonthRevenue: 0
+  };
+}
+
+function monthKeyFromDate(value?: string | null) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${month}-01`;
+}
+
+function brandContributionKey(brand: TerritoryBrand) {
+  if (brand === "K. Savage") {
+    return "kSavageLatestMonthRevenue";
+  }
+  if (brand === "Mayfield") {
+    return "mayfieldLatestMonthRevenue";
+  }
+  return "leisureLandLatestMonthRevenue";
+}
+
+function cleanBrand(value: unknown): TerritoryBrand | "" {
+  const brand = String(value || "").trim();
+  return TERRITORY_BRANDS.includes(brand as TerritoryBrand) ? brand as TerritoryBrand : "";
+}
+
 function keyFromStore(store: { store_id?: string | null; license_key?: string | null }) {
   return String(store.store_id || store.license_key || "");
 }
@@ -224,6 +286,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
   const contactByStore = new Map<string, StoreContactSummary>();
   const logByStore = new Map<string, ContactLogSummary>();
   const sampleByStore = new Map<string, SampleDropSummary>();
+  const latestMonthBrandByStore = new Map<string, LatestMonthBrandSummary>();
 
   const { data: contactData } = await supabase
     .from("store_contacts")
@@ -281,10 +344,55 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     sampleByStore.set(key, current);
   });
 
+  const { data: orderData } = await supabase
+    .from("orders")
+    .select("store_id, submitted_at, order_items(brand, line_total)")
+    .not("store_id", "is", null)
+    .not("submitted_at", "is", null);
+
+  (orderData || []).forEach((row) => {
+    const key = String(row.store_id || "");
+    const orderMonth = monthKeyFromDate(row.submitted_at);
+    if (!storeKeys.has(key) || !orderMonth) {
+      return;
+    }
+
+    const orderItems = Array.isArray(row.order_items) ? row.order_items : [];
+    const itemContributions = orderItems.reduce((summary, item) => {
+      const brand = cleanBrand(item?.brand);
+      const amount = Number(item?.line_total ?? 0);
+      if (!brand || amount <= 0) {
+        return summary;
+      }
+      const contributionKey = brandContributionKey(brand);
+      summary[contributionKey] += amount;
+      summary.latestMonthBrandRevenue += amount;
+      return summary;
+    }, emptyLatestMonthBrandSummary(orderMonth));
+
+    if (itemContributions.latestMonthBrandRevenue <= 0) {
+      return;
+    }
+
+    const current = latestMonthBrandByStore.get(key);
+    if (!current || orderMonth > String(current.latestBrandMonth || "")) {
+      latestMonthBrandByStore.set(key, itemContributions);
+      return;
+    }
+    if (orderMonth === current.latestBrandMonth) {
+      current.kSavageLatestMonthRevenue += itemContributions.kSavageLatestMonthRevenue;
+      current.mayfieldLatestMonthRevenue += itemContributions.mayfieldLatestMonthRevenue;
+      current.leisureLandLatestMonthRevenue += itemContributions.leisureLandLatestMonthRevenue;
+      current.latestMonthBrandRevenue += itemContributions.latestMonthBrandRevenue;
+    }
+  });
+
   const stores: StoreRollup[] = data.map((row) => {
     const contact = firstFromStoreMap(contactByStore, row);
     const log = firstFromStoreMap(logByStore, row);
     const sample = firstFromStoreMap(sampleByStore, row);
+    const latestBrandMonth = firstFromStoreMap(latestMonthBrandByStore, row)
+      || emptyLatestMonthBrandSummary();
     return {
     storeId: String(row.store_id ?? ""),
     license: String(row.license ?? ""),
@@ -302,6 +410,11 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     priorityLevel: row.priority_level,
     revenueTotal: Number(row.revenue_total ?? 0),
     latestMonthRevenue: Number(row.latest_month_revenue ?? 0),
+    latestBrandMonth: latestBrandMonth.latestBrandMonth ?? null,
+    latestMonthBrandRevenue: latestBrandMonth.latestMonthBrandRevenue,
+    kSavageLatestMonthRevenue: latestBrandMonth.kSavageLatestMonthRevenue,
+    mayfieldLatestMonthRevenue: latestBrandMonth.mayfieldLatestMonthRevenue,
+    leisureLandLatestMonthRevenue: latestBrandMonth.leisureLandLatestMonthRevenue,
     marketSalesLastMonth: Number(row.market_sales_last_month ?? 0),
     orders: Number(row.orders ?? 0),
     brandRevenue: Number(row.brand_revenue ?? 0),

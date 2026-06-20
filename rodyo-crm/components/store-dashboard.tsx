@@ -335,6 +335,53 @@ function DetailStat({ label, value }: { label: string; value: string | number })
   );
 }
 
+function latestMonthBrandContributions(store: StoreRollup) {
+  return [
+    {
+      brand: "K. Savage" as BrandFilter,
+      value: store.kSavageLatestMonthRevenue
+    },
+    {
+      brand: "Mayfield" as BrandFilter,
+      value: store.mayfieldLatestMonthRevenue
+    },
+    {
+      brand: "Leisure Land" as BrandFilter,
+      value: store.leisureLandLatestMonthRevenue
+    }
+  ];
+}
+
+function LatestMonthStat({ store }: { store: StoreRollup }) {
+  const brandTotal = store.latestMonthBrandRevenue || 0;
+  const total = brandTotal > 0 ? brandTotal : store.latestMonthRevenue;
+  const showContributions = brandTotal > 0;
+
+  return (
+    <div className="metric latest-month-card">
+      <div className="metric-label">Latest Month</div>
+      {showContributions ? (
+        <div className="brand-contributions">
+          {latestMonthBrandContributions(store).map((contribution) => (
+            <div className="brand-contribution-row" key={contribution.brand}>
+              <span>
+                <span
+                  aria-hidden="true"
+                  className="brand-dot mini"
+                  style={{ background: BRAND_DOT_COLORS[contribution.brand] ?? "var(--muted)" }}
+                />
+                {contribution.brand}
+              </span>
+              <strong>{formatUsd(contribution.value)}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="metric-value">{formatUsd(total)}</div>
+    </div>
+  );
+}
+
 function DetailRow({ label, value }: { label: string; value?: string | number | null }) {
   return (
     <div className="detail-row">
@@ -818,7 +865,7 @@ function StoreDetailContent({
   return (
     <div className="detail-stack">
       <div className="metrics detail-metrics">
-        <DetailStat label="Latest Month" value={formatUsd(store.latestMonthRevenue)} />
+        <LatestMonthStat store={store} />
         <DetailStat label="Market Sales" value={formatUsd(store.marketSalesLastMonth)} />
       </div>
       <div className="detail-tabs">

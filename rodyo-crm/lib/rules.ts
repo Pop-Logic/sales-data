@@ -37,6 +37,11 @@ export type StoreRollup = {
   priorityLevel?: PriorityLevel | "" | null;
   revenueTotal: number;
   latestMonthRevenue: number;
+  latestBrandMonth?: string | null;
+  latestMonthBrandRevenue: number;
+  kSavageLatestMonthRevenue: number;
+  mayfieldLatestMonthRevenue: number;
+  leisureLandLatestMonthRevenue: number;
   marketSalesLastMonth: number;
   orders: number;
   brandRevenue: number;
