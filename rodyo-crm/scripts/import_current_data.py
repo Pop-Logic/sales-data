@@ -846,14 +846,14 @@ def import_rep_assignments(ctx: ImportContext, assignments: pd.DataFrame) -> int
         client.upsert("regions", [{"name": region} for region in region_names], on_conflict="name")
         reps = {row["initials"]: row for row in client.select("reps", "id,initials")}
         regions = {row["name"]: row for row in client.select("regions", "id,name")}
-        updates = []
+        updates_by_store_id = {}
         for _, row in assignments.iterrows():
             store = ctx.store_by_license_key.get(row.get("License Key")) or ctx.store_by_store_key.get(row.get("Store Key"))
             if not store:
                 continue
             rep = reps.get(clean_cell(row.get("Territory Rep")))
             region = regions.get(clean_cell(row.get("Territory")))
-            updates.append({
+            updates_by_store_id[store["id"]] = {
                 "id": store["id"],
                 "license": store["license"],
                 "license_key": store["license_key"],
@@ -861,7 +861,8 @@ def import_rep_assignments(ctx: ImportContext, assignments: pd.DataFrame) -> int
                 "store_key": store.get("store_key"),
                 "rep_id": rep["id"] if rep else None,
                 "region_id": region["id"] if region else None,
-            })
+            }
+        updates = list(updates_by_store_id.values())
         if updates:
             client.upsert("stores", updates, on_conflict="id")
             refresh_store_maps(ctx)
