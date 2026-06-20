@@ -104,6 +104,36 @@ function StoreDetailSummary({ store }: { store: StoreRollup }) {
   );
 }
 
+function StoreDetailHero({ store }: { store: StoreRollup }) {
+  const location = [store.city, store.state, store.zip].filter(Boolean).join(", ");
+
+  return (
+    <div className="detail-hero">
+      <div className="detail-hero-line">
+        <span
+          className="dot"
+          style={{
+            background: TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)"
+          }}
+        />
+        <strong>{store.mapCategory}</strong>
+      </div>
+      <div className="detail-hero-grid">
+        <span>License</span>
+        <strong>{store.license || "-"}</strong>
+        <span>Rep</span>
+        <strong>{store.territoryRep || "-"}</strong>
+        <span>Location</span>
+        <strong>{location || "-"}</strong>
+        <span>Balaclava</span>
+        <strong>{formatUsd(store.latestMonthRevenue)}</strong>
+        <span>Market</span>
+        <strong>{formatUsd(store.marketSalesLastMonth)}</strong>
+      </div>
+    </div>
+  );
+}
+
 function StoreDetailContent({ activeTab, store }: { activeTab: DetailTab; store: StoreRollup }) {
   if (activeTab === "orders") {
     return (
@@ -424,6 +454,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               <span className="caption">
                 {selectedStore ? `${selectedStore.license} · ${selectedStore.city ?? ""}` : "Store detail drawer"}
               </span>
+              {selectedStore ? <StoreDetailHero store={selectedStore} /> : null}
             </div>
             {selectedStore ? <StoreDetailSummary store={selectedStore} /> : null}
             <div className="detail-tabs" role="tablist" aria-label="Store detail sections">

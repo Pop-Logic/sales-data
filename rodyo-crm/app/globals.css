@@ -264,11 +264,51 @@ select {
 
 .detail-title {
   display: grid;
-  gap: 2px;
+  gap: 7px;
 }
 
 .detail-title h3 {
   margin: 0;
+}
+
+.detail-hero {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  color: var(--text);
+}
+
+.detail-hero-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.detail-hero-line strong {
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.detail-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(76px, 0.7fr) minmax(0, 1.3fr);
+  gap: 6px 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.detail-hero-grid span {
+  color: var(--muted);
+  font-size: 0.77rem;
+}
+
+.detail-hero-grid strong {
+  min-width: 0;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
 }
 
 .detail-summary {
