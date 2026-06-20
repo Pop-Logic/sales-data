@@ -16,7 +16,7 @@ type SortKey = "store" | "designation" | "balaclava" | "storeRevenue" | "rep" | 
 type SortDirection = "asc" | "desc";
 type BalaclavaSalesFilter = "all" | "1000" | "5000";
 type StoreRevenueFilter = "all" | "300" | "50000" | "100000";
-type BrandFilter = "all" | (typeof TERRITORY_BRANDS)[number];
+type BrandFilter = (typeof TERRITORY_BRANDS)[number];
 type ParetoFilter = "all" | "top30" | "eighty";
 type PriorityFilter = "all" | "lapsed" | "open-lane";
 type MapLibreModule = typeof import("maplibre-gl");
@@ -26,7 +26,7 @@ type MapLibreMarker = import("maplibre-gl").Marker;
 type StoreFilters = {
   balaclavaSales: BalaclavaSalesFilter;
   storeRevenue: StoreRevenueFilter;
-  brand: BrandFilter;
+  brand: BrandFilter[];
   pareto: ParetoFilter;
   priority: PriorityFilter;
   region: string;
@@ -41,7 +41,7 @@ type BuyerContactPatch = {
 const defaultStoreFilters: StoreFilters = {
   balaclavaSales: "all",
   storeRevenue: "all",
-  brand: "all",
+  brand: [],
   pareto: "all",
   priority: "all",
   region: "all"
@@ -181,6 +181,28 @@ function matchesBrandFilter(store: StoreRollup, brand: BrandFilter) {
   return true;
 }
 
+function normalizeBrandFilters(value: StoreFilters["brand"] | BrandFilter | "all" | undefined) {
+  if (Array.isArray(value)) {
+    return value.filter((brand): brand is BrandFilter => (
+      TERRITORY_BRANDS.includes(brand as BrandFilter)
+    ));
+  }
+  if (value && value !== "all" && TERRITORY_BRANDS.includes(value as BrandFilter)) {
+    return [value as BrandFilter];
+  }
+  return [];
+}
+
+function brandFilterLabel(brands: BrandFilter[]) {
+  if (!brands.length) {
+    return "All brands";
+  }
+  if (brands.length === 1) {
+    return brands[0];
+  }
+  return `${brands.length} brands`;
+}
+
 function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
   let nextStores = stores;
 
@@ -194,8 +216,11 @@ function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
     nextStores = nextStores.filter((store) => store.marketSalesLastMonth >= minimum);
   }
 
-  if (filters.brand !== "all") {
-    nextStores = nextStores.filter((store) => matchesBrandFilter(store, filters.brand));
+  const brandFilters = normalizeBrandFilters(filters.brand);
+  if (brandFilters.length) {
+    nextStores = nextStores.filter((store) => (
+      brandFilters.some((brand) => matchesBrandFilter(store, brand))
+    ));
   }
 
   if (filters.priority !== "all") {
@@ -240,7 +265,14 @@ function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
 }
 
 function countActiveFilters(filters: StoreFilters) {
-  return Object.values(filters).filter((value) => value !== "all").length;
+  return [
+    filters.balaclavaSales !== "all",
+    filters.storeRevenue !== "all",
+    normalizeBrandFilters(filters.brand).length > 0,
+    filters.pareto !== "all",
+    filters.priority !== "all",
+    filters.region !== "all"
+  ].filter(Boolean).length;
 }
 
 function formatDate(value?: string | null) {
@@ -826,6 +858,8 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     [...new Set(stores.map((store) => textSortValue(store.county)).filter(Boolean))]
       .sort((left, right) => left.localeCompare(right))
   ), [stores]);
+  const draftBrandFilters = normalizeBrandFilters(draftFilters.brand);
+  const appliedBrandFilters = normalizeBrandFilters(appliedFilters.brand);
   const draftActiveFilterCount = countActiveFilters(draftFilters);
   const appliedActiveFilterCount = countActiveFilters(appliedFilters);
   const selectedStore = sortedStores.find((store) => storeKey(store) === selectedStoreKey) || sortedStores[0];
@@ -865,6 +899,20 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
       ...currentFilters,
       [key]: value
     }));
+  }
+
+  function toggleDraftBrand(brand: BrandFilter, checked: boolean) {
+    setDraftFilters((currentFilters) => {
+      const currentBrands = normalizeBrandFilters(currentFilters.brand);
+      const nextBrands = checked
+        ? [...currentBrands, brand].filter((value, index, values) => values.indexOf(value) === index)
+        : currentBrands.filter((value) => value !== brand);
+
+      return {
+        ...currentFilters,
+        brand: nextBrands
+      };
+    });
   }
 
   function handleApplyFilters(event: FormEvent<HTMLFormElement>) {
@@ -968,18 +1016,30 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               </select>
             </div>
             <div className="field">
-              <FilterLabel active={appliedFilters.brand !== "all"}>Brand</FilterLabel>
-              <select
-                value={draftFilters.brand}
-                onChange={(event) => updateDraftFilter("brand", event.target.value as BrandFilter)}
-              >
-                <option value="all">All brands</option>
-                {TERRITORY_BRANDS.map((brand) => (
-                  <option key={brand} value={brand}>
-                    {appliedFilters.brand === brand ? `✓ ${brand}` : brand}
-                  </option>
-                ))}
-              </select>
+              <FilterLabel active={appliedBrandFilters.length > 0}>Brand</FilterLabel>
+              <details className="multi-select">
+                <summary className="multi-select-trigger">{brandFilterLabel(draftBrandFilters)}</summary>
+                <div className="multi-select-menu">
+                  <label className="check-option">
+                    <input
+                      checked={!draftBrandFilters.length}
+                      onChange={() => updateDraftFilter("brand", [])}
+                      type="checkbox"
+                    />
+                    <span>All brands</span>
+                  </label>
+                  {TERRITORY_BRANDS.map((brand) => (
+                    <label className="check-option" key={brand}>
+                      <input
+                        checked={draftBrandFilters.includes(brand)}
+                        onChange={(event) => toggleDraftBrand(brand, event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span>{brand}</span>
+                    </label>
+                  ))}
+                </div>
+              </details>
             </div>
             <div className="field">
               <FilterLabel active={appliedFilters.pareto !== "all"}>Pareto</FilterLabel>
