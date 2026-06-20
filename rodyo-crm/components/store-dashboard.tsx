@@ -771,6 +771,12 @@ function StoreDetailDrawer({
         {selectedStore ? <StoreDetailHero store={selectedStore} /> : null}
       </div>
       {selectedStore ? <StoreDetailSummary store={selectedStore} /> : null}
+      {selectedStore ? (
+        <div className="metrics detail-metrics">
+          <LatestMonthStat store={selectedStore} />
+          <DetailStat label="Market Sales" value={formatUsd(selectedStore.marketSalesLastMonth)} />
+        </div>
+      ) : null}
       <div className="detail-tabs" role="tablist" aria-label="Store detail sections">
         {detailTabs.map((tab) => (
           <button
@@ -864,10 +870,6 @@ function StoreDetailContent({
 
   return (
     <div className="detail-stack">
-      <div className="metrics detail-metrics">
-        <LatestMonthStat store={store} />
-        <DetailStat label="Market Sales" value={formatUsd(store.marketSalesLastMonth)} />
-      </div>
       <div className="detail-tabs">
         <CheckState active={store.hasContactEver} label="Any log" />
         <CheckState active={store.hasContactThisMonth} label="This month" />
