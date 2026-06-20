@@ -258,18 +258,31 @@ select {
 
 .store-detail {
   padding: 14px;
-  display: grid;
-  gap: 14px;
+  display: block;
+  color: var(--text);
+  overflow: visible;
+}
+
+.store-detail > * {
+  position: relative;
+  z-index: 1;
+  visibility: visible;
+  opacity: 1;
+}
+
+.store-detail > * + * {
+  margin-top: 14px;
 }
 
 .detail-title {
-  display: grid;
-  gap: 7px;
+  display: block;
+}
+
+.detail-title > * + * {
+  margin-top: 7px;
 }
 
 .detail-title h3 {
-  display: grid;
-  gap: 4px;
   margin: 0;
   min-width: 0;
 }
@@ -281,10 +294,12 @@ select {
 }
 
 .detail-title h3 small {
+  display: block;
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 700;
   line-height: 1.35;
+  margin-top: 4px;
 }
 
 .detail-hero {
@@ -328,8 +343,11 @@ select {
 }
 
 .detail-summary {
-  display: grid;
-  gap: 10px;
+  display: block;
+}
+
+.detail-summary > * + * {
+  margin-top: 10px;
 }
 
 .detail-designation {
@@ -368,8 +386,11 @@ select {
 }
 
 .detail-stack {
-  display: grid;
-  gap: 12px;
+  display: block;
+}
+
+.detail-stack > * + * {
+  margin-top: 12px;
 }
 
 .detail-metrics {
