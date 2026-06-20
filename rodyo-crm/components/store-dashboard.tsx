@@ -1054,7 +1054,16 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                       onChange={() => updateDraftFilter("brand", [])}
                       type="checkbox"
                     />
-                    <span>All brands</span>
+                    <span className="check-option-label">All brands</span>
+                    <span aria-hidden="true" className="filter-brand-dots">
+                      {TERRITORY_BRANDS.map((brand) => (
+                        <span
+                          className="filter-brand-dot"
+                          key={brand}
+                          style={{ background: BRAND_DOT_COLORS[brand] ?? "var(--muted)" }}
+                        />
+                      ))}
+                    </span>
                   </label>
                   {TERRITORY_BRANDS.map((brand) => (
                     <label className="check-option" key={brand}>
@@ -1063,7 +1072,12 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                         onChange={(event) => toggleDraftBrand(brand, event.target.checked)}
                         type="checkbox"
                       />
-                      <span>{brand}</span>
+                      <span className="check-option-label">{brand}</span>
+                      <span
+                        aria-hidden="true"
+                        className="filter-brand-dot"
+                        style={{ background: BRAND_DOT_COLORS[brand] ?? "var(--muted)" }}
+                      />
                     </label>
                   ))}
                 </div>
