@@ -450,7 +450,16 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
 
           <aside className="panel store-detail">
             <div className="detail-title">
-              <h3>{selectedStore?.storeName ?? "Select a store"}</h3>
+              <h3>
+                <span>{selectedStore?.storeName ?? "Select a store"}</span>
+                {selectedStore ? (
+                  <small>
+                    {selectedStore.license || "-"} · {selectedStore.mapCategory} · Balaclava{" "}
+                    {formatUsd(selectedStore.latestMonthRevenue)} · Market{" "}
+                    {formatUsd(selectedStore.marketSalesLastMonth)}
+                  </small>
+                ) : null}
+              </h3>
               <span className="caption">
                 {selectedStore ? `${selectedStore.license} · ${selectedStore.city ?? ""}` : "Store detail drawer"}
               </span>

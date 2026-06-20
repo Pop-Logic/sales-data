@@ -268,7 +268,23 @@ select {
 }
 
 .detail-title h3 {
+  display: grid;
+  gap: 4px;
   margin: 0;
+  min-width: 0;
+}
+
+.detail-title h3 span,
+.detail-title h3 small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.detail-title h3 small {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .detail-hero {
