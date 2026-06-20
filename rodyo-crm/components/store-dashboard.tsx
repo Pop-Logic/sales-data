@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { Check, Map, SlidersHorizontal } from "lucide-react";
+import { Check, Map as MapIcon, SlidersHorizontal } from "lucide-react";
 import type { DashboardSnapshot } from "@/lib/dashboard-data";
 import { TERRITORY_MAP_COLORS, formatUsd, type StoreRollup } from "@/lib/rules";
 
@@ -10,9 +10,13 @@ type StoreDashboardProps = {
   snapshot: DashboardSnapshot;
 };
 
+type ViewMode = "stores" | "map";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
 type SortKey = "store" | "designation" | "balaclava" | "storeRevenue" | "rep" | "log";
 type SortDirection = "asc" | "desc";
+type MapLibreModule = typeof import("maplibre-gl");
+type MapLibreMap = import("maplibre-gl").Map;
+type MapLibreMarker = import("maplibre-gl").Marker;
 
 type BuyerContactPatch = {
   contactName: string | null;
@@ -60,6 +64,10 @@ function summarizeStores(stores: StoreRollup[]) {
 
 function storeKey(store: StoreRollup) {
   return store.storeId || store.licenseKey || store.license;
+}
+
+function hasStoreCoordinates(store: StoreRollup) {
+  return Number.isFinite(store.latitude) && Number.isFinite(store.longitude);
 }
 
 function textSortValue(value?: string | null) {
@@ -309,6 +317,265 @@ function BuyerEditor({
   );
 }
 
+function createPopupContent(store: StoreRollup) {
+  const container = document.createElement("div");
+  container.className = "map-popup";
+
+  const title = document.createElement("strong");
+  title.textContent = store.storeName;
+  container.appendChild(title);
+
+  const license = document.createElement("span");
+  license.textContent = `${store.license} · ${store.city || "No city"}`;
+  container.appendChild(license);
+
+  const category = document.createElement("span");
+  category.textContent = store.mapCategory;
+  container.appendChild(category);
+
+  const revenue = document.createElement("span");
+  revenue.textContent = `Balaclava ${formatUsd(store.latestMonthRevenue)} · Market ${formatUsd(store.marketSalesLastMonth)}`;
+  container.appendChild(revenue);
+
+  return container;
+}
+
+function StoreMap({
+  stores,
+  selectedStore,
+  onSelect
+}: {
+  stores: StoreRollup[];
+  selectedStore?: StoreRollup;
+  onSelect: (storeKeyValue: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<MapLibreMap | null>(null);
+  const maplibreRef = useRef<MapLibreModule | null>(null);
+  const markersRef = useRef<Map<string, { marker: MapLibreMarker; element: HTMLButtonElement }>>(new Map());
+  const [isMapReady, setIsMapReady] = useState(false);
+  const mappedStores = useMemo(() => stores.filter(hasStoreCoordinates), [stores]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function initializeMap() {
+      const maplibregl = await import("maplibre-gl");
+      if (cancelled || !containerRef.current || mapRef.current) {
+        return;
+      }
+
+      maplibreRef.current = maplibregl;
+      const map = new maplibregl.Map({
+        container: containerRef.current,
+        center: [-120.7401, 47.7511],
+        zoom: 6,
+        attributionControl: false,
+        style: {
+          version: 8,
+          sources: {
+            osm: {
+              type: "raster",
+              tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+              tileSize: 256,
+              attribution: "© OpenStreetMap contributors"
+            }
+          },
+          layers: [
+            {
+              id: "osm",
+              type: "raster",
+              source: "osm"
+            }
+          ]
+        }
+      });
+
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
+      map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+      map.on("load", () => {
+        if (!cancelled) {
+          setIsMapReady(true);
+        }
+      });
+      mapRef.current = map;
+    }
+
+    initializeMap();
+
+    return () => {
+      cancelled = true;
+      markersRef.current.forEach(({ marker }) => marker.remove());
+      markersRef.current.clear();
+      mapRef.current?.remove();
+      mapRef.current = null;
+      maplibreRef.current = null;
+      setIsMapReady(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const maplibregl = maplibreRef.current;
+    if (!map || !maplibregl || !isMapReady) {
+      return;
+    }
+
+    markersRef.current.forEach(({ marker }) => marker.remove());
+    markersRef.current.clear();
+
+    mappedStores.forEach((store) => {
+      const key = storeKey(store);
+      const element = document.createElement("button");
+      element.type = "button";
+      element.className = `map-marker${selectedStore && key === storeKey(selectedStore) ? " is-selected" : ""}`;
+      element.style.background = TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)";
+      element.setAttribute("aria-label", `Select ${store.storeName}`);
+      element.addEventListener("click", () => onSelect(key));
+
+      const popup = new maplibregl.Popup({
+        closeButton: false,
+        closeOnClick: false,
+        offset: 16
+      }).setDOMContent(createPopupContent(store));
+
+      const marker = new maplibregl.Marker({
+        element,
+        anchor: "center"
+      })
+        .setLngLat([Number(store.longitude), Number(store.latitude)])
+        .setPopup(popup)
+        .addTo(map);
+
+      markersRef.current.set(key, { marker, element });
+    });
+
+    if (mappedStores.length === 1) {
+      map.easeTo({
+        center: [Number(mappedStores[0].longitude), Number(mappedStores[0].latitude)],
+        zoom: 11,
+        duration: 500
+      });
+    } else if (mappedStores.length > 1) {
+      const bounds = new maplibregl.LngLatBounds();
+      mappedStores.forEach((store) => {
+        bounds.extend([Number(store.longitude), Number(store.latitude)]);
+      });
+      map.fitBounds(bounds, {
+        padding: 54,
+        maxZoom: 10,
+        duration: 500
+      });
+    }
+  }, [isMapReady, mappedStores, onSelect, selectedStore]);
+
+  useEffect(() => {
+    markersRef.current.forEach(({ element }, key) => {
+      element.classList.toggle("is-selected", Boolean(selectedStore && key === storeKey(selectedStore)));
+    });
+  }, [selectedStore]);
+
+  return (
+    <div className="store-map">
+      <div ref={containerRef} className="map-canvas" />
+      {!mappedStores.length ? (
+        <div className="map-empty">No filtered stores have coordinates yet.</div>
+      ) : null}
+    </div>
+  );
+}
+
+function MapLegend({ stores }: { stores: StoreRollup[] }) {
+  const mappedStores = stores.filter(hasStoreCoordinates);
+  const missingCount = stores.length - mappedStores.length;
+  const categoryCounts = [...mappedStores.reduce((counts, store) => {
+    counts.set(store.mapCategory, (counts.get(store.mapCategory) || 0) + 1);
+    return counts;
+  }, new Map<string, number>())].sort((left, right) => right[1] - left[1]);
+
+  return (
+    <aside className="map-legend" aria-label="Map legend">
+      <div>
+        <div className="metric-label">Mapped Stores</div>
+        <div className="legend-count">{mappedStores.length.toLocaleString()}</div>
+        <div className="caption">of {stores.length.toLocaleString()} filtered stores</div>
+      </div>
+      {missingCount ? (
+        <div className="legend-warning">{missingCount.toLocaleString()} missing coordinates</div>
+      ) : null}
+      <div className="legend-list">
+        {categoryCounts.map(([category, count]) => (
+          <div className="legend-row" key={category}>
+            <span
+              className="dot"
+              style={{
+                background: TERRITORY_MAP_COLORS[category] ?? "var(--muted)"
+              }}
+            />
+            <span>{category}</span>
+            <strong>{count.toLocaleString()}</strong>
+          </div>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function StoreDetailDrawer({
+  selectedStore,
+  activeTab,
+  setActiveTab,
+  onBuyerSaved
+}: {
+  selectedStore?: StoreRollup;
+  activeTab: DetailTab;
+  setActiveTab: (tab: DetailTab) => void;
+  onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
+}) {
+  return (
+    <aside className="panel store-detail">
+      <div className="detail-title">
+        <h3>
+          <span>{selectedStore?.storeName ?? "Select a store"}</span>
+          {selectedStore ? (
+            <small>
+              {selectedStore.license || "-"} · {selectedStore.mapCategory} · Balaclava{" "}
+              {formatUsd(selectedStore.latestMonthRevenue)} · Market{" "}
+              {formatUsd(selectedStore.marketSalesLastMonth)}
+            </small>
+          ) : null}
+        </h3>
+        <span className="caption">
+          {selectedStore ? `${selectedStore.license} · ${selectedStore.city ?? ""}` : "Store detail drawer"}
+        </span>
+        {selectedStore ? <StoreDetailHero store={selectedStore} /> : null}
+      </div>
+      {selectedStore ? <StoreDetailSummary store={selectedStore} /> : null}
+      <div className="detail-tabs" role="tablist" aria-label="Store detail sections">
+        {detailTabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={activeTab === tab.id ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {selectedStore ? (
+        <StoreDetailContent
+          activeTab={activeTab}
+          store={selectedStore}
+          onBuyerSaved={onBuyerSaved}
+        />
+      ) : null}
+    </aside>
+  );
+}
+
 function StoreDetailContent({
   activeTab,
   store,
@@ -415,6 +682,7 @@ function StoreDetailContent({
 export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   const [stores, setStores] = useState(snapshot.stores);
   const [storeQuery, setStoreQuery] = useState("");
+  const [activeView, setActiveView] = useState<ViewMode>("stores");
   const [activeTab, setActiveTab] = useState<DetailTab>("contact");
   const [sortKey, setSortKey] = useState<SortKey>("storeRevenue");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -437,6 +705,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     [filteredStores, sortDirection, sortKey]
   );
   const metrics = useMemo(() => summarizeStores(sortedStores), [sortedStores]);
+  const mappedStoreCount = useMemo(() => sortedStores.filter(hasStoreCoordinates).length, [sortedStores]);
   const selectedStore = sortedStores.find((store) => storeKey(store) === selectedStoreKey) || sortedStores[0];
   const rowMeta = normalizedStoreQuery
     ? `${sortedStores.length.toLocaleString()} of ${stores.length.toLocaleString()} rows`
@@ -462,6 +731,10 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     )));
   }
 
+  const handleStoreSelect = useCallback((nextStoreKey: string) => {
+    setSelectedStoreKey(nextStoreKey);
+  }, []);
+
   function handleSort(nextSortKey: SortKey) {
     if (nextSortKey === sortKey) {
       setSortDirection((currentDirection) => (currentDirection === "asc" ? "desc" : "asc"));
@@ -482,13 +755,23 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
           <span>Balaclava store operations</span>
         </div>
         <nav className="nav" aria-label="Main navigation">
-          <a className="active" href="/">
+          <button
+            className={activeView === "stores" ? "active" : ""}
+            type="button"
+            onClick={() => setActiveView("stores")}
+          >
             Stores
-          </a>
-          <a href="/">Map</a>
-          <a href="/">Orders</a>
-          <a href="/">Goals</a>
-          <a href="/">Sync</a>
+          </button>
+          <button
+            className={activeView === "map" ? "active" : ""}
+            type="button"
+            onClick={() => setActiveView("map")}
+          >
+            Map
+          </button>
+          <button type="button">Orders</button>
+          <button type="button">Goals</button>
+          <button type="button">Sync</button>
         </nav>
       </aside>
 
@@ -496,15 +779,17 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
         <section className="toolbar">
           <div className="toolbar-title">
             <div>
-              <h2>Stores</h2>
+              <h2>{activeView === "map" ? "Map" : "Stores"}</h2>
               <div className="caption">
-                {snapshot.source === "demo"
+                {activeView === "map"
+                  ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores`
+                  : snapshot.source === "demo"
                   ? "Demo shell. Connect Supabase to load live CRM data."
                   : "Live Supabase data"}
               </div>
             </div>
-            <button className="primary-button" type="button">
-              <Map size={16} /> Launch Map
+            <button className="primary-button" type="button" onClick={() => setActiveView("map")}>
+              <MapIcon size={16} /> Launch Map
             </button>
           </div>
 
@@ -585,125 +870,119 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
           </div>
         </section>
 
-        <section className="content-grid">
-          <div className="panel">
-            <div className="panel-header">
-              <h3>Filtered Stores</h3>
-              <span className="table-meta">{rowMeta}</span>
-            </div>
-            <table className="store-table">
-              <thead>
-                <tr>
-                  {sortableColumns.map((column) => {
-                    const isActive = column.key === sortKey;
-                    return (
-                      <th
-                        key={column.key}
-                        aria-sort={isActive ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}
-                        style={column.width ? { width: column.width } : undefined}
-                      >
-                        <button
-                          className="sort-header"
-                          type="button"
-                          onClick={() => handleSort(column.key)}
-                        >
-                          <span>{column.label}</span>
-                          <span aria-hidden="true" className="sort-indicator">
-                            {isActive ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}
-                          </span>
-                        </button>
-                      </th>
-                    );
-                  })}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedStores.map((store) => (
-                  <tr
-                    key={storeKey(store)}
-                    className={selectedStore && storeKey(store) === storeKey(selectedStore) ? "is-selected" : ""}
-                    tabIndex={0}
-                    onClick={() => setSelectedStoreKey(storeKey(store))}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setSelectedStoreKey(storeKey(store));
-                      }
-                    }}
-                  >
-                    <td>
-                      <div className="store-name">{store.storeName}</div>
-                      <div className="store-subtext">
-                        {store.license} · {store.city || "No city"} {store.zip || ""}
-                      </div>
-                    </td>
-                    <td>
-                      <span className="tag">
-                        <span
-                          className="dot"
-                          style={{
-                            background: TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)"
-                          }}
-                        />
-                        {store.mapCategory}
-                      </span>
-                    </td>
-                    <td>{formatUsd(store.latestMonthRevenue)}</td>
-                    <td>{formatUsd(store.marketSalesLastMonth)}</td>
-                    <td>{store.territoryRep || "-"}</td>
-                    <td>{store.hasContactEver ? "✅" : ""}</td>
-                  </tr>
-                ))}
-                {!sortedStores.length ? (
+        {activeView === "stores" ? (
+          <section className="content-grid">
+            <div className="panel">
+              <div className="panel-header">
+                <h3>Filtered Stores</h3>
+                <span className="table-meta">{rowMeta}</span>
+              </div>
+              <table className="store-table">
+                <thead>
                   <tr>
-                    <td colSpan={6}>No stores match that search.</td>
+                    {sortableColumns.map((column) => {
+                      const isActive = column.key === sortKey;
+                      return (
+                        <th
+                          key={column.key}
+                          aria-sort={isActive ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}
+                          style={column.width ? { width: column.width } : undefined}
+                        >
+                          <button
+                            className="sort-header"
+                            type="button"
+                            onClick={() => handleSort(column.key)}
+                          >
+                            <span>{column.label}</span>
+                            <span aria-hidden="true" className="sort-indicator">
+                              {isActive ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}
+                            </span>
+                          </button>
+                        </th>
+                      );
+                    })}
                   </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {sortedStores.map((store) => (
+                    <tr
+                      key={storeKey(store)}
+                      className={selectedStore && storeKey(store) === storeKey(selectedStore) ? "is-selected" : ""}
+                      tabIndex={0}
+                      onClick={() => handleStoreSelect(storeKey(store))}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          handleStoreSelect(storeKey(store));
+                        }
+                      }}
+                    >
+                      <td>
+                        <div className="store-name">{store.storeName}</div>
+                        <div className="store-subtext">
+                          {store.license} · {store.city || "No city"} {store.zip || ""}
+                        </div>
+                      </td>
+                      <td>
+                        <span className="tag">
+                          <span
+                            className="dot"
+                            style={{
+                              background: TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)"
+                            }}
+                          />
+                          {store.mapCategory}
+                        </span>
+                      </td>
+                      <td>{formatUsd(store.latestMonthRevenue)}</td>
+                      <td>{formatUsd(store.marketSalesLastMonth)}</td>
+                      <td>{store.territoryRep || "-"}</td>
+                      <td>{store.hasContactEver ? "✅" : ""}</td>
+                    </tr>
+                  ))}
+                  {!sortedStores.length ? (
+                    <tr>
+                      <td colSpan={6}>No stores match that search.</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
 
-          <aside className="panel store-detail">
-            <div className="detail-title">
-              <h3>
-                <span>{selectedStore?.storeName ?? "Select a store"}</span>
-                {selectedStore ? (
-                  <small>
-                    {selectedStore.license || "-"} · {selectedStore.mapCategory} · Balaclava{" "}
-                    {formatUsd(selectedStore.latestMonthRevenue)} · Market{" "}
-                    {formatUsd(selectedStore.marketSalesLastMonth)}
-                  </small>
-                ) : null}
-              </h3>
-              <span className="caption">
-                {selectedStore ? `${selectedStore.license} · ${selectedStore.city ?? ""}` : "Store detail drawer"}
-              </span>
-              {selectedStore ? <StoreDetailHero store={selectedStore} /> : null}
+            <StoreDetailDrawer
+              selectedStore={selectedStore}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              onBuyerSaved={handleBuyerSaved}
+            />
+          </section>
+        ) : (
+          <section className="map-layout">
+            <div className="panel map-panel">
+              <div className="panel-header">
+                <h3>Filtered Store Map</h3>
+                <span className="table-meta">
+                  {mappedStoreCount.toLocaleString()} mapped · {sortedStores.length.toLocaleString()} filtered
+                </span>
+              </div>
+              <div className="map-body">
+                <StoreMap
+                  stores={sortedStores}
+                  selectedStore={selectedStore}
+                  onSelect={handleStoreSelect}
+                />
+                <MapLegend stores={sortedStores} />
+              </div>
             </div>
-            {selectedStore ? <StoreDetailSummary store={selectedStore} /> : null}
-            <div className="detail-tabs" role="tablist" aria-label="Store detail sections">
-              {detailTabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  className={activeTab === tab.id ? "active" : ""}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeTab === tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-            {selectedStore ? (
-              <StoreDetailContent
-                activeTab={activeTab}
-                store={selectedStore}
-                onBuyerSaved={handleBuyerSaved}
-              />
-            ) : null}
-          </aside>
-        </section>
+
+            <StoreDetailDrawer
+              selectedStore={selectedStore}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              onBuyerSaved={handleBuyerSaved}
+            />
+          </section>
+        )}
       </main>
     </div>
   );
