@@ -14,14 +14,34 @@ type ViewMode = "stores" | "map";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
 type SortKey = "store" | "designation" | "balaclava" | "storeRevenue" | "rep" | "log";
 type SortDirection = "asc" | "desc";
+type BalaclavaSalesFilter = "all" | "1000" | "5000";
+type StoreRevenueFilter = "all" | "50000" | "100000";
+type ParetoFilter = "all" | "top30" | "eighty";
+type PriorityFilter = "all" | "lapsed" | "open-lane";
 type MapLibreModule = typeof import("maplibre-gl");
 type MapLibreMap = import("maplibre-gl").Map;
 type MapLibreMarker = import("maplibre-gl").Marker;
+
+type StoreFilters = {
+  balaclavaSales: BalaclavaSalesFilter;
+  storeRevenue: StoreRevenueFilter;
+  pareto: ParetoFilter;
+  priority: PriorityFilter;
+  region: string;
+};
 
 type BuyerContactPatch = {
   contactName: string | null;
   phoneNumber: string | null;
   email: string | null;
+};
+
+const defaultStoreFilters: StoreFilters = {
+  balaclavaSales: "all",
+  storeRevenue: "all",
+  pareto: "all",
+  priority: "all",
+  region: "all"
 };
 
 const detailTabs: { id: DetailTab; label: string }[] = [
@@ -119,6 +139,66 @@ function sortStores(stores: StoreRollup[], sortKey: SortKey, direction: SortDire
 
     return comparison * directionMultiplier;
   });
+}
+
+function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
+  let nextStores = stores;
+
+  if (filters.balaclavaSales !== "all") {
+    const minimum = Number(filters.balaclavaSales);
+    nextStores = nextStores.filter((store) => store.latestMonthRevenue >= minimum);
+  }
+
+  if (filters.storeRevenue !== "all") {
+    const minimum = Number(filters.storeRevenue);
+    nextStores = nextStores.filter((store) => store.marketSalesLastMonth >= minimum);
+  }
+
+  if (filters.priority === "lapsed") {
+    nextStores = nextStores.filter((store) => store.mapCategory.startsWith("K Savage Lapsed"));
+  } else if (filters.priority === "open-lane") {
+    nextStores = nextStores.filter((store) => store.mapCategory.startsWith("Open Lane"));
+  }
+
+  if (filters.region !== "all") {
+    nextStores = nextStores.filter((store) => textSortValue(store.county) === filters.region);
+  }
+
+  if (filters.pareto === "top30") {
+    const topKeys = new Set(
+      [...nextStores]
+        .sort((left, right) => right.marketSalesLastMonth - left.marketSalesLastMonth)
+        .slice(0, 30)
+        .map(storeKey)
+    );
+    nextStores = nextStores.filter((store) => topKeys.has(storeKey(store)));
+  } else if (filters.pareto === "eighty") {
+    const sortedByRevenue = [...nextStores].sort(
+      (left, right) => right.marketSalesLastMonth - left.marketSalesLastMonth
+    );
+    const totalRevenue = sortedByRevenue.reduce((total, store) => total + store.marketSalesLastMonth, 0);
+    const paretoKeys = new Set<string>();
+    let cumulativeRevenue = 0;
+
+    for (const store of sortedByRevenue) {
+      if (totalRevenue <= 0) {
+        break;
+      }
+      paretoKeys.add(storeKey(store));
+      cumulativeRevenue += store.marketSalesLastMonth;
+      if (cumulativeRevenue / totalRevenue >= 0.8) {
+        break;
+      }
+    }
+
+    nextStores = nextStores.filter((store) => paretoKeys.has(storeKey(store)));
+  }
+
+  return nextStores;
+}
+
+function countActiveFilters(filters: StoreFilters) {
+  return Object.values(filters).filter((value) => value !== "all").length;
 }
 
 function formatDate(value?: string | null) {
@@ -682,6 +762,8 @@ function StoreDetailContent({
 export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   const [stores, setStores] = useState(snapshot.stores);
   const [storeQuery, setStoreQuery] = useState("");
+  const [draftFilters, setDraftFilters] = useState<StoreFilters>(defaultStoreFilters);
+  const [appliedFilters, setAppliedFilters] = useState<StoreFilters>(defaultStoreFilters);
   const [activeView, setActiveView] = useState<ViewMode>("stores");
   const [activeTab, setActiveTab] = useState<DetailTab>("contact");
   const [sortKey, setSortKey] = useState<SortKey>("storeRevenue");
@@ -691,25 +773,35 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   ));
   const normalizedStoreQuery = storeQuery.trim().toLowerCase();
   const filteredStores = useMemo(() => {
-    if (!normalizedStoreQuery) {
-      return stores;
-    }
-    return stores.filter((store) => (
-      store.storeName.toLowerCase().includes(normalizedStoreQuery) ||
-      store.license.toLowerCase().includes(normalizedStoreQuery) ||
-      store.licenseKey.toLowerCase().includes(normalizedStoreQuery)
-    ));
-  }, [normalizedStoreQuery, stores]);
+    const searchedStores = normalizedStoreQuery
+      ? stores.filter((store) => (
+        store.storeName.toLowerCase().includes(normalizedStoreQuery) ||
+        store.license.toLowerCase().includes(normalizedStoreQuery) ||
+        store.licenseKey.toLowerCase().includes(normalizedStoreQuery)
+      ))
+      : stores;
+
+    return applyStoreFilters(searchedStores, appliedFilters);
+  }, [appliedFilters, normalizedStoreQuery, stores]);
   const sortedStores = useMemo(
     () => sortStores(filteredStores, sortKey, sortDirection),
     [filteredStores, sortDirection, sortKey]
   );
   const metrics = useMemo(() => summarizeStores(sortedStores), [sortedStores]);
   const mappedStoreCount = useMemo(() => sortedStores.filter(hasStoreCoordinates).length, [sortedStores]);
+  const regionOptions = useMemo(() => (
+    [...new Set(stores.map((store) => textSortValue(store.county)).filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right))
+  ), [stores]);
+  const draftActiveFilterCount = countActiveFilters(draftFilters);
+  const appliedActiveFilterCount = countActiveFilters(appliedFilters);
   const selectedStore = sortedStores.find((store) => storeKey(store) === selectedStoreKey) || sortedStores[0];
-  const rowMeta = normalizedStoreQuery
+  const rowMetaBase = normalizedStoreQuery
     ? `${sortedStores.length.toLocaleString()} of ${stores.length.toLocaleString()} rows`
     : `${sortedStores.length.toLocaleString()} rows`;
+  const rowMeta = appliedActiveFilterCount
+    ? `${rowMetaBase} · ${appliedActiveFilterCount} filter${appliedActiveFilterCount === 1 ? "" : "s"}`
+    : rowMetaBase;
 
   useEffect(() => {
     setStores(snapshot.stores);
@@ -734,6 +826,18 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   const handleStoreSelect = useCallback((nextStoreKey: string) => {
     setSelectedStoreKey(nextStoreKey);
   }, []);
+
+  function updateDraftFilter<K extends keyof StoreFilters>(key: K, value: StoreFilters[K]) {
+    setDraftFilters((currentFilters) => ({
+      ...currentFilters,
+      [key]: value
+    }));
+  }
+
+  function handleApplyFilters(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setAppliedFilters(draftFilters);
+  }
 
   function handleSort(nextSortKey: SortKey) {
     if (nextSortKey === sortKey) {
@@ -793,7 +897,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             </button>
           </div>
 
-          <form className="filters" aria-label="Store filters" onSubmit={(event) => event.preventDefault()}>
+          <form className="filters" aria-label="Store filters" onSubmit={handleApplyFilters}>
             <div className="field store-filter-field">
               <label>Stores</label>
               <input
@@ -805,7 +909,12 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             </div>
             <div className="field">
               <label>Balaclava Sales</label>
-              <select defaultValue="all">
+              <select
+                value={draftFilters.balaclavaSales}
+                onChange={(event) => (
+                  updateDraftFilter("balaclavaSales", event.target.value as BalaclavaSalesFilter)
+                )}
+              >
                 <option value="all">Any range</option>
                 <option value="1000">$1k+</option>
                 <option value="5000">$5k+</option>
@@ -813,7 +922,12 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             </div>
             <div className="field">
               <label>Store Revenue</label>
-              <select defaultValue="all">
+              <select
+                value={draftFilters.storeRevenue}
+                onChange={(event) => (
+                  updateDraftFilter("storeRevenue", event.target.value as StoreRevenueFilter)
+                )}
+              >
                 <option value="all">Any range</option>
                 <option value="50000">$50k+</option>
                 <option value="100000">$100k+</option>
@@ -821,7 +935,10 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             </div>
             <div className="field">
               <label>Pareto</label>
-              <select defaultValue="all">
+              <select
+                value={draftFilters.pareto}
+                onChange={(event) => updateDraftFilter("pareto", event.target.value as ParetoFilter)}
+              >
                 <option value="all">All stores</option>
                 <option value="top30">Top 30</option>
                 <option value="eighty">80% revenue set</option>
@@ -829,7 +946,10 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             </div>
             <div className="field">
               <label>Priority</label>
-              <select defaultValue="all">
+              <select
+                value={draftFilters.priority}
+                onChange={(event) => updateDraftFilter("priority", event.target.value as PriorityFilter)}
+              >
                 <option value="all">All priorities</option>
                 <option value="lapsed">Lapsed</option>
                 <option value="open-lane">Open lane</option>
@@ -837,12 +957,20 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             </div>
             <div className="field">
               <label>Region</label>
-              <select defaultValue="all">
+              <select
+                value={draftFilters.region}
+                onChange={(event) => updateDraftFilter("region", event.target.value)}
+              >
                 <option value="all">All regions</option>
+                {regionOptions.map((region) => (
+                  <option key={region} value={region}>
+                    {region.replace(/\b\w/g, (letter) => letter.toUpperCase())}
+                  </option>
+                ))}
               </select>
             </div>
-            <button className="primary-button" type="button">
-              <SlidersHorizontal size={16} /> Apply
+            <button className="primary-button" type="submit">
+              <SlidersHorizontal size={16} /> Apply{draftActiveFilterCount ? ` (${draftActiveFilterCount})` : ""}
             </button>
           </form>
         </section>
