@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { Check, Map as MapIcon, SlidersHorizontal } from "lucide-react";
 import type { DashboardSnapshot } from "@/lib/dashboard-data";
 import { TERRITORY_BRANDS, TERRITORY_MAP_COLORS, formatUsd, type StoreRollup } from "@/lib/rules";
@@ -63,6 +63,15 @@ const sortableColumns: { key: SortKey; label: string; width?: string }[] = [
   { key: "rep", label: "Rep" },
   { key: "log", label: "Log" }
 ];
+
+function FilterLabel({ active, children }: { active: boolean; children: ReactNode }) {
+  return (
+    <label className={active ? "filter-label is-active" : "filter-label"}>
+      <span>{children}</span>
+      {active ? <Check aria-label="Filter applied" size={13} /> : null}
+    </label>
+  );
+}
 
 function CheckState({ active, label }: { active: boolean; label: string }) {
   return (
@@ -932,7 +941,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               />
             </div>
             <div className="field">
-              <label>Balaclava Sales</label>
+              <FilterLabel active={appliedFilters.balaclavaSales !== "all"}>Balaclava Sales</FilterLabel>
               <select
                 value={draftFilters.balaclavaSales}
                 onChange={(event) => (
@@ -945,7 +954,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               </select>
             </div>
             <div className="field">
-              <label>Store Revenue</label>
+              <FilterLabel active={appliedFilters.storeRevenue !== "all"}>Store Revenue</FilterLabel>
               <select
                 value={draftFilters.storeRevenue}
                 onChange={(event) => (
@@ -959,7 +968,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               </select>
             </div>
             <div className="field">
-              <label>Brand</label>
+              <FilterLabel active={appliedFilters.brand !== "all"}>Brand</FilterLabel>
               <select
                 value={draftFilters.brand}
                 onChange={(event) => updateDraftFilter("brand", event.target.value as BrandFilter)}
@@ -967,13 +976,13 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                 <option value="all">All brands</option>
                 {TERRITORY_BRANDS.map((brand) => (
                   <option key={brand} value={brand}>
-                    {brand}
+                    {appliedFilters.brand === brand ? `✓ ${brand}` : brand}
                   </option>
                 ))}
               </select>
             </div>
             <div className="field">
-              <label>Pareto</label>
+              <FilterLabel active={appliedFilters.pareto !== "all"}>Pareto</FilterLabel>
               <select
                 value={draftFilters.pareto}
                 onChange={(event) => updateDraftFilter("pareto", event.target.value as ParetoFilter)}
@@ -984,7 +993,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               </select>
             </div>
             <div className="field">
-              <label>Priority</label>
+              <FilterLabel active={appliedFilters.priority !== "all"}>Priority</FilterLabel>
               <select
                 value={draftFilters.priority}
                 onChange={(event) => updateDraftFilter("priority", event.target.value as PriorityFilter)}
@@ -995,7 +1004,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               </select>
             </div>
             <div className="field">
-              <label>Region</label>
+              <FilterLabel active={appliedFilters.region !== "all"}>Region</FilterLabel>
               <select
                 value={draftFilters.region}
                 onChange={(event) => updateDraftFilter("region", event.target.value)}
