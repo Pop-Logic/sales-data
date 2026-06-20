@@ -1,6 +1,9 @@
+"use client";
+
+import { useMemo, useState } from "react";
 import { Check, Map, SlidersHorizontal } from "lucide-react";
 import type { DashboardSnapshot } from "@/lib/dashboard-data";
-import { TERRITORY_MAP_COLORS, formatUsd } from "@/lib/rules";
+import { TERRITORY_MAP_COLORS, formatUsd, type StoreRollup } from "@/lib/rules";
 
 type StoreDashboardProps = {
   snapshot: DashboardSnapshot;
@@ -15,8 +18,36 @@ function CheckState({ active, label }: { active: boolean; label: string }) {
   );
 }
 
+function summarizeStores(stores: StoreRollup[]) {
+  return {
+    totalRetailers: stores.length,
+    mappedStores: stores.filter((store) => (
+      Number.isFinite(store.latitude) && Number.isFinite(store.longitude)
+    )).length,
+    lapsedPriority: stores.filter((store) => store.mapCategory.startsWith("K Savage Lapsed")).length,
+    openLanePriority: stores.filter((store) => store.mapCategory.startsWith("Open Lane")).length,
+    pitchMayfield: stores.filter((store) => store.mapCategory === "Pitch Mayfield").length
+  };
+}
+
 export function StoreDashboard({ snapshot }: StoreDashboardProps) {
-  const firstStore = snapshot.stores[0];
+  const [storeQuery, setStoreQuery] = useState("");
+  const normalizedStoreQuery = storeQuery.trim().toLowerCase();
+  const filteredStores = useMemo(() => {
+    if (!normalizedStoreQuery) {
+      return snapshot.stores;
+    }
+    return snapshot.stores.filter((store) => (
+      store.storeName.toLowerCase().includes(normalizedStoreQuery) ||
+      store.license.toLowerCase().includes(normalizedStoreQuery) ||
+      store.licenseKey.toLowerCase().includes(normalizedStoreQuery)
+    ));
+  }, [normalizedStoreQuery, snapshot.stores]);
+  const metrics = useMemo(() => summarizeStores(filteredStores), [filteredStores]);
+  const firstStore = filteredStores[0];
+  const rowMeta = normalizedStoreQuery
+    ? `${filteredStores.length.toLocaleString()} of ${snapshot.stores.length.toLocaleString()} rows`
+    : `${filteredStores.length.toLocaleString()} rows`;
 
   return (
     <div className="app-shell">
@@ -52,7 +83,16 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             </button>
           </div>
 
-          <div className="filters" aria-label="Store filters">
+          <form className="filters" aria-label="Store filters" onSubmit={(event) => event.preventDefault()}>
+            <div className="field store-filter-field">
+              <label>Stores</label>
+              <input
+                type="search"
+                value={storeQuery}
+                onChange={(event) => setStoreQuery(event.target.value)}
+                placeholder="Name or license"
+              />
+            </div>
             <div className="field">
               <label>Balaclava Sales</label>
               <select defaultValue="all">
@@ -94,29 +134,29 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             <button className="primary-button" type="button">
               <SlidersHorizontal size={16} /> Apply
             </button>
-          </div>
+          </form>
         </section>
 
         <section className="metrics">
           <div className="metric">
             <div className="metric-label">Retailers</div>
-            <div className="metric-value">{snapshot.metrics.totalRetailers.toLocaleString()}</div>
+            <div className="metric-value">{metrics.totalRetailers.toLocaleString()}</div>
           </div>
           <div className="metric">
             <div className="metric-label">Mapped</div>
-            <div className="metric-value">{snapshot.metrics.mappedStores.toLocaleString()}</div>
+            <div className="metric-value">{metrics.mappedStores.toLocaleString()}</div>
           </div>
           <div className="metric">
             <div className="metric-label">Lapsed Priority</div>
-            <div className="metric-value">{snapshot.metrics.lapsedPriority.toLocaleString()}</div>
+            <div className="metric-value">{metrics.lapsedPriority.toLocaleString()}</div>
           </div>
           <div className="metric">
             <div className="metric-label">Open Lane</div>
-            <div className="metric-value">{snapshot.metrics.openLanePriority.toLocaleString()}</div>
+            <div className="metric-value">{metrics.openLanePriority.toLocaleString()}</div>
           </div>
           <div className="metric">
             <div className="metric-label">Pitch Mayfield</div>
-            <div className="metric-value">{snapshot.metrics.pitchMayfield.toLocaleString()}</div>
+            <div className="metric-value">{metrics.pitchMayfield.toLocaleString()}</div>
           </div>
         </section>
 
@@ -124,7 +164,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
           <div className="panel">
             <div className="panel-header">
               <h3>Filtered Stores</h3>
-              <span className="table-meta">{snapshot.stores.length.toLocaleString()} rows</span>
+              <span className="table-meta">{rowMeta}</span>
             </div>
             <table className="store-table">
               <thead>
@@ -138,7 +178,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                 </tr>
               </thead>
               <tbody>
-                {snapshot.stores.map((store) => (
+                {filteredStores.map((store) => (
                   <tr key={store.licenseKey || store.license}>
                     <td>
                       <div className="store-name">{store.storeName}</div>
@@ -163,6 +203,11 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                     <td>{store.hasContactEver ? "✅" : ""}</td>
                   </tr>
                 ))}
+                {!filteredStores.length ? (
+                  <tr>
+                    <td colSpan={6}>No stores match that search.</td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>

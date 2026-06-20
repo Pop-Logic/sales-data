@@ -109,7 +109,7 @@ select {
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(6, minmax(130px, 1fr));
+  grid-template-columns: minmax(220px, 1.5fr) repeat(5, minmax(120px, 1fr)) minmax(112px, auto);
   gap: 10px;
   align-items: end;
 }
