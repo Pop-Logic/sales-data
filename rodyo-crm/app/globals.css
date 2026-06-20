@@ -118,7 +118,7 @@ select {
 
 .filters {
   display: grid;
-  grid-template-columns: minmax(220px, 1.5fr) repeat(7, minmax(120px, 1fr)) minmax(112px, auto);
+  grid-template-columns: minmax(220px, 1.5fr) repeat(6, minmax(120px, 1fr)) minmax(112px, auto);
   gap: 10px;
   align-items: end;
 }
@@ -490,6 +490,22 @@ select {
   background: var(--muted);
 }
 
+.brand-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+}
+
+.brand-dot {
+  display: inline-block;
+  width: 0.72rem;
+  height: 0.72rem;
+  border: 1px solid rgba(247, 251, 252, 0.55);
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgba(16, 20, 24, 0.18);
+}
+
 .store-detail {
   padding: 14px;
   display: block;
@@ -570,22 +586,6 @@ select {
 
 .detail-summary > * + * {
   margin-top: 10px;
-}
-
-.detail-designation {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px 11px;
-}
-
-.detail-designation strong {
-  font-size: 0.88rem;
-  overflow-wrap: anywhere;
 }
 
 .detail-tabs {

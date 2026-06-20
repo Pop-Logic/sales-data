@@ -7,7 +7,6 @@ import type { DashboardSnapshot } from "@/lib/dashboard-data";
 import {
   TERRITORY_BRANDS,
   TERRITORY_MAP_COLORS,
-  TERRITORY_SELECTOR_ORDER,
   formatUsd,
   type StoreRollup
 } from "@/lib/rules";
@@ -18,7 +17,7 @@ type StoreDashboardProps = {
 
 type ViewMode = "stores" | "map";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
-type SortKey = "store" | "designation" | "balaclava" | "storeRevenue" | "rep" | "log";
+type SortKey = "store" | "brand" | "balaclava" | "storeRevenue" | "rep" | "log";
 type SortDirection = "asc" | "desc";
 type BalaclavaSalesFilter = "all" | "1000" | "5000";
 type StoreRevenueFilter = "all" | "300" | "50000" | "100000";
@@ -33,7 +32,6 @@ type StoreFilters = {
   balaclavaSales: BalaclavaSalesFilter;
   storeRevenue: StoreRevenueFilter;
   brand: BrandFilter[];
-  designation: string;
   pareto: ParetoFilter;
   priority: PriorityFilter;
   region: string;
@@ -49,7 +47,6 @@ const defaultStoreFilters: StoreFilters = {
   balaclavaSales: "all",
   storeRevenue: "all",
   brand: [],
-  designation: "all",
   pareto: "all",
   priority: "all",
   region: "all"
@@ -65,12 +62,18 @@ const detailTabs: { id: DetailTab; label: string }[] = [
 
 const sortableColumns: { key: SortKey; label: string; width?: string }[] = [
   { key: "store", label: "Store", width: "34%" },
-  { key: "designation", label: "Designation" },
+  { key: "brand", label: "Brand" },
   { key: "balaclava", label: "Balaclava" },
   { key: "storeRevenue", label: "Store Revenue" },
   { key: "rep", label: "Rep" },
   { key: "log", label: "Log" }
 ];
+
+const BRAND_DOT_COLORS: Record<BrandFilter, string> = {
+  "K. Savage": TERRITORY_MAP_COLORS["Carries K. Savage"],
+  Mayfield: TERRITORY_MAP_COLORS["Mayfield placed"],
+  "Leisure Land": TERRITORY_MAP_COLORS["Leisure Land Placed"]
+};
 
 function FilterLabel({ active, children }: { active: boolean; children: ReactNode }) {
   return (
@@ -118,8 +121,8 @@ function sortValueForStore(store: StoreRollup, sortKey: SortKey) {
   if (sortKey === "store") {
     return `${textSortValue(store.storeName)} ${textSortValue(store.license)}`;
   }
-  if (sortKey === "designation") {
-    return textSortValue(store.mapCategory);
+  if (sortKey === "brand") {
+    return brandPlacements(store).join(" ");
   }
   if (sortKey === "balaclava") {
     return store.latestMonthRevenue;
@@ -189,6 +192,31 @@ function matchesBrandFilter(store: StoreRollup, brand: BrandFilter) {
   return true;
 }
 
+function brandPlacements(store: StoreRollup) {
+  return TERRITORY_BRANDS.filter((brand) => matchesBrandFilter(store, brand));
+}
+
+function BrandPlacementDots({ store }: { store: StoreRollup }) {
+  const brands = brandPlacements(store);
+
+  return (
+    <span
+      aria-label={brands.length ? `Brand placement: ${brands.join(", ")}` : "No brand placement"}
+      className="brand-dots"
+      title={brands.length ? brands.join(", ") : "No brand placement"}
+    >
+      {brands.map((brand) => (
+        <span
+          aria-hidden="true"
+          className="brand-dot"
+          key={brand}
+          style={{ background: BRAND_DOT_COLORS[brand] ?? "var(--muted)" }}
+        />
+      ))}
+    </span>
+  );
+}
+
 function normalizeBrandFilters(value: StoreFilters["brand"] | BrandFilter | "all" | undefined) {
   if (Array.isArray(value)) {
     return value.filter((brand): brand is BrandFilter => (
@@ -229,10 +257,6 @@ function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
     nextStores = nextStores.filter((store) => (
       brandFilters.some((brand) => matchesBrandFilter(store, brand))
     ));
-  }
-
-  if (filters.designation !== "all") {
-    nextStores = nextStores.filter((store) => store.mapCategory === filters.designation);
   }
 
   if (filters.priority !== "all") {
@@ -281,7 +305,6 @@ function countActiveFilters(filters: StoreFilters) {
     filters.balaclavaSales !== "all",
     filters.storeRevenue !== "all",
     normalizeBrandFilters(filters.brand).length > 0,
-    filters.designation !== "all",
     filters.pareto !== "all",
     filters.priority !== "all",
     filters.region !== "all"
@@ -326,15 +349,6 @@ function StoreDetailSummary({ store }: { store: StoreRollup }) {
 
   return (
     <div className="detail-summary">
-      <div className="detail-designation">
-        <span
-          className="dot"
-          style={{
-            background: TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)"
-          }}
-        />
-        <strong>{store.mapCategory}</strong>
-      </div>
       <div className="detail-list compact">
         <DetailRow label="License" value={store.license} />
         <DetailRow label="Rep" value={store.territoryRep} />
@@ -487,9 +501,10 @@ function createPopupContent(store: StoreRollup) {
   license.textContent = `${store.license} · ${store.city || "No city"}`;
   container.appendChild(license);
 
-  const category = document.createElement("span");
-  category.textContent = store.mapCategory;
-  container.appendChild(category);
+  const brands = document.createElement("span");
+  const placedBrands = brandPlacements(store);
+  brands.textContent = placedBrands.length ? `Brands ${placedBrands.join(", ")}` : "No brand placement";
+  container.appendChild(brands);
 
   const revenue = document.createElement("span");
   revenue.textContent = `Balaclava ${formatUsd(store.latestMonthRevenue)} · Market ${formatUsd(store.marketSalesLastMonth)}`;
@@ -697,7 +712,7 @@ function StoreDetailDrawer({
           <span>{selectedStore?.storeName ?? "Select a store"}</span>
           {selectedStore ? (
             <small>
-              {selectedStore.license || "-"} · {selectedStore.mapCategory} · Balaclava{" "}
+              {selectedStore.license || "-"} · Balaclava{" "}
               {formatUsd(selectedStore.latestMonthRevenue)} · Market{" "}
               {formatUsd(selectedStore.marketSalesLastMonth)}
             </small>
@@ -871,24 +886,6 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     [...new Set(stores.map((store) => textSortValue(store.county)).filter(Boolean))]
       .sort((left, right) => left.localeCompare(right))
   ), [stores]);
-  const designationOptions = useMemo(() => {
-    const categories = [...new Set(stores.map((store) => store.mapCategory).filter(Boolean))];
-    return categories.sort((left, right) => {
-      const leftIndex = TERRITORY_SELECTOR_ORDER.indexOf(left as (typeof TERRITORY_SELECTOR_ORDER)[number]);
-      const rightIndex = TERRITORY_SELECTOR_ORDER.indexOf(right as (typeof TERRITORY_SELECTOR_ORDER)[number]);
-
-      if (leftIndex >= 0 && rightIndex >= 0) {
-        return leftIndex - rightIndex;
-      }
-      if (leftIndex >= 0) {
-        return -1;
-      }
-      if (rightIndex >= 0) {
-        return 1;
-      }
-      return left.localeCompare(right);
-    });
-  }, [stores]);
   const draftBrandFilters = normalizeBrandFilters(draftFilters.brand);
   const appliedBrandFilters = normalizeBrandFilters(appliedFilters.brand);
   const draftActiveFilterCount = countActiveFilters(draftFilters);
@@ -1073,20 +1070,6 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               </details>
             </div>
             <div className="field">
-              <FilterLabel active={appliedFilters.designation !== "all"}>Designation</FilterLabel>
-              <select
-                value={draftFilters.designation}
-                onChange={(event) => updateDraftFilter("designation", event.target.value)}
-              >
-                <option value="all">All designations</option>
-                {designationOptions.map((designation) => (
-                  <option key={designation} value={designation}>
-                    {designation}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="field">
               <FilterLabel active={appliedFilters.pareto !== "all"}>Pareto</FilterLabel>
               <select
                 value={draftFilters.pareto}
@@ -1205,15 +1188,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                         </div>
                       </td>
                       <td>
-                        <span className="tag">
-                          <span
-                            className="dot"
-                            style={{
-                              background: TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)"
-                            }}
-                          />
-                          {store.mapCategory}
-                        </span>
+                        <BrandPlacementDots store={store} />
                       </td>
                       <td>{formatUsd(store.latestMonthRevenue)}</td>
                       <td>{formatUsd(store.marketSalesLastMonth)}</td>
