@@ -22,7 +22,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <h1>RODYO CRM</h1>
+          <img className="brand-logo" src="/logo.png" alt="RODYO" />
           <span>Balaclava store operations</span>
         </div>
         <nav className="nav" aria-label="Main navigation">

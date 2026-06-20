@@ -37,8 +37,8 @@ select {
 }
 
 .sidebar {
-  border-right: 1px solid var(--line);
-  background: #0d1115;
+  border-right: 1px solid #65aa98;
+  background: #7dc2ae;
   padding: 20px 16px;
 }
 
@@ -48,17 +48,21 @@ select {
   margin-bottom: 28px;
 }
 
-.brand h1 {
-  font-size: 1.1rem;
-  margin: 0;
-  letter-spacing: 0;
+.brand-logo {
+  display: block;
+  width: min(172px, 100%);
+  height: auto;
 }
 
-.brand span,
 .caption,
 .metric-label,
 .table-meta {
   color: var(--muted);
+}
+
+.brand span {
+  color: #173530;
+  font-weight: 650;
 }
 
 .nav {
@@ -67,16 +71,17 @@ select {
 }
 
 .nav a {
-  color: var(--muted);
+  color: #173530;
   text-decoration: none;
   padding: 9px 10px;
   border-radius: 6px;
+  font-weight: 650;
 }
 
 .nav a.active,
 .nav a:hover {
-  color: var(--text);
-  background: var(--panel-2);
+  color: #071a16;
+  background: rgba(255, 255, 255, 0.36);
 }
 
 .main {
