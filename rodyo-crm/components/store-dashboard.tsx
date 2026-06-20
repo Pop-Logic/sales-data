@@ -2,7 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { Check, Map as MapIcon, SlidersHorizontal } from "lucide-react";
+import {
+  Check,
+  ExternalLink,
+  ListPlus,
+  Map as MapIcon,
+  Plus,
+  SlidersHorizontal,
+  Trash2,
+  X
+} from "lucide-react";
 import type { DashboardSnapshot } from "@/lib/dashboard-data";
 import {
   TERRITORY_BRANDS,
@@ -85,6 +94,17 @@ const BRAND_DOT_COLORS: Record<BrandFilter, string> = {
   "Leisure Land": TERRITORY_MAP_COLORS["Leisure Land Placed"]
 };
 
+const TRIP_ORIGIN = {
+  label: "Tacoma, WA",
+  latitude: 47.2529,
+  longitude: -122.4443
+};
+const GOOGLE_MAPS_ROUTE_STOP_LIMIT = 10;
+type Coordinates = {
+  latitude: number;
+  longitude: number;
+};
+
 function FilterLabel({ active, children }: { active: boolean; children: ReactNode }) {
   return (
     <label className={active ? "filter-label is-active" : "filter-label"}>
@@ -121,6 +141,87 @@ function storeKey(store: StoreRollup) {
 
 function hasStoreCoordinates(store: StoreRollup) {
   return Number.isFinite(store.latitude) && Number.isFinite(store.longitude);
+}
+
+function storeCoordinates(store: StoreRollup) {
+  return {
+    latitude: Number(store.latitude),
+    longitude: Number(store.longitude)
+  };
+}
+
+function milesBetween(
+  left: Coordinates,
+  right: Coordinates
+) {
+  const earthRadiusMiles = 3958.8;
+  const toRadians = (value: number) => value * (Math.PI / 180);
+  const latitudeDelta = toRadians(right.latitude - left.latitude);
+  const longitudeDelta = toRadians(right.longitude - left.longitude);
+  const leftLatitude = toRadians(left.latitude);
+  const rightLatitude = toRadians(right.latitude);
+  const haversine = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(leftLatitude) * Math.cos(rightLatitude) * Math.sin(longitudeDelta / 2) ** 2;
+  return earthRadiusMiles * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
+function optimizeTripStores(stores: StoreRollup[]) {
+  const remaining = stores.filter(hasStoreCoordinates);
+  const ordered: StoreRollup[] = [];
+  let currentLocation: Coordinates = TRIP_ORIGIN;
+
+  while (remaining.length) {
+    let closestIndex = 0;
+    let closestMiles = Number.POSITIVE_INFINITY;
+    remaining.forEach((store, index) => {
+      const miles = milesBetween(currentLocation, storeCoordinates(store));
+      if (miles < closestMiles) {
+        closestMiles = miles;
+        closestIndex = index;
+      }
+    });
+
+    const [nextStore] = remaining.splice(closestIndex, 1);
+    ordered.push(nextStore);
+    currentLocation = storeCoordinates(nextStore);
+  }
+
+  return ordered;
+}
+
+function estimatedTripMiles(stores: StoreRollup[]) {
+  let totalMiles = 0;
+  let currentLocation: Coordinates = TRIP_ORIGIN;
+  stores.forEach((store) => {
+    const nextLocation = storeCoordinates(store);
+    totalMiles += milesBetween(currentLocation, nextLocation);
+    currentLocation = nextLocation;
+  });
+  return totalMiles;
+}
+
+function mapsCoordinate(store: StoreRollup) {
+  return `${Number(store.latitude)},${Number(store.longitude)}`;
+}
+
+function googleMapsRouteUrl(stores: StoreRollup[]) {
+  const routeStores = stores.slice(0, GOOGLE_MAPS_ROUTE_STOP_LIMIT);
+  if (!routeStores.length) {
+    return "";
+  }
+
+  const destination = routeStores[routeStores.length - 1];
+  const waypointStores = routeStores.slice(0, -1);
+  const params = new URLSearchParams({
+    api: "1",
+    origin: TRIP_ORIGIN.label,
+    destination: mapsCoordinate(destination),
+    travelmode: "driving"
+  });
+  if (waypointStores.length) {
+    params.set("waypoints", waypointStores.map(mapsCoordinate).join("|"));
+  }
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
 function textSortValue(value?: string | null) {
@@ -892,39 +993,221 @@ function StoreMap({
   );
 }
 
-function MapLegend({ stores }: { stores: StoreRollup[] }) {
-  const mappedStores = stores.filter(hasStoreCoordinates);
-  const missingCount = stores.length - mappedStores.length;
-  const categoryCounts = [...mappedStores.reduce((counts, store) => {
-    counts.set(store.mapCategory, (counts.get(store.mapCategory) || 0) + 1);
-    return counts;
-  }, new Map<string, number>())].sort((left, right) => right[1] - left[1]);
+function TripPlanner({
+  stores,
+  selectedStore,
+  tripStoreKeys,
+  onAddStore,
+  onAddStores,
+  onRemoveStore,
+  onClearTrip,
+  onSelectStore
+}: {
+  stores: StoreRollup[];
+  selectedStore?: StoreRollup;
+  tripStoreKeys: string[];
+  onAddStore: (key: string) => void;
+  onAddStores: (keys: string[]) => void;
+  onRemoveStore: (key: string) => void;
+  onClearTrip: () => void;
+  onSelectStore: (key: string) => void;
+}) {
+  const mappedStores = useMemo(() => stores.filter(hasStoreCoordinates), [stores]);
+  const mappedStoreByKey = useMemo(() => {
+    const byKey = new Map<string, StoreRollup>();
+    mappedStores.forEach((store) => byKey.set(storeKey(store), store));
+    return byKey;
+  }, [mappedStores]);
+  const selectedKeys = useMemo(() => new Set(tripStoreKeys), [tripStoreKeys]);
+  const tripStores = useMemo(() => (
+    tripStoreKeys
+      .map((key) => mappedStoreByKey.get(key))
+      .filter((store): store is StoreRollup => Boolean(store))
+  ), [mappedStoreByKey, tripStoreKeys]);
+  const orderedTripStores = useMemo(() => optimizeTripStores(tripStores), [tripStores]);
+  const tripMapStores = orderedTripStores.length ? orderedTripStores : mappedStores;
+  const unselectedCandidateStores = useMemo(() => (
+    mappedStores.filter((store) => !selectedKeys.has(storeKey(store)))
+  ), [mappedStores, selectedKeys]);
+  const candidateStores = useMemo(() => unselectedCandidateStores.slice(0, 80), [unselectedCandidateStores]);
+  const estimatedMiles = estimatedTripMiles(orderedTripStores);
+  const routeUrl = googleMapsRouteUrl(orderedTripStores);
+  const launchStopCount = Math.min(orderedTripStores.length, GOOGLE_MAPS_ROUTE_STOP_LIMIT);
+  const tripBalaclava = orderedTripStores.reduce((total, store) => total + store.latestMonthRevenue, 0);
+  const tripMarket = orderedTripStores.reduce((total, store) => total + store.marketSalesLastMonth, 0);
+  const selectedStoreKey = selectedStore ? storeKey(selectedStore) : "";
+  const canAddSelectedStore = Boolean(
+    selectedStore && hasStoreCoordinates(selectedStore) && !selectedKeys.has(selectedStoreKey)
+  );
 
   return (
-    <aside className="map-legend" aria-label="Map legend">
-      <div>
-        <div className="metric-label">Mapped Stores</div>
-        <div className="legend-count">{mappedStores.length.toLocaleString()}</div>
-        <div className="caption">of {stores.length.toLocaleString()} filtered stores</div>
+    <section className="trip-layout">
+      <div className="panel map-panel trip-map-panel">
+        <div className="panel-header">
+          <h3>{orderedTripStores.length ? "Route Map" : "Filtered Store Map"}</h3>
+          <span className="table-meta">
+            {orderedTripStores.length
+              ? `${orderedTripStores.length.toLocaleString()} stops`
+              : `${mappedStores.length.toLocaleString()} mapped candidates`}
+          </span>
+        </div>
+        <div className="trip-map-body">
+          <StoreMap
+            stores={tripMapStores}
+            selectedStore={selectedStore}
+            onSelect={onSelectStore}
+          />
+        </div>
       </div>
-      {missingCount ? (
-        <div className="legend-warning">{missingCount.toLocaleString()} missing coordinates</div>
-      ) : null}
-      <div className="legend-list">
-        {categoryCounts.map(([category, count]) => (
-          <div className="legend-row" key={category}>
-            <span
-              className="dot"
-              style={{
-                background: TERRITORY_MAP_COLORS[category] ?? "var(--muted)"
-              }}
-            />
-            <span>{category}</span>
-            <strong>{count.toLocaleString()}</strong>
+
+      <aside className="panel trip-planner-panel">
+        <div className="panel-header">
+          <h3>Trip Planner</h3>
+          <span className="table-meta">{TRIP_ORIGIN.label}</span>
+        </div>
+
+        <div className="trip-section">
+          <div className="trip-summary">
+            <div className="metric">
+              <div className="metric-label">Stops</div>
+              <div className="metric-value">{orderedTripStores.length.toLocaleString()}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Est. Miles</div>
+              <div className="metric-value">{Math.round(estimatedMiles).toLocaleString()}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Balaclava</div>
+              <div className="metric-value">{formatUsd(tripBalaclava)}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Market</div>
+              <div className="metric-value">{formatUsd(tripMarket)}</div>
+            </div>
           </div>
-        ))}
-      </div>
-    </aside>
+          <div className="trip-actions">
+            <button
+              className="secondary-button"
+              disabled={!canAddSelectedStore}
+              onClick={() => {
+                if (selectedStoreKey) {
+                  onAddStore(selectedStoreKey);
+                }
+              }}
+              type="button"
+            >
+              <Plus size={15} /> Add Selected
+            </button>
+            {routeUrl ? (
+              <a className="primary-button" href={routeUrl} rel="noreferrer" target="_blank">
+                <ExternalLink size={15} /> Launch Route
+              </a>
+            ) : (
+              <button className="primary-button" disabled type="button">
+                <ExternalLink size={15} /> Launch Route
+              </button>
+            )}
+            <button
+              className="secondary-button"
+              disabled={!candidateStores.length}
+              onClick={() => onAddStores(candidateStores.slice(0, 8).map(storeKey))}
+              type="button"
+            >
+              <ListPlus size={15} /> Add Top 8
+            </button>
+            <button
+              className="secondary-button"
+              disabled={!orderedTripStores.length}
+              onClick={onClearTrip}
+              type="button"
+            >
+              <Trash2 size={15} /> Clear
+            </button>
+          </div>
+          {orderedTripStores.length > GOOGLE_MAPS_ROUTE_STOP_LIMIT ? (
+            <div className="trip-note">
+              Maps launch includes the first {launchStopCount.toLocaleString()} of{" "}
+              {orderedTripStores.length.toLocaleString()} planned stops.
+            </div>
+          ) : null}
+        </div>
+
+        <div className="trip-section">
+          <div className="trip-section-header">
+            <h4>Route</h4>
+            <span>{orderedTripStores.length.toLocaleString()}</span>
+          </div>
+          <ol className="trip-stop-list">
+            {orderedTripStores.map((store, index) => (
+              <li
+                className={selectedStoreKey === storeKey(store) ? "trip-stop-row is-selected" : "trip-stop-row"}
+                key={storeKey(store)}
+              >
+                <span className="trip-stop-index">{index + 1}</span>
+                <button className="trip-store-button" onClick={() => onSelectStore(storeKey(store))} type="button">
+                  <strong>{store.storeName}</strong>
+                  <span className="trip-store-meta">
+                    <BrandPlacementDots store={store} />
+                    <span className="trip-store-subtext">
+                      {store.city || "No city"} · {formatUsd(store.marketSalesLastMonth)} market
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label={`Remove ${store.storeName} from trip`}
+                  className="icon-button"
+                  onClick={() => onRemoveStore(storeKey(store))}
+                  type="button"
+                >
+                  <X size={15} />
+                </button>
+              </li>
+            ))}
+            {!orderedTripStores.length ? (
+              <li className="trip-empty">No stops selected.</li>
+            ) : null}
+          </ol>
+        </div>
+
+        <div className="trip-section">
+          <div className="trip-section-header">
+            <h4>Candidates</h4>
+            <span>
+              {candidateStores.length.toLocaleString()} of {unselectedCandidateStores.length.toLocaleString()}
+            </span>
+          </div>
+          <div className="trip-candidate-list">
+            {candidateStores.map((store) => (
+              <div
+                className={selectedStoreKey === storeKey(store) ? "trip-candidate-row is-selected" : "trip-candidate-row"}
+                key={storeKey(store)}
+              >
+                <button className="trip-store-button" onClick={() => onSelectStore(storeKey(store))} type="button">
+                  <strong>{store.storeName}</strong>
+                  <span className="trip-store-meta">
+                    <BrandPlacementDots store={store} />
+                    <span className="trip-store-subtext">
+                      {store.city || "No city"} · {formatUsd(store.marketSalesLastMonth)} market
+                    </span>
+                  </span>
+                </button>
+                <button
+                  aria-label={`Add ${store.storeName} to trip`}
+                  className="icon-button"
+                  onClick={() => onAddStore(storeKey(store))}
+                  type="button"
+                >
+                  <Plus size={15} />
+                </button>
+              </div>
+            ))}
+            {!candidateStores.length ? (
+              <div className="trip-empty">No mapped candidates.</div>
+            ) : null}
+          </div>
+        </div>
+      </aside>
+    </section>
   );
 }
 
@@ -1074,6 +1357,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   const [activeTab, setActiveTab] = useState<DetailTab>("contact");
   const [sortKey, setSortKey] = useState<SortKey>("storeRevenue");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [tripStoreKeys, setTripStoreKeys] = useState<string[]>([]);
   const [selectedStoreKey, setSelectedStoreKey] = useState(() => (
     snapshot.stores[0] ? storeKey(snapshot.stores[0]) : ""
   ));
@@ -1095,6 +1379,9 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   );
   const metrics = useMemo(() => summarizeStores(sortedStores), [sortedStores]);
   const mappedStoreCount = useMemo(() => sortedStores.filter(hasStoreCoordinates).length, [sortedStores]);
+  const tripEligibleKeySet = useMemo(() => new Set(
+    sortedStores.filter(hasStoreCoordinates).map(storeKey)
+  ), [sortedStores]);
   const regionOptions = useMemo(() => (
     [...new Set(stores.map((store) => textSortValue(store.county)).filter(Boolean))]
       .sort((left, right) => left.localeCompare(right))
@@ -1125,6 +1412,13 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     }
   }, [selectedStoreKey, sortedStores]);
 
+  useEffect(() => {
+    setTripStoreKeys((currentKeys) => {
+      const nextKeys = currentKeys.filter((key) => tripEligibleKeySet.has(key));
+      return nextKeys.length === currentKeys.length ? currentKeys : nextKeys;
+    });
+  }, [tripEligibleKeySet]);
+
   function handleBuyerSaved(storeId: string, buyer: BuyerContactPatch) {
     setStores((currentStores) => currentStores.map((store) => (
       store.storeId === storeId ? { ...store, ...buyer } : store
@@ -1151,6 +1445,28 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
 
   const handleStoreSelect = useCallback((nextStoreKey: string) => {
     setSelectedStoreKey(nextStoreKey);
+  }, []);
+
+  const handleAddTripStore = useCallback((nextStoreKey: string) => {
+    setTripStoreKeys((currentKeys) => (
+      currentKeys.includes(nextStoreKey) ? currentKeys : [...currentKeys, nextStoreKey]
+    ));
+  }, []);
+
+  const handleAddTripStores = useCallback((nextStoreKeys: string[]) => {
+    setTripStoreKeys((currentKeys) => {
+      const keySet = new Set(currentKeys);
+      nextStoreKeys.forEach((key) => keySet.add(key));
+      return [...keySet];
+    });
+  }, []);
+
+  const handleRemoveTripStore = useCallback((nextStoreKey: string) => {
+    setTripStoreKeys((currentKeys) => currentKeys.filter((key) => key !== nextStoreKey));
+  }, []);
+
+  const handleClearTrip = useCallback(() => {
+    setTripStoreKeys([]);
   }, []);
 
   function updateDraftFilter<K extends keyof StoreFilters>(key: K, value: StoreFilters[K]) {
@@ -1226,7 +1542,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               <h2>{activeView === "map" ? "Map" : "Stores"}</h2>
               <div className="caption">
                 {activeView === "map"
-                  ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores`
+                  ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores · ${tripStoreKeys.length.toLocaleString()} stops planned`
                   : snapshot.source === "demo"
                   ? "Demo shell. Connect Supabase to load live CRM data."
                   : "Live Supabase data"}
@@ -1459,32 +1775,16 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             />
           </section>
         ) : (
-          <section className="map-layout">
-            <div className="panel map-panel">
-              <div className="panel-header">
-                <h3>Filtered Store Map</h3>
-                <span className="table-meta">
-                  {mappedStoreCount.toLocaleString()} mapped · {sortedStores.length.toLocaleString()} filtered
-                </span>
-              </div>
-              <div className="map-body">
-                <StoreMap
-                  stores={sortedStores}
-                  selectedStore={selectedStore}
-                  onSelect={handleStoreSelect}
-                />
-                <MapLegend stores={sortedStores} />
-              </div>
-            </div>
-
-            <StoreDetailDrawer
-              selectedStore={selectedStore}
-              activeTab={activeTab}
-              setActiveTab={setActiveTab}
-              onBuyerSaved={handleBuyerSaved}
-              onContactLogSaved={handleContactLogSaved}
-            />
-          </section>
+          <TripPlanner
+            stores={sortedStores}
+            selectedStore={selectedStore}
+            tripStoreKeys={tripStoreKeys}
+            onAddStore={handleAddTripStore}
+            onAddStores={handleAddTripStores}
+            onRemoveStore={handleRemoveTripStore}
+            onClearTrip={handleClearTrip}
+            onSelectStore={handleStoreSelect}
+          />
         )}
       </main>
     </div>
