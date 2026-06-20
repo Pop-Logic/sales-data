@@ -72,7 +72,34 @@ function DetailRow({ label, value }: { label: string; value?: string | number | 
   return (
     <div className="detail-row">
       <span>{label}</span>
-      <strong>{value || "-"}</strong>
+      <strong>{value === null || value === undefined || value === "" ? "-" : value}</strong>
+    </div>
+  );
+}
+
+function StoreDetailSummary({ store }: { store: StoreRollup }) {
+  const location = [store.city, store.state, store.zip].filter(Boolean).join(", ");
+
+  return (
+    <div className="detail-summary">
+      <div className="detail-designation">
+        <span
+          className="dot"
+          style={{
+            background: TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)"
+          }}
+        />
+        <strong>{store.mapCategory}</strong>
+      </div>
+      <div className="detail-list compact">
+        <DetailRow label="License" value={store.license} />
+        <DetailRow label="Rep" value={store.territoryRep} />
+        <DetailRow label="Location" value={location} />
+        <DetailRow label="Latest Balaclava" value={formatUsd(store.latestMonthRevenue)} />
+        <DetailRow label="Market sales" value={formatUsd(store.marketSalesLastMonth)} />
+        <DetailRow label="Orders" value={store.orders.toLocaleString()} />
+        <DetailRow label="Log entries" value={store.contactLogCount.toLocaleString()} />
+      </div>
     </div>
   );
 }
@@ -398,6 +425,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                 {selectedStore ? `${selectedStore.license} · ${selectedStore.city ?? ""}` : "Store detail drawer"}
               </span>
             </div>
+            {selectedStore ? <StoreDetailSummary store={selectedStore} /> : null}
             <div className="detail-tabs" role="tablist" aria-label="Store detail sections">
               {detailTabs.map((tab) => (
                 <button
