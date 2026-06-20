@@ -4,7 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Check, Map as MapIcon, SlidersHorizontal } from "lucide-react";
 import type { DashboardSnapshot } from "@/lib/dashboard-data";
-import { TERRITORY_BRANDS, TERRITORY_MAP_COLORS, formatUsd, type StoreRollup } from "@/lib/rules";
+import {
+  TERRITORY_BRANDS,
+  TERRITORY_MAP_COLORS,
+  TERRITORY_SELECTOR_ORDER,
+  formatUsd,
+  type StoreRollup
+} from "@/lib/rules";
 
 type StoreDashboardProps = {
   snapshot: DashboardSnapshot;
@@ -27,6 +33,7 @@ type StoreFilters = {
   balaclavaSales: BalaclavaSalesFilter;
   storeRevenue: StoreRevenueFilter;
   brand: BrandFilter[];
+  designation: string;
   pareto: ParetoFilter;
   priority: PriorityFilter;
   region: string;
@@ -42,6 +49,7 @@ const defaultStoreFilters: StoreFilters = {
   balaclavaSales: "all",
   storeRevenue: "all",
   brand: [],
+  designation: "all",
   pareto: "all",
   priority: "all",
   region: "all"
@@ -223,6 +231,10 @@ function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
     ));
   }
 
+  if (filters.designation !== "all") {
+    nextStores = nextStores.filter((store) => store.mapCategory === filters.designation);
+  }
+
   if (filters.priority !== "all") {
     nextStores = nextStores.filter((store) => matchesPriorityFilter(store, filters.priority));
   }
@@ -269,6 +281,7 @@ function countActiveFilters(filters: StoreFilters) {
     filters.balaclavaSales !== "all",
     filters.storeRevenue !== "all",
     normalizeBrandFilters(filters.brand).length > 0,
+    filters.designation !== "all",
     filters.pareto !== "all",
     filters.priority !== "all",
     filters.region !== "all"
@@ -858,6 +871,24 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     [...new Set(stores.map((store) => textSortValue(store.county)).filter(Boolean))]
       .sort((left, right) => left.localeCompare(right))
   ), [stores]);
+  const designationOptions = useMemo(() => {
+    const categories = [...new Set(stores.map((store) => store.mapCategory).filter(Boolean))];
+    return categories.sort((left, right) => {
+      const leftIndex = TERRITORY_SELECTOR_ORDER.indexOf(left as (typeof TERRITORY_SELECTOR_ORDER)[number]);
+      const rightIndex = TERRITORY_SELECTOR_ORDER.indexOf(right as (typeof TERRITORY_SELECTOR_ORDER)[number]);
+
+      if (leftIndex >= 0 && rightIndex >= 0) {
+        return leftIndex - rightIndex;
+      }
+      if (leftIndex >= 0) {
+        return -1;
+      }
+      if (rightIndex >= 0) {
+        return 1;
+      }
+      return left.localeCompare(right);
+    });
+  }, [stores]);
   const draftBrandFilters = normalizeBrandFilters(draftFilters.brand);
   const appliedBrandFilters = normalizeBrandFilters(appliedFilters.brand);
   const draftActiveFilterCount = countActiveFilters(draftFilters);
@@ -1040,6 +1071,20 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                   ))}
                 </div>
               </details>
+            </div>
+            <div className="field">
+              <FilterLabel active={appliedFilters.designation !== "all"}>Designation</FilterLabel>
+              <select
+                value={draftFilters.designation}
+                onChange={(event) => updateDraftFilter("designation", event.target.value)}
+              >
+                <option value="all">All designations</option>
+                {designationOptions.map((designation) => (
+                  <option key={designation} value={designation}>
+                    {designation}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="field">
               <FilterLabel active={appliedFilters.pareto !== "all"}>Pareto</FilterLabel>
