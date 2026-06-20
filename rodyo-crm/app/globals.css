@@ -219,6 +219,32 @@ select {
   text-transform: uppercase;
 }
 
+.sort-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  text-transform: inherit;
+}
+
+.sort-header:hover,
+.sort-header:focus-visible {
+  color: var(--text);
+  outline: 0;
+}
+
+.sort-indicator {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
 .store-table tbody tr {
   cursor: pointer;
 }

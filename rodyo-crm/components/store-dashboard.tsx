@@ -11,6 +11,8 @@ type StoreDashboardProps = {
 };
 
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
+type SortKey = "store" | "designation" | "balaclava" | "storeRevenue" | "rep" | "log";
+type SortDirection = "asc" | "desc";
 
 type BuyerContactPatch = {
   contactName: string | null;
@@ -24,6 +26,15 @@ const detailTabs: { id: DetailTab; label: string }[] = [
   { id: "buyer", label: "Buyer" },
   { id: "history", label: "History" },
   { id: "samples", label: "Samples" }
+];
+
+const sortableColumns: { key: SortKey; label: string; width?: string }[] = [
+  { key: "store", label: "Store", width: "34%" },
+  { key: "designation", label: "Designation" },
+  { key: "balaclava", label: "Balaclava" },
+  { key: "storeRevenue", label: "Store Revenue" },
+  { key: "rep", label: "Rep" },
+  { key: "log", label: "Log" }
 ];
 
 function CheckState({ active, label }: { active: boolean; label: string }) {
@@ -49,6 +60,57 @@ function summarizeStores(stores: StoreRollup[]) {
 
 function storeKey(store: StoreRollup) {
   return store.storeId || store.licenseKey || store.license;
+}
+
+function textSortValue(value?: string | null) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function sortValueForStore(store: StoreRollup, sortKey: SortKey) {
+  if (sortKey === "store") {
+    return `${textSortValue(store.storeName)} ${textSortValue(store.license)}`;
+  }
+  if (sortKey === "designation") {
+    return textSortValue(store.mapCategory);
+  }
+  if (sortKey === "balaclava") {
+    return store.latestMonthRevenue;
+  }
+  if (sortKey === "storeRevenue") {
+    return store.marketSalesLastMonth;
+  }
+  if (sortKey === "rep") {
+    return textSortValue(store.territoryRep);
+  }
+  return store.hasContactEver ? 1 : 0;
+}
+
+function sortStores(stores: StoreRollup[], sortKey: SortKey, direction: SortDirection) {
+  const directionMultiplier = direction === "asc" ? 1 : -1;
+
+  return [...stores].sort((left, right) => {
+    const leftValue = sortValueForStore(left, sortKey);
+    const rightValue = sortValueForStore(right, sortKey);
+    let comparison = 0;
+
+    if (typeof leftValue === "number" && typeof rightValue === "number") {
+      comparison = leftValue - rightValue;
+    } else {
+      comparison = String(leftValue).localeCompare(String(rightValue), undefined, {
+        numeric: true,
+        sensitivity: "base"
+      });
+    }
+
+    if (comparison === 0) {
+      comparison = textSortValue(left.storeName).localeCompare(textSortValue(right.storeName), undefined, {
+        numeric: true,
+        sensitivity: "base"
+      });
+    }
+
+    return comparison * directionMultiplier;
+  });
 }
 
 function formatDate(value?: string | null) {
@@ -354,6 +416,8 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   const [stores, setStores] = useState(snapshot.stores);
   const [storeQuery, setStoreQuery] = useState("");
   const [activeTab, setActiveTab] = useState<DetailTab>("contact");
+  const [sortKey, setSortKey] = useState<SortKey>("storeRevenue");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [selectedStoreKey, setSelectedStoreKey] = useState(() => (
     snapshot.stores[0] ? storeKey(snapshot.stores[0]) : ""
   ));
@@ -368,30 +432,46 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
       store.licenseKey.toLowerCase().includes(normalizedStoreQuery)
     ));
   }, [normalizedStoreQuery, stores]);
-  const metrics = useMemo(() => summarizeStores(filteredStores), [filteredStores]);
-  const selectedStore = filteredStores.find((store) => storeKey(store) === selectedStoreKey) || filteredStores[0];
+  const sortedStores = useMemo(
+    () => sortStores(filteredStores, sortKey, sortDirection),
+    [filteredStores, sortDirection, sortKey]
+  );
+  const metrics = useMemo(() => summarizeStores(sortedStores), [sortedStores]);
+  const selectedStore = sortedStores.find((store) => storeKey(store) === selectedStoreKey) || sortedStores[0];
   const rowMeta = normalizedStoreQuery
-    ? `${filteredStores.length.toLocaleString()} of ${stores.length.toLocaleString()} rows`
-    : `${filteredStores.length.toLocaleString()} rows`;
+    ? `${sortedStores.length.toLocaleString()} of ${stores.length.toLocaleString()} rows`
+    : `${sortedStores.length.toLocaleString()} rows`;
 
   useEffect(() => {
     setStores(snapshot.stores);
   }, [snapshot.stores]);
 
   useEffect(() => {
-    if (!filteredStores.length) {
+    if (!sortedStores.length) {
       setSelectedStoreKey("");
       return;
     }
-    if (!filteredStores.some((store) => storeKey(store) === selectedStoreKey)) {
-      setSelectedStoreKey(storeKey(filteredStores[0]));
+    if (!sortedStores.some((store) => storeKey(store) === selectedStoreKey)) {
+      setSelectedStoreKey(storeKey(sortedStores[0]));
     }
-  }, [filteredStores, selectedStoreKey]);
+  }, [selectedStoreKey, sortedStores]);
 
   function handleBuyerSaved(storeId: string, buyer: BuyerContactPatch) {
     setStores((currentStores) => currentStores.map((store) => (
       store.storeId === storeId ? { ...store, ...buyer } : store
     )));
+  }
+
+  function handleSort(nextSortKey: SortKey) {
+    if (nextSortKey === sortKey) {
+      setSortDirection((currentDirection) => (currentDirection === "asc" ? "desc" : "asc"));
+      return;
+    }
+
+    setSortKey(nextSortKey);
+    setSortDirection(
+      nextSortKey === "balaclava" || nextSortKey === "storeRevenue" || nextSortKey === "log" ? "desc" : "asc"
+    );
   }
 
   return (
@@ -514,16 +594,31 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             <table className="store-table">
               <thead>
                 <tr>
-                  <th style={{ width: "34%" }}>Store</th>
-                  <th>Designation</th>
-                  <th>Balaclava</th>
-                  <th>Store Revenue</th>
-                  <th>Rep</th>
-                  <th>Log</th>
+                  {sortableColumns.map((column) => {
+                    const isActive = column.key === sortKey;
+                    return (
+                      <th
+                        key={column.key}
+                        aria-sort={isActive ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}
+                        style={column.width ? { width: column.width } : undefined}
+                      >
+                        <button
+                          className="sort-header"
+                          type="button"
+                          onClick={() => handleSort(column.key)}
+                        >
+                          <span>{column.label}</span>
+                          <span aria-hidden="true" className="sort-indicator">
+                            {isActive ? (sortDirection === "asc" ? "↑" : "↓") : "↕"}
+                          </span>
+                        </button>
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
-                {filteredStores.map((store) => (
+                {sortedStores.map((store) => (
                   <tr
                     key={storeKey(store)}
                     className={selectedStore && storeKey(store) === storeKey(selectedStore) ? "is-selected" : ""}
@@ -559,7 +654,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                     <td>{store.hasContactEver ? "✅" : ""}</td>
                   </tr>
                 ))}
-                {!filteredStores.length ? (
+                {!sortedStores.length ? (
                   <tr>
                     <td colSpan={6}>No stores match that search.</td>
                   </tr>
