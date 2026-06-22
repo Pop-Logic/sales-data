@@ -22,6 +22,16 @@ type GoogleDirectionsResponse = {
 
 const MAX_ROUTE_STOPS = 25;
 
+function googleMapsServerKey() {
+  return (
+    process.env.GOOGLE_MAPS_SERVER_KEY
+    || process.env.GOOGLE_MAPS_API_KEY
+    || process.env.google_maps_api_key
+    || process.env.google_maps_server_key
+    || ""
+  );
+}
+
 function cleanPoint(point?: RoutePoint) {
   const latitude = Number(point?.latitude);
   const longitude = Number(point?.longitude);
@@ -99,7 +109,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ coordinates: [] });
   }
 
-  const googleMapsKey = process.env.GOOGLE_MAPS_SERVER_KEY;
+  const googleMapsKey = googleMapsServerKey();
   if (!googleMapsKey) {
     return NextResponse.json({ coordinates: [] });
   }
