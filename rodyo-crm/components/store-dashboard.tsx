@@ -1137,6 +1137,13 @@ function StoreMap({
   const routeStopCoordinates = useMemo(() => (
     routeStores.filter(hasStoreCoordinates).map(storeCoordinates)
   ), [routeStores]);
+  const mappedStoreSignature = useMemo(() => mappedStores.map(storeKey).join("|"), [mappedStores]);
+  const routeStoreSignature = useMemo(() => (
+    routeStores.filter(hasStoreCoordinates).map(storeKey).join("|")
+  ), [routeStores]);
+  const routeCoordinateSignature = useMemo(() => (
+    routeStopCoordinates.map((coordinates) => `${coordinates.latitude},${coordinates.longitude}`).join("|")
+  ), [routeStopCoordinates]);
   const routeData = useMemo(
     () => routeLineData(
       routeStores,
@@ -1144,7 +1151,14 @@ function StoreMap({
       roadRouteCoordinates,
       routeStopCoordinates.length > 0 && roadRouteCoordinates === undefined
     ),
-    [roadRouteCoordinates, routeStart, routeStores, routeStopCoordinates.length]
+    [
+      roadRouteCoordinates,
+      routeCoordinateSignature,
+      routeStart.latitude,
+      routeStart.longitude,
+      routeStoreSignature,
+      routeStopCoordinates.length
+    ]
   );
 
   useEffect(() => {
@@ -1233,7 +1247,7 @@ function StoreMap({
     fetchRoadRoute();
 
     return () => controller.abort();
-  }, [routeStart, routeStopCoordinates]);
+  }, [routeCoordinateSignature, routeStart.latitude, routeStart.longitude]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1271,6 +1285,10 @@ function StoreMap({
       markersRef.current.set(key, { marker, element });
     });
 
+    if (routeStopCoordinates.length) {
+      return;
+    }
+
     if (mappedStores.length === 1) {
       map.easeTo({
         center: [Number(mappedStores[0].longitude), Number(mappedStores[0].latitude)],
@@ -1288,7 +1306,7 @@ function StoreMap({
         duration: 500
       });
     }
-  }, [isMapReady, mappedStores, onSelect]);
+  }, [isMapReady, mappedStoreSignature, onSelect]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1393,7 +1411,14 @@ function StoreMap({
         storeKey(store)
       );
     });
-  }, [isMapReady, onSelect, routeStart, routeStores]);
+  }, [
+    isMapReady,
+    onSelect,
+    routeStart.label,
+    routeStart.latitude,
+    routeStart.longitude,
+    routeStoreSignature
+  ]);
 
   useEffect(() => {
     selectedStoreKeyRef.current = selectedStoreKey;
