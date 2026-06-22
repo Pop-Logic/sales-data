@@ -561,18 +561,19 @@ function latestMonthBrandContributions(store: StoreRollup) {
   ];
 }
 
+function latestBalaclavaMonthLabel(store: StoreRollup) {
+  return formatMonth(store.latestMonth || store.latestBrandMonth || store.kSavageLastOrderAt);
+}
+
 function LatestMonthStat({ store }: { store: StoreRollup }) {
   const brandTotal = store.latestMonthBrandRevenue || 0;
   const total = brandTotal > 0 ? brandTotal : store.latestMonthRevenue;
   const showContributions = brandTotal > 0;
-  const latestMonthLabel = formatMonth(store.latestMonth);
+  const latestMonthLabel = latestBalaclavaMonthLabel(store);
 
   return (
     <div className="metric latest-month-card">
-      <div className="metric-label metric-label-row">
-        <span>Latest Month</span>
-        {latestMonthLabel ? <strong>{latestMonthLabel}</strong> : null}
-      </div>
+      <div className="metric-label">{latestMonthLabel ? `Latest Month: ${latestMonthLabel}` : "Latest Month"}</div>
       {showContributions ? (
         <div className="brand-contributions">
           {latestMonthBrandContributions(store).map((contribution) => (
@@ -606,6 +607,7 @@ function DetailRow({ label, value }: { label: string; value?: string | number | 
 
 function StoreDetailSummary({ store }: { store: StoreRollup }) {
   const location = [store.city, store.state, store.zip].filter(Boolean).join(", ");
+  const latestMonthLabel = latestBalaclavaMonthLabel(store);
 
   return (
     <div className="detail-summary">
@@ -613,7 +615,10 @@ function StoreDetailSummary({ store }: { store: StoreRollup }) {
         <DetailRow label="License" value={store.license} />
         <DetailRow label="Rep" value={store.territoryRep} />
         <DetailRow label="Location" value={location} />
-        <DetailRow label="Latest Balaclava" value={formatUsd(store.latestMonthRevenue)} />
+        <DetailRow
+          label={latestMonthLabel ? `Latest Balaclava (${latestMonthLabel})` : "Latest Balaclava"}
+          value={formatUsd(store.latestMonthRevenue)}
+        />
         <DetailRow label="Market sales" value={formatUsd(store.marketSalesLastMonth)} />
         <DetailRow label="Orders" value={store.orders.toLocaleString()} />
         <DetailRow label="Log entries" value={store.contactLogCount.toLocaleString()} />
@@ -1576,7 +1581,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
       <aside className="sidebar">
         <div className="brand">
           <img className="brand-logo" src="/logo.png" alt="RODYO" />
-          <span>Balaclava store operations</span>
+          <span>Balaclava Brands</span>
         </div>
         <nav className="nav" aria-label="Main navigation">
           <button
