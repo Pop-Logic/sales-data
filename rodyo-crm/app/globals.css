@@ -325,7 +325,7 @@ textarea {
 
 .trip-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.44fr);
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 420px);
   gap: 14px;
   align-items: start;
 }
@@ -356,7 +356,7 @@ textarea {
 }
 
 .trip-map-body {
-  min-height: clamp(560px, calc(100vh - 238px), 820px);
+  min-height: clamp(620px, calc(100vh - 238px), 860px);
   position: relative;
 }
 
@@ -418,6 +418,11 @@ textarea {
 }
 
 .trip-planner-panel {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
   overflow: hidden;
 }
 
@@ -427,6 +432,10 @@ textarea {
 }
 
 .trip-section:last-child {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
   border-bottom: 0;
 }
 
@@ -485,7 +494,8 @@ textarea {
 }
 
 .trip-candidate-list {
-  max-height: 360px;
+  flex: 1;
+  min-height: 180px;
   overflow: auto;
 }
 

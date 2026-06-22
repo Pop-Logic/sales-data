@@ -42,6 +42,8 @@ export type StoreRollup = {
   kSavageLatestMonthRevenue: number;
   mayfieldLatestMonthRevenue: number;
   leisureLandLatestMonthRevenue: number;
+  kSavageLastActiveRevenue: number;
+  kSavageMonthlyRunRate: number;
   marketSalesLastMonth: number;
   orders: number;
   brandRevenue: number;

@@ -1,5 +1,5 @@
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { TERRITORY_BRANDS, type StoreRollup } from "@/lib/rules";
+import { TERRITORY_BRANDS, priorityFromScore, type StoreRollup } from "@/lib/rules";
 
 type TerritoryBrand = (typeof TERRITORY_BRANDS)[number];
 
@@ -46,6 +46,8 @@ const demoStores: StoreRollup[] = [
     kSavageLatestMonthRevenue: 14620,
     mayfieldLatestMonthRevenue: 0,
     leisureLandLatestMonthRevenue: 0,
+    kSavageLastActiveRevenue: 14620,
+    kSavageMonthlyRunRate: 14620,
     marketSalesLastMonth: 93000,
     orders: 8,
     brandRevenue: 18600,
@@ -94,6 +96,8 @@ const demoStores: StoreRollup[] = [
     kSavageLatestMonthRevenue: 0,
     mayfieldLatestMonthRevenue: 2100,
     leisureLandLatestMonthRevenue: 0,
+    kSavageLastActiveRevenue: 6200,
+    kSavageMonthlyRunRate: 5200,
     marketSalesLastMonth: 122000,
     orders: 4,
     brandRevenue: 7800,
@@ -142,6 +146,8 @@ const demoStores: StoreRollup[] = [
     kSavageLatestMonthRevenue: 0,
     mayfieldLatestMonthRevenue: 0,
     leisureLandLatestMonthRevenue: 0,
+    kSavageLastActiveRevenue: 0,
+    kSavageMonthlyRunRate: 0,
     marketSalesLastMonth: 151000,
     orders: 0,
     brandRevenue: 0,
@@ -182,11 +188,67 @@ function summarize(stores: StoreRollup[]) {
   };
 }
 
+function hasCoordinates(store: StoreRollup) {
+  return Number.isFinite(store.latitude) && Number.isFinite(store.longitude);
+}
+
+function storePriorityKey(store: StoreRollup) {
+  return store.storeId || store.licenseKey || store.license;
+}
+
+function isKSavageLapsed(store: StoreRollup) {
+  return (
+    (store.revenueTotal > 0 || store.kSavageHistoricalRevenue > 0)
+    && store.kSavageActiveRevenue <= 0
+  );
+}
+
+function lapsedPriorityValue(store: StoreRollup) {
+  return Math.max(
+    store.kSavageMonthlyRunRate || 0,
+    store.kSavageLastActiveRevenue || 0,
+    store.kSavageHistoricalRevenue || 0,
+    store.latestMonthRevenue || 0
+  );
+}
+
+function priorityLevelsFor(stores: StoreRollup[], valueFor: (store: StoreRollup) => number) {
+  const sortedStores = [...stores].sort((left, right) => valueFor(left) - valueFor(right));
+  const levels = new Map<string, ReturnType<typeof priorityFromScore>>();
+
+  sortedStores.forEach((store, index) => {
+    const score = sortedStores.length === 1 ? 1 : index / (sortedStores.length - 1);
+    levels.set(storePriorityKey(store), priorityFromScore(score));
+  });
+
+  return levels;
+}
+
+function normalizeStoreClassifications(stores: StoreRollup[]) {
+  const lapsedStores = stores.filter((store) => hasCoordinates(store) && isKSavageLapsed(store));
+  const lapsedLevels = priorityLevelsFor(lapsedStores, lapsedPriorityValue);
+
+  return stores.map((store) => {
+    const lapsedLevel = lapsedLevels.get(storePriorityKey(store));
+    if (!lapsedLevel) {
+      return store;
+    }
+
+    return {
+      ...store,
+      recommendation: "K Savage Lapsed",
+      priorityLevel: lapsedLevel,
+      mapCategory: `K Savage Lapsed - ${lapsedLevel} Priority`
+    };
+  });
+}
+
 function demoSnapshot(): DashboardSnapshot {
+  const stores = normalizeStoreClassifications(demoStores);
   return {
     source: "demo",
-    stores: demoStores,
-    metrics: summarize(demoStores)
+    stores,
+    metrics: summarize(stores)
   };
 }
 
@@ -415,6 +477,8 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     kSavageLatestMonthRevenue: latestBrandMonth.kSavageLatestMonthRevenue,
     mayfieldLatestMonthRevenue: latestBrandMonth.mayfieldLatestMonthRevenue,
     leisureLandLatestMonthRevenue: latestBrandMonth.leisureLandLatestMonthRevenue,
+    kSavageLastActiveRevenue: Number(row.k_savage_last_active_revenue ?? 0),
+    kSavageMonthlyRunRate: Number(row.k_savage_monthly_run_rate ?? 0),
     marketSalesLastMonth: Number(row.market_sales_last_month ?? 0),
     orders: Number(row.orders ?? 0),
     brandRevenue: Number(row.brand_revenue ?? 0),
@@ -443,9 +507,11 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     };
   });
 
+  const normalizedStores = normalizeStoreClassifications(stores);
+
   return {
     source: "supabase",
-    stores,
-    metrics: summarize(stores)
+    stores: normalizedStores,
+    metrics: summarize(normalizedStores)
   };
 }

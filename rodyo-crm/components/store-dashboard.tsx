@@ -292,7 +292,7 @@ function matchesPriorityFilter(store: StoreRollup, priority: PriorityFilter) {
 
 function matchesBrandFilter(store: StoreRollup, brand: BrandFilter) {
   if (brand === "K. Savage") {
-    return store.kSavageActiveRevenue > 0 || store.latestMonthRevenue > 0;
+    return store.kSavageActiveRevenue > 0;
   }
   if (brand === "Mayfield") {
     return store.mayfieldActiveRevenue > 0;
