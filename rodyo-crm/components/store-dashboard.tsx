@@ -627,27 +627,6 @@ function StoreDetailSummary({ store }: { store: StoreRollup }) {
   );
 }
 
-function StoreDetailHero({ store }: { store: StoreRollup }) {
-  const location = [store.city, store.state, store.zip].filter(Boolean).join(", ");
-
-  return (
-    <div className="detail-hero">
-      <div className="detail-hero-grid">
-        <span>License</span>
-        <strong>{store.license || "-"}</strong>
-        <span>Rep</span>
-        <strong>{store.territoryRep || "-"}</strong>
-        <span>Location</span>
-        <strong>{location || "-"}</strong>
-        <span>Balaclava</span>
-        <strong>{formatUsd(store.latestMonthRevenue)}</strong>
-        <span>Market</span>
-        <strong>{formatUsd(store.marketSalesLastMonth)}</strong>
-      </div>
-    </div>
-  );
-}
-
 function BuyerEditor({
   store,
   onSaved
@@ -1298,18 +1277,8 @@ function StoreDetailDrawer({
       <div className="detail-title">
         <h3>
           <span>{selectedStore?.storeName ?? "Select a store"}</span>
-          {selectedStore ? (
-            <small>
-              {selectedStore.license || "-"} · Balaclava{" "}
-              {formatUsd(selectedStore.latestMonthRevenue)} · Market{" "}
-              {formatUsd(selectedStore.marketSalesLastMonth)}
-            </small>
-          ) : null}
         </h3>
-        <span className="caption">
-          {selectedStore ? `${selectedStore.license} · ${selectedStore.city ?? ""}` : "Store detail drawer"}
-        </span>
-        {selectedStore ? <StoreDetailHero store={selectedStore} /> : null}
+        {!selectedStore ? <span className="caption">Store detail drawer</span> : null}
       </div>
       {selectedStore ? <StoreDetailSummary store={selectedStore} /> : null}
       {selectedStore ? (

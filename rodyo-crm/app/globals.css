@@ -764,46 +764,8 @@ textarea {
   min-width: 0;
 }
 
-.detail-title h3 span,
-.detail-title h3 small {
+.detail-title h3 span {
   min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.detail-title h3 small {
-  display: block;
-  color: var(--muted);
-  font-size: 0.78rem;
-  font-weight: 700;
-  line-height: 1.35;
-  margin-top: 4px;
-}
-
-.detail-hero {
-  display: grid;
-  gap: 8px;
-  margin-top: 4px;
-  color: var(--text);
-}
-
-.detail-hero-grid {
-  display: grid;
-  grid-template-columns: minmax(76px, 0.7fr) minmax(0, 1.3fr);
-  gap: 6px 10px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-2);
-}
-
-.detail-hero-grid span {
-  color: var(--muted);
-  font-size: 0.77rem;
-}
-
-.detail-hero-grid strong {
-  min-width: 0;
-  font-size: 0.84rem;
   overflow-wrap: anywhere;
 }
 

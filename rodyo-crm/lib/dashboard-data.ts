@@ -276,6 +276,11 @@ type SampleDropSummary = {
   latestSampleProduct?: string | null;
 };
 
+type LatestRevenueSummary = {
+  latestMonth?: string | null;
+  latestMonthRevenue: number;
+};
+
 function emptyLatestMonthBrandSummary(month?: string | null): LatestMonthBrandSummary {
   return {
     latestBrandMonth: month ?? null,
@@ -352,6 +357,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
   const logByStore = new Map<string, ContactLogSummary>();
   const sampleByStore = new Map<string, SampleDropSummary>();
   const latestMonthBrandByStore = new Map<string, LatestMonthBrandSummary>();
+  const latestRevenueByStore = new Map<string, LatestRevenueSummary>();
 
   const { data: contactData } = await supabase
     .from("store_contacts")
@@ -409,6 +415,21 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     sampleByStore.set(key, current);
   });
 
+  const { data: monthlyProfileData } = await supabase
+    .from("store_monthly_profile")
+    .select("store_id, latest_month, latest_month_revenue");
+
+  (monthlyProfileData || []).forEach((row) => {
+    const key = String(row.store_id || "");
+    if (!storeKeys.has(key)) {
+      return;
+    }
+    latestRevenueByStore.set(key, {
+      latestMonth: row.latest_month,
+      latestMonthRevenue: Number(row.latest_month_revenue ?? 0)
+    });
+  });
+
   const { data: orderData } = await supabase
     .from("orders")
     .select("store_id, submitted_at, order_items(brand, line_total)")
@@ -456,6 +477,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     const contact = firstFromStoreMap(contactByStore, row);
     const log = firstFromStoreMap(logByStore, row);
     const sample = firstFromStoreMap(sampleByStore, row);
+    const latestRevenue = firstFromStoreMap(latestRevenueByStore, row);
     const latestBrandMonth = firstFromStoreMap(latestMonthBrandByStore, row)
       || emptyLatestMonthBrandSummary();
     return {
@@ -474,8 +496,8 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     recommendation: String(row.recommendation ?? ""),
     priorityLevel: row.priority_level,
     revenueTotal: Number(row.revenue_total ?? 0),
-    latestMonth: row.latest_month,
-    latestMonthRevenue: Number(row.latest_month_revenue ?? 0),
+    latestMonth: row.latest_month ?? latestRevenue?.latestMonth ?? null,
+    latestMonthRevenue: Number(row.latest_month_revenue ?? latestRevenue?.latestMonthRevenue ?? 0),
     latestBrandMonth: latestBrandMonth.latestBrandMonth ?? null,
     latestMonthBrandRevenue: latestBrandMonth.latestMonthBrandRevenue,
     kSavageLatestMonthRevenue: latestBrandMonth.kSavageLatestMonthRevenue,
