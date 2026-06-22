@@ -374,6 +374,18 @@ textarea {
   position: relative;
 }
 
+.map-side-rail {
+  position: sticky;
+  top: 16px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
 .store-map {
   position: relative;
   min-height: inherit;
@@ -438,6 +450,18 @@ textarea {
   flex-direction: column;
   max-height: calc(100vh - 32px);
   overflow: hidden;
+}
+
+.map-side-rail .trip-planner-panel {
+  position: static;
+  max-height: none;
+  overflow: visible;
+}
+
+.map-side-rail .trip-stop-list,
+.map-side-rail .trip-candidate-list {
+  max-height: 260px;
+  overflow: auto;
 }
 
 .trip-section {
@@ -769,6 +793,16 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.detail-actions > * {
+  flex: 1 1 auto;
+}
+
 .detail-summary {
   display: block;
 }
@@ -920,5 +954,12 @@ textarea {
   .content-grid,
   .trip-layout {
     grid-template-columns: 1fr;
+  }
+
+  .map-side-rail {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
   }
 }
