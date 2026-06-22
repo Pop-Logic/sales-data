@@ -95,7 +95,7 @@ const BRAND_DOT_COLORS: Record<BrandFilter, string> = {
   "Leisure Land": TERRITORY_MAP_COLORS["Leisure Land Placed"]
 };
 
-const TRIP_ORIGIN = {
+const DEFAULT_ROUTE_START = {
   label: "Tacoma, WA",
   latitude: 47.2529,
   longitude: -122.4443
@@ -107,6 +107,17 @@ const ROUTE_LINE_LAYER_ID = "trip-route-line";
 type Coordinates = {
   latitude: number;
   longitude: number;
+};
+type RouteStart = Coordinates & {
+  label: string;
+};
+type RouteSuggestion = {
+  store: StoreRollup;
+  alongRouteMiles: number;
+  offRouteMiles: number;
+};
+type RouteGeometryResponse = {
+  coordinates?: [number, number][];
 };
 
 function FilterLabel({ active, children }: { active: boolean; children: ReactNode }) {
@@ -169,10 +180,10 @@ function milesBetween(
   return earthRadiusMiles * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
 }
 
-function optimizeTripStores(stores: StoreRollup[]) {
+function optimizeTripStores(stores: StoreRollup[], startLocation: Coordinates = DEFAULT_ROUTE_START) {
   const remaining = stores.filter(hasStoreCoordinates);
   const ordered: StoreRollup[] = [];
-  let currentLocation: Coordinates = TRIP_ORIGIN;
+  let currentLocation: Coordinates = startLocation;
 
   while (remaining.length) {
     let closestIndex = 0;
@@ -193,9 +204,9 @@ function optimizeTripStores(stores: StoreRollup[]) {
   return ordered;
 }
 
-function estimatedTripMiles(stores: StoreRollup[]) {
+function estimatedTripMiles(stores: StoreRollup[], startLocation: Coordinates = DEFAULT_ROUTE_START) {
   let totalMiles = 0;
-  let currentLocation: Coordinates = TRIP_ORIGIN;
+  let currentLocation: Coordinates = startLocation;
   stores.forEach((store) => {
     const nextLocation = storeCoordinates(store);
     totalMiles += milesBetween(currentLocation, nextLocation);
@@ -208,7 +219,11 @@ function mapsCoordinate(store: StoreRollup) {
   return `${Number(store.latitude)},${Number(store.longitude)}`;
 }
 
-function googleMapsRouteUrl(stores: StoreRollup[]) {
+function coordinateParam(coordinates: Coordinates) {
+  return `${coordinates.latitude},${coordinates.longitude}`;
+}
+
+function googleMapsRouteUrl(stores: StoreRollup[], startLocation: RouteStart = DEFAULT_ROUTE_START) {
   const routeStores = stores.slice(0, GOOGLE_MAPS_ROUTE_STOP_LIMIT);
   if (!routeStores.length) {
     return "";
@@ -218,7 +233,7 @@ function googleMapsRouteUrl(stores: StoreRollup[]) {
   const waypointStores = routeStores.slice(0, -1);
   const params = new URLSearchParams({
     api: "1",
-    origin: TRIP_ORIGIN.label,
+    origin: coordinateParam(startLocation),
     destination: mapsCoordinate(destination),
     travelmode: "driving"
   });
@@ -228,13 +243,18 @@ function googleMapsRouteUrl(stores: StoreRollup[]) {
   return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
-function routeLineData(stores: StoreRollup[]) {
-  const coordinates = [
-    [TRIP_ORIGIN.longitude, TRIP_ORIGIN.latitude],
+function routeLineData(
+  stores: StoreRollup[],
+  startLocation: Coordinates = DEFAULT_ROUTE_START,
+  roadCoordinates?: [number, number][] | null
+) {
+  const straightCoordinates = [
+    [startLocation.longitude, startLocation.latitude],
     ...stores
       .filter(hasStoreCoordinates)
       .map((store) => [Number(store.longitude), Number(store.latitude)])
   ];
+  const coordinates = roadCoordinates && roadCoordinates.length > 1 ? roadCoordinates : straightCoordinates;
 
   return {
     type: "FeatureCollection" as const,
@@ -251,6 +271,168 @@ function routeLineData(stores: StoreRollup[]) {
       ]
       : []
   };
+}
+
+async function fetchRoadRouteCoordinates(
+  origin: Coordinates,
+  stops: Coordinates[],
+  signal?: AbortSignal
+) {
+  if (!stops.length) {
+    return null;
+  }
+
+  const response = await fetch("/api/route-line", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ origin, stops }),
+    signal
+  });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const result = (await response.json()) as RouteGeometryResponse;
+  const coordinates = Array.isArray(result.coordinates)
+    ? result.coordinates.filter((coordinate) => (
+      Array.isArray(coordinate)
+      && coordinate.length === 2
+      && coordinate.every((value) => Number.isFinite(value))
+    ))
+    : [];
+
+  return coordinates.length > 1 ? coordinates : null;
+}
+
+function routeProjection(start: Coordinates, destination: Coordinates, point: Coordinates) {
+  const averageLatitude = ((start.latitude + destination.latitude + point.latitude) / 3) * (Math.PI / 180);
+  const milesPerLatitudeDegree = 69;
+  const milesPerLongitudeDegree = Math.cos(averageLatitude) * 69.172;
+  const destinationX = (destination.longitude - start.longitude) * milesPerLongitudeDegree;
+  const destinationY = (destination.latitude - start.latitude) * milesPerLatitudeDegree;
+  const pointX = (point.longitude - start.longitude) * milesPerLongitudeDegree;
+  const pointY = (point.latitude - start.latitude) * milesPerLatitudeDegree;
+  const routeLengthSquared = destinationX ** 2 + destinationY ** 2;
+
+  if (!routeLengthSquared) {
+    return {
+      alongRouteMiles: 0,
+      offRouteMiles: milesBetween(start, point),
+      progress: 0
+    };
+  }
+
+  const progress = ((pointX * destinationX) + (pointY * destinationY)) / routeLengthSquared;
+  const clampedProgress = Math.max(0, Math.min(1, progress));
+  const projectedX = destinationX * clampedProgress;
+  const projectedY = destinationY * clampedProgress;
+  const routeLength = Math.sqrt(routeLengthSquared);
+
+  return {
+    alongRouteMiles: routeLength * clampedProgress,
+    offRouteMiles: Math.sqrt((pointX - projectedX) ** 2 + (pointY - projectedY) ** 2),
+    progress
+  };
+}
+
+function coordinatePairToPoint([longitude, latitude]: [number, number]): Coordinates {
+  return { latitude, longitude };
+}
+
+function routePolylineProjection(routeCoordinates: [number, number][], point: Coordinates) {
+  if (routeCoordinates.length < 2) {
+    return null;
+  }
+
+  let bestProjection = {
+    alongRouteMiles: 0,
+    offRouteMiles: Number.POSITIVE_INFINITY,
+    progress: 0
+  };
+  let completedMiles = 0;
+  let totalMiles = 0;
+
+  for (let index = 0; index < routeCoordinates.length - 1; index += 1) {
+    const start = coordinatePairToPoint(routeCoordinates[index]);
+    const end = coordinatePairToPoint(routeCoordinates[index + 1]);
+    const segmentMiles = milesBetween(start, end);
+    const projection = routeProjection(start, end, point);
+    const alongSegmentMiles = Math.max(0, Math.min(segmentMiles, projection.alongRouteMiles));
+
+    if (projection.offRouteMiles < bestProjection.offRouteMiles) {
+      bestProjection = {
+        alongRouteMiles: completedMiles + alongSegmentMiles,
+        offRouteMiles: projection.offRouteMiles,
+        progress: 0
+      };
+    }
+
+    completedMiles += segmentMiles;
+    totalMiles += segmentMiles;
+  }
+
+  return {
+    ...bestProjection,
+    progress: totalMiles ? bestProjection.alongRouteMiles / totalMiles : 0
+  };
+}
+
+function suggestedRouteStops({
+  stores,
+  currentRouteStores,
+  destinationStore,
+  maxOffRouteMiles,
+  maxStops,
+  startLocation,
+  routeCoordinates
+}: {
+  stores: StoreRollup[];
+  currentRouteStores: StoreRollup[];
+  destinationStore?: StoreRollup;
+  maxOffRouteMiles: number;
+  maxStops: number;
+  startLocation: Coordinates;
+  routeCoordinates?: [number, number][] | null;
+}): RouteSuggestion[] {
+  if (!destinationStore || !hasStoreCoordinates(destinationStore) || maxStops <= 0) {
+    return [];
+  }
+
+  const routeKeys = new Set(currentRouteStores.map(storeKey));
+  const destination = storeCoordinates(destinationStore);
+  const rankedSuggestions = stores
+    .filter((store) => hasStoreCoordinates(store) && !routeKeys.has(storeKey(store)))
+    .map((store) => {
+      const point = storeCoordinates(store);
+      const projection = routeCoordinates && routeCoordinates.length > 1
+        ? routePolylineProjection(routeCoordinates, point) || routeProjection(startLocation, destination, point)
+        : routeProjection(startLocation, destination, point);
+      return {
+        store,
+        alongRouteMiles: projection.alongRouteMiles,
+        offRouteMiles: projection.offRouteMiles,
+        progress: projection.progress
+      };
+    })
+    .filter((suggestion) => (
+      suggestion.progress >= 0
+      && suggestion.progress <= 1
+      && suggestion.offRouteMiles <= maxOffRouteMiles
+    ))
+    .sort((left, right) => (
+      prioritySortValue(right.store) - prioritySortValue(left.store)
+      || right.store.marketSalesLastMonth - left.store.marketSalesLastMonth
+      || left.offRouteMiles - right.offRouteMiles
+      || left.alongRouteMiles - right.alongRouteMiles
+    ))
+    .slice(0, maxStops);
+
+  return rankedSuggestions
+    .sort((left, right) => left.alongRouteMiles - right.alongRouteMiles)
+    .map(({ store, alongRouteMiles, offRouteMiles }) => ({ store, alongRouteMiles, offRouteMiles }));
 }
 
 function textSortValue(value?: string | null) {
@@ -926,11 +1108,13 @@ function createPopupContent(store: StoreRollup) {
 
 function StoreMap({
   stores,
+  routeStart = DEFAULT_ROUTE_START,
   routeStores = [],
   selectedStore,
   onSelect
 }: {
   stores: StoreRollup[];
+  routeStart?: RouteStart;
   routeStores?: StoreRollup[];
   selectedStore?: StoreRollup;
   onSelect: (storeKeyValue: string) => void;
@@ -940,8 +1124,12 @@ function StoreMap({
   const maplibreRef = useRef<MapLibreModule | null>(null);
   const markersRef = useRef<Map<string, { marker: MapLibreMarker; element: HTMLButtonElement }>>(new Map());
   const [isMapReady, setIsMapReady] = useState(false);
+  const [roadRouteCoordinates, setRoadRouteCoordinates] = useState<[number, number][] | null>(null);
   const mappedStores = useMemo(() => stores.filter(hasStoreCoordinates), [stores]);
-  const routeData = useMemo(() => routeLineData(routeStores), [routeStores]);
+  const routeData = useMemo(
+    () => routeLineData(routeStores, routeStart, roadRouteCoordinates),
+    [roadRouteCoordinates, routeStart, routeStores]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -1000,6 +1188,35 @@ function StoreMap({
       setIsMapReady(false);
     };
   }, []);
+
+  useEffect(() => {
+    const routeStops = routeStores.filter(hasStoreCoordinates);
+    if (!routeStops.length) {
+      setRoadRouteCoordinates(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    setRoadRouteCoordinates(null);
+
+    async function fetchRoadRoute() {
+      try {
+        setRoadRouteCoordinates(await fetchRoadRouteCoordinates(
+          routeStart,
+          routeStops.map(storeCoordinates),
+          controller.signal
+        ));
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setRoadRouteCoordinates(null);
+        }
+      }
+    }
+
+    fetchRoadRoute();
+
+    return () => controller.abort();
+  }, [routeStart.latitude, routeStart.longitude, routeStores]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1123,11 +1340,13 @@ function TripPlanner({
   selectedStore,
   activeTab,
   setActiveTab,
+  routeDestinationKey,
   tripStoreKeys,
-  onAddStore,
-  onAddStores,
+  onAddWaypoint,
+  onAddWaypoints,
   onRemoveStore,
   onClearTrip,
+  onSetDestination,
   onSelectStore,
   onBuyerSaved,
   onContactLogSaved
@@ -1136,15 +1355,21 @@ function TripPlanner({
   selectedStore?: StoreRollup;
   activeTab: DetailTab;
   setActiveTab: (tab: DetailTab) => void;
+  routeDestinationKey: string;
   tripStoreKeys: string[];
-  onAddStore: (key: string) => void;
-  onAddStores: (keys: string[]) => void;
+  onAddWaypoint: (key: string) => void;
+  onAddWaypoints: (keys: string[]) => void;
   onRemoveStore: (key: string) => void;
   onClearTrip: () => void;
+  onSetDestination: (key: string) => void;
   onSelectStore: (key: string) => void;
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
 }) {
+  const [routeStart, setRouteStart] = useState<RouteStart>(DEFAULT_ROUTE_START);
+  const [maxOffRouteMiles, setMaxOffRouteMiles] = useState(5);
+  const [maxSuggestedStops, setMaxSuggestedStops] = useState(6);
+  const [destinationRouteCoordinates, setDestinationRouteCoordinates] = useState<[number, number][] | null>(null);
   const mappedStores = useMemo(() => stores.filter(hasStoreCoordinates), [stores]);
   const mappedStoreByKey = useMemo(() => {
     const byKey = new Map<string, StoreRollup>();
@@ -1152,18 +1377,48 @@ function TripPlanner({
     return byKey;
   }, [mappedStores]);
   const selectedKeys = useMemo(() => new Set(tripStoreKeys), [tripStoreKeys]);
+  const destinationStore = routeDestinationKey ? mappedStoreByKey.get(routeDestinationKey) : undefined;
   const tripStores = useMemo(() => (
     tripStoreKeys
       .map((key) => mappedStoreByKey.get(key))
       .filter((store): store is StoreRollup => Boolean(store))
   ), [mappedStoreByKey, tripStoreKeys]);
-  const orderedTripStores = useMemo(() => optimizeTripStores(tripStores), [tripStores]);
+  const waypointStores = useMemo(() => (
+    tripStoreKeys
+      .filter((key) => key !== routeDestinationKey)
+      .map((key) => mappedStoreByKey.get(key))
+      .filter((store): store is StoreRollup => Boolean(store))
+  ), [mappedStoreByKey, routeDestinationKey, tripStoreKeys]);
+  const orderedTripStores = useMemo(() => {
+    const orderedWaypoints = optimizeTripStores(waypointStores, routeStart);
+    if (destinationStore) {
+      return [...orderedWaypoints, destinationStore];
+    }
+    return optimizeTripStores(tripStores, routeStart);
+  }, [destinationStore, routeStart, tripStores, waypointStores]);
   const unselectedCandidateStores = useMemo(() => (
     mappedStores.filter((store) => !selectedKeys.has(storeKey(store)))
   ), [mappedStores, selectedKeys]);
   const candidateStores = useMemo(() => unselectedCandidateStores.slice(0, 80), [unselectedCandidateStores]);
-  const estimatedMiles = estimatedTripMiles(orderedTripStores);
-  const routeUrl = googleMapsRouteUrl(orderedTripStores);
+  const routeSuggestions = useMemo(() => suggestedRouteStops({
+    stores: mappedStores,
+    currentRouteStores: orderedTripStores,
+    destinationStore,
+    maxOffRouteMiles,
+    maxStops: maxSuggestedStops,
+    startLocation: routeStart,
+    routeCoordinates: destinationRouteCoordinates
+  }), [
+    destinationRouteCoordinates,
+    destinationStore,
+    mappedStores,
+    maxOffRouteMiles,
+    maxSuggestedStops,
+    orderedTripStores,
+    routeStart
+  ]);
+  const estimatedMiles = estimatedTripMiles(orderedTripStores, routeStart);
+  const routeUrl = googleMapsRouteUrl(orderedTripStores, routeStart);
   const launchStopCount = Math.min(orderedTripStores.length, GOOGLE_MAPS_ROUTE_STOP_LIMIT);
   const tripBalaclava = orderedTripStores.reduce((total, store) => total + store.latestMonthRevenue, 0);
   const tripMarket = orderedTripStores.reduce((total, store) => total + store.marketSalesLastMonth, 0);
@@ -1172,6 +1427,46 @@ function TripPlanner({
     selectedStore && hasStoreCoordinates(selectedStore) && !selectedKeys.has(selectedStoreKey)
   );
   const isSelectedStoreInRoute = Boolean(selectedStoreKey && selectedKeys.has(selectedStoreKey));
+
+  function updateRouteStartLabel(label: string) {
+    setRouteStart((currentStart) => ({ ...currentStart, label }));
+  }
+
+  function updateRouteStartCoordinate(key: "latitude" | "longitude", value: number) {
+    if (!Number.isFinite(value)) {
+      return;
+    }
+    setRouteStart((currentStart) => ({ ...currentStart, [key]: value }));
+  }
+
+  useEffect(() => {
+    if (!destinationStore || !hasStoreCoordinates(destinationStore)) {
+      setDestinationRouteCoordinates(null);
+      return;
+    }
+
+    const destination = destinationStore;
+    const controller = new AbortController();
+    setDestinationRouteCoordinates(null);
+
+    async function fetchDestinationRoute() {
+      try {
+        setDestinationRouteCoordinates(await fetchRoadRouteCoordinates(
+          routeStart,
+          [storeCoordinates(destination)],
+          controller.signal
+        ));
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setDestinationRouteCoordinates(null);
+        }
+      }
+    }
+
+    fetchDestinationRoute();
+
+    return () => controller.abort();
+  }, [destinationStore, routeStart.latitude, routeStart.longitude]);
 
   return (
     <section className="trip-layout">
@@ -1185,6 +1480,7 @@ function TripPlanner({
         <div className="trip-map-body">
           <StoreMap
             stores={mappedStores}
+            routeStart={routeStart}
             routeStores={orderedTripStores}
             selectedStore={selectedStore}
             onSelect={onSelectStore}
@@ -1204,7 +1500,7 @@ function TripPlanner({
             isAdded: isSelectedStoreInRoute,
             onAdd: () => {
               if (selectedStoreKey) {
-                onAddStore(selectedStoreKey);
+                onSetDestination(selectedStoreKey);
               }
             }
           } : undefined}
@@ -1213,7 +1509,7 @@ function TripPlanner({
         <aside className="panel trip-planner-panel">
           <div className="panel-header">
             <h3>Trip Planner</h3>
-            <span className="table-meta">{TRIP_ORIGIN.label}</span>
+            <span className="table-meta">{routeStart.label || "Custom start"}</span>
           </div>
 
           <div className="trip-section">
@@ -1235,6 +1531,70 @@ function TripPlanner({
                 <div className="metric-value">{formatUsd(tripMarket)}</div>
               </div>
             </div>
+            <div className="route-settings" aria-label="Route settings">
+              <div className="field">
+                <label>Start location</label>
+                <input
+                  value={routeStart.label}
+                  onChange={(event) => updateRouteStartLabel(event.target.value)}
+                  placeholder="Start label"
+                />
+              </div>
+              <div className="route-setting-grid">
+                <div className="field">
+                  <label>Start latitude</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={routeStart.latitude}
+                    onChange={(event) => updateRouteStartCoordinate("latitude", event.currentTarget.valueAsNumber)}
+                  />
+                </div>
+                <div className="field">
+                  <label>Start longitude</label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={routeStart.longitude}
+                    onChange={(event) => updateRouteStartCoordinate("longitude", event.currentTarget.valueAsNumber)}
+                  />
+                </div>
+              </div>
+              <div className="route-setting-grid">
+                <div className="field">
+                  <label>Off-route miles</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={75}
+                    step={1}
+                    value={maxOffRouteMiles}
+                    onChange={(event) => {
+                      const value = event.currentTarget.valueAsNumber;
+                      if (Number.isFinite(value)) {
+                        setMaxOffRouteMiles(Math.max(1, Math.min(75, value)));
+                      }
+                    }}
+                  />
+                </div>
+                <div className="field">
+                  <label>Suggested stops</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={25}
+                    step={1}
+                    value={maxSuggestedStops}
+                    onChange={(event) => {
+                      const value = event.currentTarget.valueAsNumber;
+                      if (Number.isFinite(value)) {
+                        setMaxSuggestedStops(Math.max(0, Math.min(25, Math.round(value))));
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
             <div className="trip-actions">
               {routeUrl ? (
                 <a className="primary-button" href={routeUrl} rel="noreferrer" target="_blank">
@@ -1247,11 +1607,11 @@ function TripPlanner({
               )}
               <button
                 className="secondary-button"
-                disabled={!candidateStores.length}
-                onClick={() => onAddStores(candidateStores.slice(0, 8).map(storeKey))}
+                disabled={!routeSuggestions.length}
+                onClick={() => onAddWaypoints(routeSuggestions.map((suggestion) => storeKey(suggestion.store)))}
                 type="button"
               >
-                <ListPlus size={15} /> Add Top 8
+                <ListPlus size={15} /> Add Suggested
               </button>
               <button
                 className="secondary-button"
@@ -1276,35 +1636,82 @@ function TripPlanner({
               <span>{orderedTripStores.length.toLocaleString()}</span>
             </div>
             <ol className="trip-stop-list">
-              {orderedTripStores.map((store, index) => (
-                <li
-                  className={selectedStoreKey === storeKey(store) ? "trip-stop-row is-selected" : "trip-stop-row"}
-                  key={storeKey(store)}
-                >
-                  <span className="trip-stop-index">{index + 1}</span>
-                  <button className="trip-store-button" onClick={() => onSelectStore(storeKey(store))} type="button">
-                    <strong>{store.storeName}</strong>
-                    <span className="trip-store-meta">
-                      <BrandPlacementDots store={store} />
-                      <span className="trip-store-subtext">
-                        {store.city || "No city"} · {formatUsd(store.marketSalesLastMonth)} market
-                      </span>
-                    </span>
-                  </button>
-                  <button
-                    aria-label={`Remove ${store.storeName} from trip`}
-                    className="icon-button"
-                    onClick={() => onRemoveStore(storeKey(store))}
-                    type="button"
+              {orderedTripStores.map((store, index) => {
+                const isDestination = Boolean(routeDestinationKey && storeKey(store) === routeDestinationKey);
+                return (
+                  <li
+                    className={selectedStoreKey === storeKey(store) ? "trip-stop-row is-selected" : "trip-stop-row"}
+                    key={storeKey(store)}
                   >
-                    <X size={15} />
-                  </button>
-                </li>
-              ))}
+                    <span className="trip-stop-index">{isDestination ? "D" : index + 1}</span>
+                    <button className="trip-store-button" onClick={() => onSelectStore(storeKey(store))} type="button">
+                      <strong>{store.storeName}</strong>
+                      <span className="trip-store-meta">
+                        <BrandPlacementDots store={store} />
+                        <span className="trip-store-subtext">
+                          {isDestination ? "Destination · " : ""}{store.city || "No city"} ·{" "}
+                          {formatUsd(store.marketSalesLastMonth)} market
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      aria-label={`Remove ${store.storeName} from trip`}
+                      className="icon-button"
+                      onClick={() => onRemoveStore(storeKey(store))}
+                      type="button"
+                    >
+                      <X size={15} />
+                    </button>
+                  </li>
+                );
+              })}
               {!orderedTripStores.length ? (
                 <li className="trip-empty">No stops selected.</li>
               ) : null}
             </ol>
+          </div>
+
+          <div className="trip-section">
+            <div className="trip-section-header">
+              <h4>Suggested Stops</h4>
+              <span>{routeSuggestions.length.toLocaleString()}</span>
+            </div>
+            <div className="trip-candidate-list">
+              {routeSuggestions.map((suggestion) => (
+                <div
+                  className={selectedStoreKey === storeKey(suggestion.store) ? "trip-candidate-row is-selected" : "trip-candidate-row"}
+                  key={storeKey(suggestion.store)}
+                >
+                  <button
+                    className="trip-store-button"
+                    onClick={() => onSelectStore(storeKey(suggestion.store))}
+                    type="button"
+                  >
+                    <strong>{suggestion.store.storeName}</strong>
+                    <span className="trip-store-meta">
+                      <BrandPlacementDots store={suggestion.store} />
+                      <span className="trip-store-subtext">
+                        {suggestion.store.city || "No city"} · {suggestion.offRouteMiles.toFixed(1)} mi off route
+                      </span>
+                    </span>
+                  </button>
+                  <button
+                    aria-label={`Add ${suggestion.store.storeName} as a route stop`}
+                    className="icon-button"
+                    onClick={() => onAddWaypoint(storeKey(suggestion.store))}
+                    type="button"
+                  >
+                    <Plus size={15} />
+                  </button>
+                </div>
+              ))}
+              {!destinationStore ? (
+                <div className="trip-empty">Set a destination to see stops along the way.</div>
+              ) : null}
+              {destinationStore && !routeSuggestions.length ? (
+                <div className="trip-empty">No suggestions inside the current route corridor.</div>
+              ) : null}
+            </div>
           </div>
 
           <div className="trip-section">
@@ -1330,9 +1737,9 @@ function TripPlanner({
                     </span>
                   </button>
                   <button
-                    aria-label={`Add ${store.storeName} to trip`}
+                    aria-label={`Set ${store.storeName} as route destination`}
                     className="icon-button"
-                    onClick={() => onAddStore(storeKey(store))}
+                    onClick={() => onSetDestination(storeKey(store))}
                     type="button"
                   >
                     <Plus size={15} />
@@ -1506,6 +1913,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   const [sortKey, setSortKey] = useState<SortKey>("storeRevenue");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [tripStoreKeys, setTripStoreKeys] = useState<string[]>([]);
+  const [routeDestinationKey, setRouteDestinationKey] = useState("");
   const [selectedStoreKey, setSelectedStoreKey] = useState(() => (
     snapshot.stores[0] ? storeKey(snapshot.stores[0]) : ""
   ));
@@ -1567,6 +1975,12 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     });
   }, [tripEligibleKeySet]);
 
+  useEffect(() => {
+    if (routeDestinationKey && !tripEligibleKeySet.has(routeDestinationKey)) {
+      setRouteDestinationKey("");
+    }
+  }, [routeDestinationKey, tripEligibleKeySet]);
+
   function handleBuyerSaved(storeId: string, buyer: BuyerContactPatch) {
     setStores((currentStores) => currentStores.map((store) => (
       store.storeId === storeId ? { ...store, ...buyer } : store
@@ -1595,13 +2009,20 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
     setSelectedStoreKey(nextStoreKey);
   }, []);
 
-  const handleAddTripStore = useCallback((nextStoreKey: string) => {
+  const handleSetRouteDestination = useCallback((nextStoreKey: string) => {
+    setTripStoreKeys((currentKeys) => (
+      currentKeys.includes(nextStoreKey) ? currentKeys : [...currentKeys, nextStoreKey]
+    ));
+    setRouteDestinationKey(nextStoreKey);
+  }, []);
+
+  const handleAddRouteWaypoint = useCallback((nextStoreKey: string) => {
     setTripStoreKeys((currentKeys) => (
       currentKeys.includes(nextStoreKey) ? currentKeys : [...currentKeys, nextStoreKey]
     ));
   }, []);
 
-  const handleAddTripStores = useCallback((nextStoreKeys: string[]) => {
+  const handleAddRouteWaypoints = useCallback((nextStoreKeys: string[]) => {
     setTripStoreKeys((currentKeys) => {
       const keySet = new Set(currentKeys);
       nextStoreKeys.forEach((key) => keySet.add(key));
@@ -1611,10 +2032,12 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
 
   const handleRemoveTripStore = useCallback((nextStoreKey: string) => {
     setTripStoreKeys((currentKeys) => currentKeys.filter((key) => key !== nextStoreKey));
+    setRouteDestinationKey((currentKey) => (currentKey === nextStoreKey ? "" : currentKey));
   }, []);
 
   const handleClearTrip = useCallback(() => {
     setTripStoreKeys([]);
+    setRouteDestinationKey("");
   }, []);
 
   function updateDraftFilter<K extends keyof StoreFilters>(key: K, value: StoreFilters[K]) {
@@ -1931,11 +2354,13 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             selectedStore={selectedStore}
             activeTab={activeTab}
             setActiveTab={setActiveTab}
+            routeDestinationKey={routeDestinationKey}
             tripStoreKeys={tripStoreKeys}
-            onAddStore={handleAddTripStore}
-            onAddStores={handleAddTripStores}
+            onAddWaypoint={handleAddRouteWaypoint}
+            onAddWaypoints={handleAddRouteWaypoints}
             onRemoveStore={handleRemoveTripStore}
             onClearTrip={handleClearTrip}
+            onSetDestination={handleSetRouteDestination}
             onSelectStore={handleStoreSelect}
             onBuyerSaved={handleBuyerSaved}
             onContactLogSaved={handleContactLogSaved}
