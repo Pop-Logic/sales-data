@@ -1132,6 +1132,8 @@ function StoreMap({
   const [isMapReady, setIsMapReady] = useState(false);
   const [roadRouteCoordinates, setRoadRouteCoordinates] = useState<[number, number][] | null | undefined>(null);
   const mappedStores = useMemo(() => stores.filter(hasStoreCoordinates), [stores]);
+  const selectedStoreKey = selectedStore ? storeKey(selectedStore) : "";
+  const selectedStoreKeyRef = useRef(selectedStoreKey);
   const routeStopCoordinates = useMemo(() => (
     routeStores.filter(hasStoreCoordinates).map(storeCoordinates)
   ), [routeStores]);
@@ -1247,7 +1249,7 @@ function StoreMap({
       const key = storeKey(store);
       const element = document.createElement("button");
       element.type = "button";
-      element.className = `map-marker${selectedStore && key === storeKey(selectedStore) ? " is-selected" : ""}`;
+      element.className = `map-marker${key === selectedStoreKeyRef.current ? " is-selected" : ""}`;
       element.style.background = TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)";
       element.setAttribute("aria-label", `Select ${store.storeName}`);
       element.addEventListener("click", () => onSelect(key));
@@ -1286,7 +1288,7 @@ function StoreMap({
         duration: 500
       });
     }
-  }, [isMapReady, mappedStores, onSelect, selectedStore]);
+  }, [isMapReady, mappedStores, onSelect]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1394,10 +1396,11 @@ function StoreMap({
   }, [isMapReady, onSelect, routeStart, routeStores]);
 
   useEffect(() => {
+    selectedStoreKeyRef.current = selectedStoreKey;
     markersRef.current.forEach(({ element }, key) => {
-      element.classList.toggle("is-selected", Boolean(selectedStore && key === storeKey(selectedStore)));
+      element.classList.toggle("is-selected", key === selectedStoreKey);
     });
-  }, [selectedStore]);
+  }, [selectedStoreKey]);
 
   return (
     <div className="store-map">

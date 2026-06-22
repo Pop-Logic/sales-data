@@ -411,12 +411,14 @@ textarea {
 }
 
 .map-marker {
+  position: relative;
   width: 18px;
   height: 18px;
   border: 2px solid #f7fbfc;
   border-radius: 999px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
   cursor: pointer;
+  z-index: 1;
 }
 
 .map-marker.is-selected {
@@ -428,6 +430,7 @@ textarea {
 
 .route-marker {
   display: grid;
+  position: relative;
   width: 28px;
   height: 28px;
   place-items: center;
@@ -440,6 +443,7 @@ textarea {
   font-size: 0.72rem;
   font-weight: 850;
   padding: 0;
+  z-index: 3;
 }
 
 .route-marker-start {
