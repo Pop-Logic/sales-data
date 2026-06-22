@@ -426,6 +426,34 @@ textarea {
   box-shadow: 0 0 0 4px rgba(55, 138, 221, 0.28), 0 2px 12px rgba(0, 0, 0, 0.45);
 }
 
+.route-marker {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 2px solid #101418;
+  border-radius: 999px;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.42);
+  color: #101418;
+  font-size: 0.72rem;
+  font-weight: 850;
+  pointer-events: none;
+}
+
+.route-marker-start {
+  background: #7dc2ae;
+}
+
+.route-marker-waypoint {
+  background: #f7fbfc;
+  border-color: var(--blue);
+}
+
+.route-marker-end {
+  background: var(--blue);
+  color: white;
+}
+
 .map-popup {
   display: grid;
   gap: 3px;

@@ -246,7 +246,8 @@ function googleMapsRouteUrl(stores: StoreRollup[], startLocation: RouteStart = D
 function routeLineData(
   stores: StoreRollup[],
   startLocation: Coordinates = DEFAULT_ROUTE_START,
-  roadCoordinates?: [number, number][] | null
+  roadCoordinates?: [number, number][] | null,
+  isLoadingRoadRoute = false
 ) {
   const straightCoordinates = [
     [startLocation.longitude, startLocation.latitude],
@@ -254,7 +255,11 @@ function routeLineData(
       .filter(hasStoreCoordinates)
       .map((store) => [Number(store.longitude), Number(store.latitude)])
   ];
-  const coordinates = roadCoordinates && roadCoordinates.length > 1 ? roadCoordinates : straightCoordinates;
+  const coordinates = isLoadingRoadRoute
+    ? []
+    : roadCoordinates && roadCoordinates.length > 1
+      ? roadCoordinates
+      : straightCoordinates;
 
   return {
     type: "FeatureCollection" as const,
@@ -1123,12 +1128,21 @@ function StoreMap({
   const mapRef = useRef<MapLibreMap | null>(null);
   const maplibreRef = useRef<MapLibreModule | null>(null);
   const markersRef = useRef<Map<string, { marker: MapLibreMarker; element: HTMLButtonElement }>>(new Map());
+  const routeMarkersRef = useRef<Map<string, MapLibreMarker>>(new Map());
   const [isMapReady, setIsMapReady] = useState(false);
-  const [roadRouteCoordinates, setRoadRouteCoordinates] = useState<[number, number][] | null>(null);
+  const [roadRouteCoordinates, setRoadRouteCoordinates] = useState<[number, number][] | null | undefined>(null);
   const mappedStores = useMemo(() => stores.filter(hasStoreCoordinates), [stores]);
+  const routeStopCoordinates = useMemo(() => (
+    routeStores.filter(hasStoreCoordinates).map(storeCoordinates)
+  ), [routeStores]);
   const routeData = useMemo(
-    () => routeLineData(routeStores, routeStart, roadRouteCoordinates),
-    [roadRouteCoordinates, routeStart, routeStores]
+    () => routeLineData(
+      routeStores,
+      routeStart,
+      roadRouteCoordinates,
+      routeStopCoordinates.length > 0 && roadRouteCoordinates === undefined
+    ),
+    [roadRouteCoordinates, routeStart, routeStores, routeStopCoordinates.length]
   );
 
   useEffect(() => {
@@ -1182,6 +1196,8 @@ function StoreMap({
       cancelled = true;
       markersRef.current.forEach(({ marker }) => marker.remove());
       markersRef.current.clear();
+      routeMarkersRef.current.forEach((marker) => marker.remove());
+      routeMarkersRef.current.clear();
       mapRef.current?.remove();
       mapRef.current = null;
       maplibreRef.current = null;
@@ -1190,20 +1206,19 @@ function StoreMap({
   }, []);
 
   useEffect(() => {
-    const routeStops = routeStores.filter(hasStoreCoordinates);
-    if (!routeStops.length) {
+    if (!routeStopCoordinates.length) {
       setRoadRouteCoordinates(null);
       return;
     }
 
     const controller = new AbortController();
-    setRoadRouteCoordinates(null);
+    setRoadRouteCoordinates(undefined);
 
     async function fetchRoadRoute() {
       try {
         setRoadRouteCoordinates(await fetchRoadRouteCoordinates(
           routeStart,
-          routeStops.map(storeCoordinates),
+          routeStopCoordinates,
           controller.signal
         ));
       } catch (error) {
@@ -1216,7 +1231,7 @@ function StoreMap({
     fetchRoadRoute();
 
     return () => controller.abort();
-  }, [routeStart.latitude, routeStart.longitude, routeStores]);
+  }, [routeStart, routeStopCoordinates]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1318,6 +1333,59 @@ function StoreMap({
     const source = map.getSource(ROUTE_LINE_SOURCE_ID) as { setData?: (data: typeof routeData) => void } | undefined;
     source?.setData?.(routeData);
   }, [isMapReady, routeData]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const maplibregl = maplibreRef.current;
+    if (!map || !maplibregl || !isMapReady) {
+      return;
+    }
+    const mapInstance = map;
+    const maplibre = maplibregl;
+
+    routeMarkersRef.current.forEach((marker) => marker.remove());
+    routeMarkersRef.current.clear();
+
+    const routeStops = routeStores.filter(hasStoreCoordinates);
+    if (!routeStops.length) {
+      return;
+    }
+
+    function addRouteMarker(
+      key: string,
+      label: string,
+      title: string,
+      coordinates: Coordinates,
+      tone: "start" | "waypoint" | "end"
+    ) {
+      const element = document.createElement("div");
+      element.className = `route-marker route-marker-${tone}`;
+      element.textContent = label;
+      element.title = title;
+      element.setAttribute("aria-label", title);
+
+      const marker = new maplibre.Marker({
+        element,
+        anchor: "center"
+      })
+        .setLngLat([coordinates.longitude, coordinates.latitude])
+        .addTo(mapInstance);
+
+      routeMarkersRef.current.set(key, marker);
+    }
+
+    addRouteMarker("start", "S", `Start: ${routeStart.label || "Custom start"}`, routeStart, "start");
+    routeStops.forEach((store, index) => {
+      const isEnd = index === routeStops.length - 1;
+      addRouteMarker(
+        storeKey(store),
+        isEnd ? "E" : String(index + 1),
+        `${isEnd ? "End" : `Waypoint ${index + 1}`}: ${store.storeName}`,
+        storeCoordinates(store),
+        isEnd ? "end" : "waypoint"
+      );
+    });
+  }, [isMapReady, routeStart, routeStores]);
 
   useEffect(() => {
     markersRef.current.forEach(({ element }, key) => {
