@@ -26,7 +26,7 @@ type StoreDashboardProps = {
 
 type ViewMode = "stores" | "map";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
-type SortKey = "store" | "brand" | "balaclava" | "storeRevenue" | "rep" | "log";
+type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "rep" | "log";
 type SortDirection = "asc" | "desc";
 type BalaclavaSalesFilter = "all" | "1000" | "5000";
 type StoreRevenueFilter = "all" | "300" | "50000" | "100000";
@@ -80,8 +80,9 @@ const detailTabs: { id: DetailTab; label: string }[] = [
 ];
 
 const sortableColumns: { key: SortKey; label: string; width?: string }[] = [
-  { key: "store", label: "Store", width: "34%" },
+  { key: "store", label: "Store", width: "32%" },
   { key: "brand", label: "Brand" },
+  { key: "priority", label: "Priority", width: "8%" },
   { key: "balaclava", label: "Balaclava" },
   { key: "storeRevenue", label: "Store Revenue" },
   { key: "rep", label: "Rep" },
@@ -235,6 +236,9 @@ function sortValueForStore(store: StoreRollup, sortKey: SortKey) {
   if (sortKey === "brand") {
     return brandPlacements(store).join(" ");
   }
+  if (sortKey === "priority") {
+    return prioritySortValue(store);
+  }
   if (sortKey === "balaclava") {
     return store.latestMonthRevenue;
   }
@@ -288,6 +292,47 @@ function matchesPriorityFilter(store: StoreRollup, priority: PriorityFilter) {
     return text.includes("open lane");
   }
   return true;
+}
+
+function priorityRank(store: StoreRollup) {
+  if (!store.mapCategory.includes("Priority")) {
+    return 0;
+  }
+  if (store.priorityLevel === "High") {
+    return 3;
+  }
+  if (store.priorityLevel === "Medium") {
+    return 2;
+  }
+  if (store.priorityLevel === "Low") {
+    return 1;
+  }
+  return 0;
+}
+
+function prioritySortValue(store: StoreRollup) {
+  const laneRank = matchesPriorityFilter(store, "lapsed")
+    ? 2
+    : matchesPriorityFilter(store, "open-lane")
+    ? 1
+    : 0;
+  return laneRank * 10 + priorityRank(store);
+}
+
+function PriorityDot({ store }: { store: StoreRollup }) {
+  const rank = priorityRank(store);
+  if (!rank) {
+    return <span aria-label="No priority status" className="priority-empty" />;
+  }
+
+  return (
+    <span
+      aria-label={`${store.mapCategory}`}
+      className="priority-dot"
+      style={{ background: TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)" }}
+      title={store.mapCategory}
+    />
+  );
 }
 
 function matchesBrandFilter(store: StoreRollup, brand: BrandFilter) {
@@ -1503,7 +1548,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
 
     setSortKey(nextSortKey);
     setSortDirection(
-      nextSortKey === "balaclava" || nextSortKey === "storeRevenue" || nextSortKey === "log" ? "desc" : "asc"
+      nextSortKey === "balaclava" || nextSortKey === "storeRevenue" || nextSortKey === "priority" || nextSortKey === "log" ? "desc" : "asc"
     );
   }
 
@@ -1751,6 +1796,9 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                       <td>
                         <BrandPlacementDots store={store} />
                       </td>
+                      <td className="priority-cell">
+                        <PriorityDot store={store} />
+                      </td>
                       <td>{formatUsd(store.latestMonthRevenue)}</td>
                       <td>{formatUsd(store.marketSalesLastMonth)}</td>
                       <td>{store.territoryRep || "-"}</td>
@@ -1759,7 +1807,7 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
                   ))}
                   {!sortedStores.length ? (
                     <tr>
-                      <td colSpan={6}>No stores match that search.</td>
+                      <td colSpan={7}>No stores match that search.</td>
                     </tr>
                   ) : null}
                 </tbody>

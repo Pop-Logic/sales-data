@@ -658,6 +658,27 @@ textarea {
   margin-top: 2px;
 }
 
+.priority-cell {
+  text-align: center;
+}
+
+.priority-dot,
+.priority-empty {
+  display: inline-block;
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 999px;
+}
+
+.priority-dot {
+  border: 1px solid rgba(247, 251, 252, 0.55);
+  box-shadow: 0 0 0 2px rgba(16, 20, 24, 0.18);
+}
+
+.priority-empty {
+  opacity: 0;
+}
+
 .tag {
   display: inline-flex;
   align-items: center;
