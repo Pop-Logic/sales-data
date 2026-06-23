@@ -1,5 +1,6 @@
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { TERRITORY_BRANDS, priorityFromScore, type StoreRollup } from "@/lib/rules";
+import { createClient } from "@supabase/supabase-js";
+import { TERRITORY_BRANDS, priorityFromScore, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
 
 type TerritoryBrand = (typeof TERRITORY_BRANDS)[number];
 
@@ -14,6 +15,8 @@ type LatestMonthBrandSummary = {
 export type DashboardSnapshot = {
   source: "demo" | "supabase";
   stores: StoreRollup[];
+  orderLines: OrderLine[];
+  salesGoals: SalesGoal[];
   metrics: {
     totalRetailers: number;
     mappedStores: number;
@@ -179,6 +182,57 @@ const demoStores: StoreRollup[] = [
   }
 ];
 
+const demoOrderLines: OrderLine[] = [
+  {
+    orderId: "demo-order-1001",
+    orderItemId: "demo-line-1001-1",
+    orderNumber: "DEMO-1001",
+    storeId: "demo-zips",
+    license: "416999",
+    licenseKey: "416999",
+    storeName: "Zips Cannabis",
+    submittedAt: "2026-06-12T18:30:00Z",
+    status: "Paid",
+    brand: "K. Savage",
+    productName: "Demo K. Savage Flower",
+    subProductLine: "Flower",
+    units: 12,
+    lineTotal: 9600
+  },
+  {
+    orderId: "demo-order-1001",
+    orderItemId: "demo-line-1001-2",
+    orderNumber: "DEMO-1001",
+    storeId: "demo-zips",
+    license: "416999",
+    licenseKey: "416999",
+    storeName: "Zips Cannabis",
+    submittedAt: "2026-06-12T18:30:00Z",
+    status: "Paid",
+    brand: "K. Savage",
+    productName: "Demo K. Savage Pre-Roll",
+    subProductLine: "Pre-roll",
+    units: 24,
+    lineTotal: 5020
+  },
+  {
+    orderId: "demo-order-1002",
+    orderItemId: "demo-line-1002-1",
+    orderNumber: "DEMO-1002",
+    storeId: "demo-kush21",
+    license: "413221",
+    licenseKey: "413221",
+    storeName: "Kush21 Sodo",
+    submittedAt: "2026-05-22T20:15:00Z",
+    status: "Paid",
+    brand: "Mayfield",
+    productName: "Demo Mayfield Cartridge",
+    subProductLine: "Cartridge",
+    units: 10,
+    lineTotal: 2100
+  }
+];
+
 function summarize(stores: StoreRollup[]) {
   return {
     totalRetailers: stores.length,
@@ -251,6 +305,8 @@ function demoSnapshot(): DashboardSnapshot {
   return {
     source: "demo",
     stores,
+    orderLines: demoOrderLines,
+    salesGoals: [],
     metrics: summarize(stores)
   };
 }
@@ -336,12 +392,30 @@ function firstFromStoreMap<T>(map: Map<string, T>, store: { store_id?: string | 
   return undefined;
 }
 
+async function createDashboardDataClient() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (supabaseUrl && supabaseSecretKey) {
+    return createClient(supabaseUrl, supabaseSecretKey, {
+      auth: {
+        persistSession: false
+      }
+    });
+  }
+
+  return createSupabaseServerClient();
+}
+
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
-  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) {
+  if (
+    !process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    (!process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY && !process.env.SUPABASE_SECRET_KEY && !process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ) {
     return demoSnapshot();
   }
 
-  const supabase = await createSupabaseServerClient();
+  const supabase = await createDashboardDataClient();
   const { data, error } = await supabase
     .from("crm_store_rollup")
     .select("*")
@@ -430,14 +504,15 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     });
   });
 
-  const { data: orderData } = await supabase
+  const { data: orderData, error: orderDataError } = await supabase
     .from("orders")
-    .select("store_id, submitted_at, order_items(brand, line_total)")
-    .not("store_id", "is", null)
-    .not("submitted_at", "is", null);
+    .select("id, order_number, store_id, client_name, license, license_key, submitted_at, status, order_items(id, brand, product_name, sub_product_line, units, line_total)")
+    .not("submitted_at", "is", null)
+    .order("submitted_at", { ascending: false });
+  const orderRows = orderDataError ? [] : (orderData || []);
 
-  (orderData || []).forEach((row) => {
-    const key = String(row.store_id || "");
+  (orderRows || []).forEach((row) => {
+    const key = keyFromStore(row);
     const orderMonth = monthKeyFromDate(row.submitted_at);
     if (!storeKeys.has(key) || !orderMonth) {
       return;
@@ -472,6 +547,53 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
       current.latestMonthBrandRevenue += itemContributions.latestMonthBrandRevenue;
     }
   });
+
+  const storesById = new Map(data.map((row) => [String(row.store_id || ""), row]));
+  const storesByLicenseKey = new Map(data.map((row) => [String(row.license_key || ""), row]));
+  const orderLines: OrderLine[] = [];
+
+  (orderRows || []).forEach((row) => {
+    const items = Array.isArray(row.order_items) ? row.order_items : [];
+    const storeRow = storesById.get(String(row.store_id || ""))
+      || storesByLicenseKey.get(String(row.license_key || ""));
+    items.forEach((item) => {
+      orderLines.push({
+        orderId: String(row.id ?? ""),
+        orderItemId: String(item?.id ?? `${row.id || row.order_number}-${orderLines.length}`),
+        orderNumber: String(row.order_number ?? ""),
+        storeId: row.store_id ? String(row.store_id) : null,
+        license: row.license ?? storeRow?.license ?? null,
+        licenseKey: row.license_key ?? storeRow?.license_key ?? null,
+        storeName: String(storeRow?.store_name ?? row.client_name ?? "Unnamed Store"),
+        submittedAt: row.submitted_at,
+        status: row.status,
+        brand: String(item?.brand ?? ""),
+        productName: item?.product_name ?? null,
+        subProductLine: item?.sub_product_line ?? null,
+        units: Number(item?.units ?? 0),
+        lineTotal: Number(item?.line_total ?? 0)
+      });
+    });
+  });
+
+  const { data: salesGoalData, error: salesGoalDataError } = await supabase
+    .from("sales_goals")
+    .select("id, goal_month, goal_type, week_id, week_label, brand, goal_amount, notes, updated_at")
+    .order("goal_month", { ascending: false })
+    .order("goal_type", { ascending: true })
+    .order("week_id", { ascending: true });
+
+  const salesGoals: SalesGoal[] = (salesGoalDataError ? [] : (salesGoalData || [])).map((row) => ({
+    id: String(row.id ?? ""),
+    goalMonth: String(row.goal_month ?? ""),
+    goalType: String(row.goal_type ?? ""),
+    weekId: row.week_id,
+    weekLabel: row.week_label,
+    brand: row.brand,
+    goalAmount: Number(row.goal_amount ?? 0),
+    notes: row.notes,
+    updatedAt: row.updated_at
+  }));
 
   const stores: StoreRollup[] = data.map((row) => {
     const contact = firstFromStoreMap(contactByStore, row);
@@ -540,6 +662,8 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
   return {
     source: "supabase",
     stores: normalizedStores,
+    orderLines,
+    salesGoals,
     metrics: summarize(normalizedStores)
   };
 }

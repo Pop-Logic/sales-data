@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import {
   Check,
   ExternalLink,
@@ -17,14 +18,17 @@ import {
   TERRITORY_BRANDS,
   TERRITORY_MAP_COLORS,
   formatUsd,
+  type OrderLine,
+  type SalesGoal,
   type StoreRollup
 } from "@/lib/rules";
 
 type StoreDashboardProps = {
   snapshot: DashboardSnapshot;
+  initialView?: string | null;
 };
 
-type ViewMode = "stores" | "map";
+type ViewMode = "stores" | "map" | "orders" | "goals" | "sync";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
 type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "rep" | "log";
 type SortDirection = "asc" | "desc";
@@ -61,6 +65,12 @@ type ContactLogPatch = {
   notes: string | null;
   savedAt: string | null;
 };
+
+type SyncState = "idle" | "syncing" | "success" | "error";
+
+function normalizeViewMode(value?: string | null): ViewMode {
+  return value === "map" || value === "orders" || value === "goals" || value === "sync" ? value : "stores";
+}
 
 const defaultStoreFilters: StoreFilters = {
   balaclavaSales: "all",
@@ -152,6 +162,11 @@ function summarizeStores(stores: StoreRollup[]) {
 
 function storeKey(store: StoreRollup) {
   return store.storeId || store.licenseKey || store.license;
+}
+
+function storeIdentityKeys(store: StoreRollup) {
+  return [store.storeId, store.licenseKey, store.license, storeKey(store)]
+    .filter((value): value is string => Boolean(value));
 }
 
 function hasStoreCoordinates(store: StoreRollup) {
@@ -409,6 +424,35 @@ function routePolylineProjection(routeCoordinates: [number, number][], point: Co
   };
 }
 
+function routeCoordinateDistance(routeCoordinates?: [number, number][] | null) {
+  if (!routeCoordinates || routeCoordinates.length < 2) {
+    return 0;
+  }
+
+  return routeCoordinates.reduce((totalMiles, coordinate, index) => {
+    if (index === 0) {
+      return totalMiles;
+    }
+    return totalMiles + milesBetween(
+      coordinatePairToPoint(routeCoordinates[index - 1]),
+      coordinatePairToPoint(coordinate)
+    );
+  }, 0);
+}
+
+function nearbyMappedStoreCount(stores: StoreRollup[], store: StoreRollup, radiusMiles: number) {
+  if (!hasStoreCoordinates(store)) {
+    return 0;
+  }
+
+  const point = storeCoordinates(store);
+  return stores.filter((candidate) => (
+    storeKey(candidate) !== storeKey(store)
+    && hasStoreCoordinates(candidate)
+    && milesBetween(point, storeCoordinates(candidate)) <= radiusMiles
+  )).length;
+}
+
 function suggestedRouteStops({
   stores,
   currentRouteStores,
@@ -432,6 +476,11 @@ function suggestedRouteStops({
 
   const routeKeys = new Set(currentRouteStores.map(storeKey));
   const destination = storeCoordinates(destinationStore);
+  const routeDistanceMiles = routeCoordinateDistance(routeCoordinates) || milesBetween(startLocation, destination);
+  const isLongTrip = routeDistanceMiles >= 55;
+  const minimumAlongRouteMiles = isLongTrip
+    ? Math.min(35, Math.max(12, routeDistanceMiles * 0.16))
+    : 0;
   const rankedSuggestions = stores
     .filter((store) => hasStoreCoordinates(store) && !routeKeys.has(storeKey(store)))
     .map((store) => {
@@ -439,23 +488,34 @@ function suggestedRouteStops({
       const projection = routeCoordinates && routeCoordinates.length > 1
         ? routePolylineProjection(routeCoordinates, point) || routeProjection(startLocation, destination, point)
         : routeProjection(startLocation, destination, point);
+      const localStoreCount = nearbyMappedStoreCount(stores, store, 18);
+      const priorityScore = prioritySortValue(store) * 18;
+      const marketScore = Math.min(30, Math.log10(Math.max(1, store.marketSalesLastMonth)) * 5);
+      const progressScore = isLongTrip ? projection.progress * 32 : projection.progress * 8;
+      const sparseAreaBonus = isLongTrip ? Math.max(0, 12 - localStoreCount * 1.6) : 0;
+      const offRoutePenalty = maxOffRouteMiles > 0 ? (projection.offRouteMiles / maxOffRouteMiles) * 22 : 0;
+      const startBubblePenalty = isLongTrip && projection.alongRouteMiles < minimumAlongRouteMiles ? 80 : 0;
+
       return {
         store,
         alongRouteMiles: projection.alongRouteMiles,
         offRouteMiles: projection.offRouteMiles,
-        progress: projection.progress
+        progress: projection.progress,
+        score: priorityScore + marketScore + progressScore + sparseAreaBonus - offRoutePenalty - startBubblePenalty
       };
     })
     .filter((suggestion) => (
       suggestion.progress >= 0
       && suggestion.progress <= 1
       && suggestion.offRouteMiles <= maxOffRouteMiles
+      && suggestion.alongRouteMiles >= minimumAlongRouteMiles
     ))
     .sort((left, right) => (
-      prioritySortValue(right.store) - prioritySortValue(left.store)
+      right.score - left.score
+      || prioritySortValue(right.store) - prioritySortValue(left.store)
       || right.store.marketSalesLastMonth - left.store.marketSalesLastMonth
       || left.offRouteMiles - right.offRouteMiles
-      || left.alongRouteMiles - right.alongRouteMiles
+      || right.alongRouteMiles - left.alongRouteMiles
     ))
     .slice(0, maxStops);
 
@@ -734,6 +794,399 @@ function formatMonth(value?: string | null) {
     year: "numeric",
     timeZone: "UTC"
   }).format(date);
+}
+
+function dateInputValue(value?: string | null) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function orderTimestamp(value?: string | null) {
+  if (!value) {
+    return 0;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+function orderLineStoreKey(line: OrderLine) {
+  return line.storeId || line.licenseKey || line.license || line.storeName;
+}
+
+function orderLineStoreKeys(line: OrderLine) {
+  return [line.storeId, line.licenseKey, line.license, orderLineStoreKey(line)]
+    .filter((value): value is string => Boolean(value));
+}
+
+function orderLineKey(line: OrderLine) {
+  return `${line.orderNumber || line.orderId}-${line.licenseKey || line.license || line.storeId || line.storeName}`;
+}
+
+function orderStatusValue(line: OrderLine) {
+  return String(line.status || "Unknown").trim() || "Unknown";
+}
+
+function orderBrandValue(line: OrderLine) {
+  return String(line.brand || "Other").trim() || "Other";
+}
+
+function isPaidOrderLine(line: OrderLine) {
+  return line.lineTotal > 0 && orderBrandValue(line).toLowerCase() !== "bulk";
+}
+
+function uniqueOrderCount(lines: OrderLine[]) {
+  return new Set(lines.map(orderLineKey)).size;
+}
+
+function latestOrderDate(lines: OrderLine[]) {
+  const latest = lines.reduce((maxTimestamp, line) => Math.max(maxTimestamp, orderTimestamp(line.submittedAt)), 0);
+  return latest ? new Date(latest).toISOString() : null;
+}
+
+function orderDateBounds(lines: OrderLine[]) {
+  const timestamps = lines
+    .map((line) => orderTimestamp(line.submittedAt))
+    .filter((timestamp) => timestamp > 0);
+
+  if (!timestamps.length) {
+    const today = localDateInputValue();
+    return {
+      min: today,
+      max: today,
+      defaultFrom: today,
+      defaultTo: today
+    };
+  }
+
+  const minDate = new Date(Math.min(...timestamps));
+  const maxDate = new Date(Math.max(...timestamps));
+  const defaultFrom = new Date(maxDate);
+  defaultFrom.setUTCDate(1);
+
+  return {
+    min: dateInputValue(minDate.toISOString()),
+    max: dateInputValue(maxDate.toISOString()),
+    defaultFrom: dateInputValue(defaultFrom.toISOString()),
+    defaultTo: dateInputValue(maxDate.toISOString())
+  };
+}
+
+function lineIsInsideDateRange(line: OrderLine, fromDate: string, toDate: string) {
+  const lineDate = dateInputValue(line.submittedAt);
+  if (!lineDate) {
+    return false;
+  }
+  const start = fromDate <= toDate ? fromDate : toDate;
+  const end = fromDate <= toDate ? toDate : fromDate;
+  return lineDate >= start && lineDate <= end;
+}
+
+type GoalWeek = {
+  id: string;
+  label: string;
+  start: string;
+  end: string;
+};
+
+type GoalDraft = {
+  brandEom: Record<BrandFilter, string>;
+  brandWeeks: Record<string, Record<BrandFilter, string>>;
+  notes: Record<string, string>;
+};
+
+type GoalDailyPoint = {
+  date: string;
+  dailySales: number;
+  actualCumulative: number;
+  eomPace: number;
+  weeklyPace: number;
+  projectedPace: number | null;
+};
+
+function emptyBrandGoalStrings() {
+  return TERRITORY_BRANDS.reduce((values, brand) => ({
+    ...values,
+    [brand]: ""
+  }), {} as Record<BrandFilter, string>);
+}
+
+function emptyBrandGoalNumbers() {
+  return TERRITORY_BRANDS.reduce((values, brand) => ({
+    ...values,
+    [brand]: 0
+  }), {} as Record<BrandFilter, number>);
+}
+
+function cleanGoalNumber(value: unknown) {
+  const parsed = Number(String(value ?? "").replace(/[$,\s]/g, ""));
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function currentMonthKey(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthKeyFromDateValue(value?: string | null) {
+  const dateValue = dateInputValue(value);
+  return dateValue ? dateValue.slice(0, 7) : "";
+}
+
+function monthStartDate(monthKey: string) {
+  return `${monthKey}-01`;
+}
+
+function monthEndDate(monthKey: string) {
+  const [year, month] = monthKey.split("-").map(Number);
+  if (!year || !month) {
+    return monthStartDate(currentMonthKey());
+  }
+  return dateInputValue(new Date(Date.UTC(year, month, 0)).toISOString());
+}
+
+function addUtcDays(dateValue: string, days: number) {
+  const date = new Date(`${dateValue}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return dateInputValue(date.toISOString());
+}
+
+function daysBetweenInclusive(startDate: string, endDate: string) {
+  const start = new Date(`${startDate}T00:00:00Z`).getTime();
+  const end = new Date(`${endDate}T00:00:00Z`).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    return 0;
+  }
+  return Math.floor((end - start) / 86400000) + 1;
+}
+
+function enumerateDates(startDate: string, endDate: string) {
+  const days = daysBetweenInclusive(startDate, endDate);
+  return Array.from({ length: days }, (_, index) => addUtcDays(startDate, index));
+}
+
+function shortDateLabel(dateValue: string) {
+  const date = new Date(`${dateValue}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    return dateValue;
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC"
+  }).format(date);
+}
+
+function monthLabel(monthKey: string) {
+  const date = new Date(`${monthKey}-01T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    return monthKey;
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC"
+  }).format(date);
+}
+
+function goalMonthOptions(orderLines: OrderLine[], salesGoals: SalesGoal[]) {
+  const months = new Set<string>([currentMonthKey()]);
+  orderLines.forEach((line) => {
+    const month = monthKeyFromDateValue(line.submittedAt);
+    if (month) {
+      months.add(month);
+    }
+  });
+  salesGoals.forEach((goal) => {
+    const month = monthKeyFromDateValue(goal.goalMonth);
+    if (month) {
+      months.add(month);
+    }
+  });
+  return [...months].sort((left, right) => right.localeCompare(left));
+}
+
+function monthWeeks(monthKey: string): GoalWeek[] {
+  const start = monthStartDate(monthKey);
+  const end = monthEndDate(monthKey);
+  const weeks: GoalWeek[] = [];
+  let cursor = start;
+
+  while (cursor <= end) {
+    const day = new Date(`${cursor}T00:00:00Z`).getUTCDay();
+    const daysUntilSunday = day === 0 ? 0 : 7 - day;
+    const weekEnd = [addUtcDays(cursor, daysUntilSunday), end].sort()[0];
+    weeks.push({
+      id: cursor,
+      label: `${shortDateLabel(cursor)} - ${shortDateLabel(weekEnd)}`,
+      start: cursor,
+      end: weekEnd
+    });
+    cursor = addUtcDays(weekEnd, 1);
+  }
+
+  return weeks;
+}
+
+function goalsDraftFromRows(salesGoals: SalesGoal[], monthKey: string, weeks: GoalWeek[]): GoalDraft {
+  const brandEom = emptyBrandGoalStrings();
+  const brandWeeks = Object.fromEntries(
+    weeks.map((week) => [week.id, emptyBrandGoalStrings()])
+  ) as Record<string, Record<BrandFilter, string>>;
+  const notes: Record<string, string> = {};
+
+  salesGoals
+    .filter((goal) => monthKeyFromDateValue(goal.goalMonth) === monthKey)
+    .forEach((goal) => {
+      const goalType = goal.goalType.trim().toLowerCase();
+      const brand = goal.brand as BrandFilter;
+      const amount = cleanGoalNumber(goal.goalAmount);
+      if (goalType === "eom" && TERRITORY_BRANDS.includes(brand) && amount > 0) {
+        brandEom[brand] = String(Math.round(amount));
+      }
+      if ((goalType === "week" || goalType === "weekly") && goal.weekId) {
+        if (!brandWeeks[goal.weekId]) {
+          brandWeeks[goal.weekId] = emptyBrandGoalStrings();
+        }
+        if (TERRITORY_BRANDS.includes(brand) && amount > 0) {
+          brandWeeks[goal.weekId][brand] = String(Math.round(amount));
+        }
+        if (goal.notes) {
+          notes[goal.weekId] = goal.notes;
+        }
+      }
+      if ((goalType === "week note" || goalType === "note") && goal.weekId && goal.notes) {
+        notes[goal.weekId] = goal.notes;
+      }
+    });
+
+  return { brandEom, brandWeeks, notes };
+}
+
+function goalDraftSignature(draft: GoalDraft) {
+  return JSON.stringify(draft);
+}
+
+function goalBrandFilterValues(brandFilter: "all" | BrandFilter) {
+  return brandFilter === "all" ? [...TERRITORY_BRANDS] : [brandFilter];
+}
+
+function sumGoalValues(values: Record<BrandFilter, string>, brands: BrandFilter[]) {
+  return brands.reduce((total, brand) => total + cleanGoalNumber(values[brand]), 0);
+}
+
+function buildGoalDailyPoints({
+  orderLines,
+  monthKey,
+  weeks,
+  eomGoal,
+  weeklyGoals,
+  brands
+}: {
+  orderLines: OrderLine[];
+  monthKey: string;
+  weeks: GoalWeek[];
+  eomGoal: number;
+  weeklyGoals: Record<string, number>;
+  brands: BrandFilter[];
+}) {
+  const start = monthStartDate(monthKey);
+  const end = monthEndDate(monthKey);
+  const days = enumerateDates(start, end);
+  const dailySales = new Map(days.map((day) => [day, 0]));
+  const brandSet = new Set(brands);
+
+  orderLines.forEach((line) => {
+    const brand = orderBrandValue(line) as BrandFilter;
+    const lineDate = dateInputValue(line.submittedAt);
+    if (!isPaidOrderLine(line) || !brandSet.has(brand) || lineDate < start || lineDate > end) {
+      return;
+    }
+    dailySales.set(lineDate, (dailySales.get(lineDate) || 0) + line.lineTotal);
+  });
+
+  let actualCumulative = 0;
+  let weeklyCumulative = 0;
+  const weeklyDailyTargets = new Map<string, number>();
+  weeks.forEach((week) => {
+    const goal = cleanGoalNumber(weeklyGoals[week.id]);
+    if (goal <= 0) {
+      return;
+    }
+    const weekDays = enumerateDates(week.start, week.end);
+    const dailyTarget = goal / Math.max(1, weekDays.length);
+    weekDays.forEach((day) => weeklyDailyTargets.set(day, dailyTarget));
+  });
+
+  const today = localDateInputValue();
+  const progressDay = today < start ? start : today > end ? end : today;
+  const totalDays = Math.max(1, days.length);
+  const elapsedDays = Math.max(1, days.filter((day) => day <= progressDay).length);
+  const salesToDate = days
+    .filter((day) => day <= progressDay)
+    .reduce((total, day) => total + (dailySales.get(day) || 0), 0);
+  const projectedEom = progressDay === end ? salesToDate : (salesToDate / elapsedDays) * totalDays;
+  const projectionStartIndex = Math.max(0, days.indexOf(progressDay));
+  const projectionSteps = Math.max(1, days.length - projectionStartIndex - 1);
+
+  const points = days.map((day, index) => {
+    const daily = dailySales.get(day) || 0;
+    actualCumulative += daily;
+    weeklyCumulative += weeklyDailyTargets.get(day) || 0;
+    const projectedPace = day < progressDay
+      ? null
+      : salesToDate + (projectedEom - salesToDate) * ((index - projectionStartIndex) / projectionSteps);
+    return {
+      date: day,
+      dailySales: daily,
+      actualCumulative,
+      eomPace: eomGoal * ((index + 1) / totalDays),
+      weeklyPace: weeklyCumulative,
+      projectedPace
+    };
+  });
+
+  return { points, progressDay, salesToDate, projectedEom };
+}
+
+function percentLabel(value: number, target: number) {
+  if (!target) {
+    return "0.0%";
+  }
+  return `${((value / target) * 100).toFixed(1)}%`;
+}
+
+function useOrderSync() {
+  const router = useRouter();
+  const [syncState, setSyncState] = useState<SyncState>("idle");
+  const [syncMessage, setSyncMessage] = useState("");
+
+  const syncOrders = useCallback(async () => {
+    setSyncState("syncing");
+    setSyncMessage("Syncing Cultivera orders...");
+
+    try {
+      const response = await fetch("/api/sync-orders", { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result?.error || "Could not sync orders.");
+      }
+      setSyncState("success");
+      setSyncMessage(
+        `Synced ${Number(result.orderRows || 0).toLocaleString()} orders and ${Number(result.itemRows || 0).toLocaleString()} line items.`
+      );
+      router.refresh();
+    } catch (error) {
+      setSyncState("error");
+      setSyncMessage(error instanceof Error ? error.message : "Could not sync orders.");
+    }
+  }, [router]);
+
+  return { syncState, syncMessage, syncOrders };
 }
 
 function localDateInputValue(date = new Date()) {
@@ -1463,6 +1916,7 @@ function StoreMap({
 
 function TripPlanner({
   stores,
+  orderLines,
   selectedStore,
   activeTab,
   setActiveTab,
@@ -1478,6 +1932,7 @@ function TripPlanner({
   onContactLogSaved
 }: {
   stores: StoreRollup[];
+  orderLines: OrderLine[];
   selectedStore?: StoreRollup;
   activeTab: DetailTab;
   setActiveTab: (tab: DetailTab) => void;
@@ -1561,6 +2016,14 @@ function TripPlanner({
   const tripBalaclava = orderedTripStores.reduce((total, store) => total + store.latestMonthRevenue, 0);
   const tripMarket = orderedTripStores.reduce((total, store) => total + store.marketSalesLastMonth, 0);
   const selectedStoreKey = selectedStore ? storeKey(selectedStore) : "";
+  const selectedStoreKeys = useMemo(() => (
+    selectedStore ? new Set(storeIdentityKeys(selectedStore)) : new Set<string>()
+  ), [selectedStore]);
+  const selectedStoreOrderLines = useMemo(() => (
+    selectedStoreKeys.size
+      ? orderLines.filter((line) => orderLineStoreKeys(line).some((key) => selectedStoreKeys.has(key)))
+      : []
+  ), [orderLines, selectedStoreKeys]);
   const canAddSelectedStore = Boolean(
     selectedStore && hasStoreCoordinates(selectedStore)
   );
@@ -1661,6 +2124,7 @@ function TripPlanner({
           setActiveTab={setActiveTab}
           onBuyerSaved={onBuyerSaved}
           onContactLogSaved={onContactLogSaved}
+          orderLines={selectedStoreOrderLines}
           routeAction={selectedStore ? {
             disabled: !canAddSelectedStore,
             isAdded: isSelectedStoreInRoute,
@@ -1862,7 +2326,8 @@ function TripPlanner({
                     <span className="trip-store-meta">
                       <BrandPlacementDots store={suggestion.store} />
                       <span className="trip-store-subtext">
-                        {suggestion.store.city || "No city"} · {suggestion.offRouteMiles.toFixed(1)} mi off route
+                        {suggestion.store.city || "No city"} · {Math.round(suggestion.alongRouteMiles).toLocaleString()} mi out ·{" "}
+                        {suggestion.offRouteMiles.toFixed(1)} mi off route
                       </span>
                     </span>
                   </button>
@@ -1928,12 +2393,991 @@ function TripPlanner({
   );
 }
 
+function OrdersView({
+  orderLines,
+  stores,
+  selectedStore,
+  onSelectStore
+}: {
+  orderLines: OrderLine[];
+  stores: StoreRollup[];
+  selectedStore?: StoreRollup;
+  onSelectStore: (key: string) => void;
+}) {
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [brandFilter, setBrandFilter] = useState("all");
+  const [orderQuery, setOrderQuery] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const { syncState, syncMessage, syncOrders } = useOrderSync();
+  const bounds = useMemo(() => orderDateBounds(orderLines), [orderLines]);
+  const effectiveDateFrom = dateFrom || bounds.defaultFrom;
+  const effectiveDateTo = dateTo || bounds.defaultTo;
+  const selectedStoreKeys = useMemo(() => (
+    selectedStore ? new Set(storeIdentityKeys(selectedStore)) : new Set<string>()
+  ), [selectedStore]);
+  const storesByKey = useMemo(() => {
+    const byKey = new Map<string, StoreRollup>();
+    stores.forEach((store) => {
+      storeIdentityKeys(store).forEach((key) => byKey.set(key, store));
+    });
+    return byKey;
+  }, [stores]);
+  const baseOrderLines = useMemo(() => (
+    orderLines.filter((line) => orderBrandValue(line).toLowerCase() !== "bulk")
+  ), [orderLines]);
+
+  useEffect(() => {
+    setDateFrom("");
+    setDateTo("");
+  }, [bounds.defaultFrom, bounds.defaultTo]);
+
+  const statusOptions = useMemo(() => (
+    [...new Set(baseOrderLines.map(orderStatusValue))].sort((left, right) => left.localeCompare(right))
+  ), [baseOrderLines]);
+  const brandOptions = useMemo(() => {
+    const dataBrands = [...new Set(baseOrderLines.map(orderBrandValue))]
+      .filter((brand) => !TERRITORY_BRANDS.includes(brand as BrandFilter))
+      .sort((left, right) => left.localeCompare(right));
+    return [...TERRITORY_BRANDS, ...dataBrands];
+  }, [baseOrderLines]);
+  const normalizedOrderQuery = orderQuery.trim().toLowerCase();
+  const filteredOrderLines = useMemo(() => (
+    baseOrderLines.filter((line) => {
+      if (statusFilter !== "all" && orderStatusValue(line) !== statusFilter) {
+        return false;
+      }
+      if (brandFilter !== "all" && orderBrandValue(line) !== brandFilter) {
+        return false;
+      }
+      if (!lineIsInsideDateRange(line, effectiveDateFrom, effectiveDateTo)) {
+        return false;
+      }
+      if (!normalizedOrderQuery) {
+        return true;
+      }
+      return [
+        line.storeName,
+        line.license,
+        line.licenseKey,
+        line.orderNumber,
+        line.brand,
+        line.productName,
+        line.subProductLine
+      ].some((value) => String(value || "").toLowerCase().includes(normalizedOrderQuery));
+    })
+  ), [baseOrderLines, brandFilter, effectiveDateFrom, effectiveDateTo, normalizedOrderQuery, statusFilter]);
+  const paidLines = useMemo(() => filteredOrderLines.filter(isPaidOrderLine), [filteredOrderLines]);
+  const orderMetrics = useMemo(() => {
+    const revenue = paidLines.reduce((total, line) => total + line.lineTotal, 0);
+    const units = paidLines.reduce((total, line) => total + line.units, 0);
+    return {
+      revenue,
+      units,
+      orders: uniqueOrderCount(paidLines),
+      stores: new Set(paidLines.map(orderLineStoreKey)).size,
+      latest: latestOrderDate(paidLines)
+    };
+  }, [paidLines]);
+  const brandSummaries = useMemo(() => (
+    TERRITORY_BRANDS.map((brand) => {
+      const brandLines = paidLines.filter((line) => orderBrandValue(line) === brand);
+      return {
+        brand,
+        revenue: brandLines.reduce((total, line) => total + line.lineTotal, 0),
+        units: brandLines.reduce((total, line) => total + line.units, 0),
+        orders: uniqueOrderCount(brandLines)
+      };
+    })
+  ), [paidLines]);
+  const maxBrandRevenue = Math.max(1, ...brandSummaries.map((summary) => summary.revenue));
+  const storeSummaries = useMemo(() => {
+    const byStore = new Map<string, {
+      key: string;
+      storeName: string;
+      license: string;
+      revenue: number;
+      units: number;
+      orderKeys: Set<string>;
+      lastOrderAt: string | null;
+      lastOrderNumber: string;
+      brands: Record<BrandFilter, number>;
+    }>();
+
+    paidLines.forEach((line) => {
+      const key = orderLineStoreKey(line);
+      const current = byStore.get(key) || {
+        key,
+        storeName: line.storeName,
+        license: line.license || line.licenseKey || "",
+        revenue: 0,
+        units: 0,
+        orderKeys: new Set<string>(),
+        lastOrderAt: null,
+        lastOrderNumber: "",
+        brands: {
+          "K. Savage": 0,
+          Mayfield: 0,
+          "Leisure Land": 0
+        }
+      };
+      current.revenue += line.lineTotal;
+      current.units += line.units;
+      current.orderKeys.add(orderLineKey(line));
+      if (orderTimestamp(line.submittedAt) >= orderTimestamp(current.lastOrderAt)) {
+        current.lastOrderAt = line.submittedAt || null;
+        current.lastOrderNumber = line.orderNumber;
+      }
+      const brand = orderBrandValue(line);
+      if (TERRITORY_BRANDS.includes(brand as BrandFilter)) {
+        current.brands[brand as BrandFilter] += line.lineTotal;
+      }
+      byStore.set(key, current);
+    });
+
+    return [...byStore.values()]
+      .sort((left, right) => orderTimestamp(right.lastOrderAt) - orderTimestamp(left.lastOrderAt))
+      .slice(0, 80);
+  }, [paidLines]);
+  const recentOrders = useMemo(() => {
+    const byOrder = new Map<string, {
+      key: string;
+      storeKey: string;
+      storeName: string;
+      license: string;
+      orderNumber: string;
+      submittedAt: string | null;
+      status: string;
+      revenue: number;
+      units: number;
+      brands: Record<BrandFilter, number>;
+    }>();
+
+    paidLines.forEach((line) => {
+      const key = orderLineKey(line);
+      const current = byOrder.get(key) || {
+        key,
+        storeKey: orderLineStoreKey(line),
+        storeName: line.storeName,
+        license: line.license || line.licenseKey || "",
+        orderNumber: line.orderNumber,
+        submittedAt: line.submittedAt || null,
+        status: orderStatusValue(line),
+        revenue: 0,
+        units: 0,
+        brands: {
+          "K. Savage": 0,
+          Mayfield: 0,
+          "Leisure Land": 0
+        }
+      };
+      current.revenue += line.lineTotal;
+      current.units += line.units;
+      const brand = orderBrandValue(line);
+      if (TERRITORY_BRANDS.includes(brand as BrandFilter)) {
+        current.brands[brand as BrandFilter] += line.lineTotal;
+      }
+      byOrder.set(key, current);
+    });
+
+    return [...byOrder.values()]
+      .sort((left, right) => orderTimestamp(right.submittedAt) - orderTimestamp(left.submittedAt))
+      .slice(0, 80);
+  }, [paidLines]);
+  const topProductsByBrand = useMemo(() => (
+    TERRITORY_BRANDS.map((brand) => {
+      const byProduct = new Map<string, { product: string; units: number; revenue: number }>();
+      paidLines
+        .filter((line) => orderBrandValue(line) === brand)
+        .forEach((line) => {
+          const product = line.productName || "Unnamed product";
+          const current = byProduct.get(product) || { product, units: 0, revenue: 0 };
+          current.units += line.units;
+          current.revenue += line.lineTotal;
+          byProduct.set(product, current);
+        });
+      return {
+        brand,
+        products: [...byProduct.values()]
+          .sort((left, right) => right.units - left.units || right.revenue - left.revenue)
+          .slice(0, 8)
+      };
+    })
+  ), [paidLines]);
+
+  return (
+    <section className="orders-view">
+      <div className="panel orders-filter-panel">
+        <div className="orders-action-row">
+          <span className="caption">Cultivera order source</span>
+          <button
+            className="primary-button"
+            disabled={syncState === "syncing"}
+            onClick={syncOrders}
+            type="button"
+          >
+            {syncState === "syncing" ? "Syncing..." : "Sync Orders"}
+          </button>
+        </div>
+        {syncMessage ? (
+          <div className={`sync-message sync-message-${syncState}`} role="status">
+            {syncMessage}
+          </div>
+        ) : null}
+        <div className="orders-filter-grid">
+          <div className="field">
+            <label>Orders</label>
+            <input
+              type="search"
+              value={orderQuery}
+              onChange={(event) => setOrderQuery(event.target.value)}
+              placeholder="Store, license, order, product"
+            />
+          </div>
+          <div className="field">
+            <label>Status</label>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="all">All statuses</option>
+              {statusOptions.map((status) => (
+                <option key={status} value={status}>{status}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label>Brand</label>
+            <select value={brandFilter} onChange={(event) => setBrandFilter(event.target.value)}>
+              <option value="all">All brands</option>
+              {brandOptions.map((brand) => (
+                <option key={brand} value={brand}>{brand}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label>From</label>
+            <input
+              max={bounds.max}
+              min={bounds.min}
+              type="date"
+              value={effectiveDateFrom}
+              onChange={(event) => setDateFrom(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label>To</label>
+            <input
+              max={bounds.max}
+              min={bounds.min}
+              type="date"
+              value={effectiveDateTo}
+              onChange={(event) => setDateTo(event.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      <section className="metrics orders-metrics">
+        <DetailStat label="Revenue" value={formatUsd(orderMetrics.revenue)} />
+        <DetailStat label="Orders" value={orderMetrics.orders.toLocaleString()} />
+        <DetailStat label="Units" value={Math.round(orderMetrics.units).toLocaleString()} />
+        <DetailStat label="Stores" value={orderMetrics.stores.toLocaleString()} />
+        <DetailStat label="Latest Order" value={formatDate(orderMetrics.latest)} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h3>Brand Summary</h3>
+          <span className="table-meta">{filteredOrderLines.length.toLocaleString()} lines</span>
+        </div>
+        <div className="brand-summary-grid">
+          {brandSummaries.map((summary) => (
+            <div className="brand-summary-card" key={summary.brand}>
+              <div className="brand-summary-title">
+                <span
+                  aria-hidden="true"
+                  className="brand-dot"
+                  style={{ background: BRAND_DOT_COLORS[summary.brand] ?? "var(--muted)" }}
+                />
+                <strong>{summary.brand}</strong>
+              </div>
+              <div className="brand-summary-value">{formatUsd(summary.revenue)}</div>
+              <div className="brand-summary-meta">
+                {summary.orders.toLocaleString()} orders · {Math.round(summary.units).toLocaleString()} units
+              </div>
+              <div className="summary-bar">
+                <span
+                  style={{
+                    background: BRAND_DOT_COLORS[summary.brand] ?? "var(--blue)",
+                    width: `${Math.max(3, (summary.revenue / maxBrandRevenue) * 100)}%`
+                  }}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="orders-grid">
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Store Activity</h3>
+            <span className="table-meta">{storeSummaries.length.toLocaleString()} stores</span>
+          </div>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Store</th>
+                  <th>Orders</th>
+                  <th>Last Order</th>
+                  <th>Revenue</th>
+                  <th>Units</th>
+                  {TERRITORY_BRANDS.map((brand) => <th key={brand}>{brand}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {storeSummaries.map((summary) => (
+                  <tr
+                    className={selectedStoreKeys.has(summary.key) ? "is-selected" : ""}
+                    key={summary.key}
+                    onClick={() => {
+                      const store = storesByKey.get(summary.key);
+                      if (store) {
+                        onSelectStore(storeKey(store));
+                      }
+                    }}
+                  >
+                    <td>
+                      <div className="store-name">{summary.storeName}</div>
+                      <div className="store-subtext">{summary.license || "-"}</div>
+                    </td>
+                    <td>{summary.orderKeys.size.toLocaleString()}</td>
+                    <td>{formatDate(summary.lastOrderAt)}</td>
+                    <td>{formatUsd(summary.revenue)}</td>
+                    <td>{Math.round(summary.units).toLocaleString()}</td>
+                    {TERRITORY_BRANDS.map((brand) => <td key={brand}>{formatUsd(summary.brands[brand])}</td>)}
+                  </tr>
+                ))}
+                {!storeSummaries.length ? (
+                  <tr><td colSpan={8}>No store activity in this selection.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Recent Orders</h3>
+            <span className="table-meta">{recentOrders.length.toLocaleString()} shown</span>
+          </div>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Order</th>
+                  <th>Store</th>
+                  <th>Date</th>
+                  <th>Status</th>
+                  <th>Revenue</th>
+                  <th>Units</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentOrders.map((order) => (
+                  <tr
+                    className={selectedStoreKeys.has(order.storeKey) ? "is-selected" : ""}
+                    key={order.key}
+                    onClick={() => {
+                      const store = storesByKey.get(order.storeKey);
+                      if (store) {
+                        onSelectStore(storeKey(store));
+                      }
+                    }}
+                  >
+                    <td>{order.orderNumber}</td>
+                    <td>
+                      <div className="store-name">{order.storeName}</div>
+                      <div className="store-subtext">{order.license || "-"}</div>
+                    </td>
+                    <td>{formatDate(order.submittedAt)}</td>
+                    <td>{order.status}</td>
+                    <td>{formatUsd(order.revenue)}</td>
+                    <td>{Math.round(order.units).toLocaleString()}</td>
+                  </tr>
+                ))}
+                {!recentOrders.length ? (
+                  <tr><td colSpan={6}>No recent orders in this selection.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h3>Top Products</h3>
+          <span className="table-meta">Paid lines only</span>
+        </div>
+        <div className="product-summary-grid">
+          {topProductsByBrand.map((brandSummary) => (
+            <div className="product-summary" key={brandSummary.brand}>
+              <div className="brand-summary-title">
+                <span
+                  aria-hidden="true"
+                  className="brand-dot"
+                  style={{ background: BRAND_DOT_COLORS[brandSummary.brand] ?? "var(--muted)" }}
+                />
+                <strong>{brandSummary.brand}</strong>
+              </div>
+              <table className="mini-table">
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th>Units</th>
+                    <th>Sales</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {brandSummary.products.map((product) => (
+                    <tr key={product.product}>
+                      <td>{product.product}</td>
+                      <td>{Math.round(product.units).toLocaleString()}</td>
+                      <td>{formatUsd(product.revenue)}</td>
+                    </tr>
+                  ))}
+                  {!brandSummary.products.length ? (
+                    <tr><td colSpan={3}>No paid lines.</td></tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function SyncView({
+  orderLines,
+  salesGoals,
+  stores
+}: {
+  orderLines: OrderLine[];
+  salesGoals: SalesGoal[];
+  stores: StoreRollup[];
+}) {
+  const { syncState, syncMessage, syncOrders } = useOrderSync();
+  const paidLines = useMemo(() => orderLines.filter(isPaidOrderLine), [orderLines]);
+  const latestOrder = latestOrderDate(orderLines);
+  const paidRevenue = paidLines.reduce((total, line) => total + line.lineTotal, 0);
+  const syncedStoreCount = new Set(orderLines.map(orderLineStoreKey).filter(Boolean)).size;
+  const brandRows = TERRITORY_BRANDS.map((brand) => {
+    const brandLines = paidLines.filter((line) => orderBrandValue(line) === brand);
+    return {
+      brand,
+      orders: uniqueOrderCount(brandLines),
+      lines: brandLines.length,
+      revenue: brandLines.reduce((total, line) => total + line.lineTotal, 0)
+    };
+  });
+
+  return (
+    <section className="sync-view">
+      <section className="panel sync-hero">
+        <div>
+          <h3>Cultivera Orders</h3>
+          <div className="caption">Google Sheet to Supabase</div>
+        </div>
+        <button className="primary-button" disabled={syncState === "syncing"} onClick={syncOrders} type="button">
+          {syncState === "syncing" ? "Syncing..." : "Sync Orders"}
+        </button>
+      </section>
+
+      {syncMessage ? (
+        <div className={`sync-message sync-message-${syncState}`} role="status">
+          {syncMessage}
+        </div>
+      ) : null}
+
+      <section className="metrics orders-metrics">
+        <DetailStat label="Orders" value={uniqueOrderCount(orderLines).toLocaleString()} />
+        <DetailStat label="Line Items" value={orderLines.length.toLocaleString()} />
+        <DetailStat label="Paid Revenue" value={formatUsd(paidRevenue)} />
+        <DetailStat label="Stores Matched" value={syncedStoreCount.toLocaleString()} />
+        <DetailStat label="Latest Order" value={formatDate(latestOrder)} />
+      </section>
+
+      <section className="sync-grid">
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Sources</h3>
+            <span className="table-meta">Current snapshot</span>
+          </div>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Rows</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Cultivera Orders</td>
+                  <td>{uniqueOrderCount(orderLines).toLocaleString()} / {orderLines.length.toLocaleString()}</td>
+                  <td>{syncState === "syncing" ? "Syncing" : "Ready"}</td>
+                </tr>
+                <tr>
+                  <td>Sales Goals</td>
+                  <td>{salesGoals.length.toLocaleString()}</td>
+                  <td>Saved directly</td>
+                </tr>
+                <tr>
+                  <td>Store Rollup</td>
+                  <td>{stores.length.toLocaleString()}</td>
+                  <td>Live snapshot</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Brand Coverage</h3>
+            <span className="table-meta">Paid order lines</span>
+          </div>
+          <div className="brand-summary-grid sync-brand-grid">
+            {brandRows.map((row) => (
+              <div className="brand-summary-card" key={row.brand}>
+                <div className="brand-summary-title">
+                  <span
+                    aria-hidden="true"
+                    className="brand-dot"
+                    style={{ background: BRAND_DOT_COLORS[row.brand] ?? "var(--muted)" }}
+                  />
+                  <strong>{row.brand}</strong>
+                </div>
+                <div className="brand-summary-value">{formatUsd(row.revenue)}</div>
+                <div className="brand-summary-meta">
+                  {row.orders.toLocaleString()} orders · {row.lines.toLocaleString()} lines
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function GoalPaceChart({
+  points,
+  eomGoal,
+  weeklyGoalTotal
+}: {
+  points: GoalDailyPoint[];
+  eomGoal: number;
+  weeklyGoalTotal: number;
+}) {
+  const width = 900;
+  const height = 280;
+  const padding = { top: 18, right: 18, bottom: 30, left: 54 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const maxValue = Math.max(
+    1,
+    eomGoal,
+    weeklyGoalTotal,
+    ...points.flatMap((point) => [
+      point.dailySales,
+      point.actualCumulative,
+      point.eomPace,
+      point.weeklyPace,
+      point.projectedPace || 0
+    ])
+  );
+  const xForIndex = (index: number) => (
+    padding.left + (points.length <= 1 ? 0 : (index / (points.length - 1)) * chartWidth)
+  );
+  const yForValue = (value: number) => padding.top + chartHeight - (value / maxValue) * chartHeight;
+  const linePath = (values: (number | null)[]) => values.reduce((path, value, index) => {
+    if (value === null) {
+      return path;
+    }
+    const command = path ? "L" : "M";
+    return `${path} ${command} ${xForIndex(index).toFixed(1)} ${yForValue(value).toFixed(1)}`.trim();
+  }, "");
+  const barWidth = Math.max(4, chartWidth / Math.max(1, points.length) - 3);
+  const ticks = [0, maxValue / 2, maxValue];
+
+  return (
+    <div className="goal-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Goal pace chart">
+        {ticks.map((tick) => (
+          <g key={tick}>
+            <line
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={yForValue(tick)}
+              y2={yForValue(tick)}
+              className="goal-grid-line"
+            />
+            <text x={padding.left - 10} y={yForValue(tick) + 4} textAnchor="end" className="goal-axis-label">
+              {formatUsd(tick)}
+            </text>
+          </g>
+        ))}
+        {points.map((point, index) => {
+          const barHeight = chartHeight - (yForValue(point.dailySales) - padding.top);
+          return (
+            <rect
+              className="goal-daily-bar"
+              key={point.date}
+              x={xForIndex(index) - barWidth / 2}
+              y={yForValue(point.dailySales)}
+              width={barWidth}
+              height={Math.max(0, barHeight)}
+              rx={2}
+            />
+          );
+        })}
+        <path className="goal-line goal-line-actual" d={linePath(points.map((point) => point.actualCumulative))} />
+        {eomGoal > 0 ? (
+          <path className="goal-line goal-line-eom" d={linePath(points.map((point) => point.eomPace))} />
+        ) : null}
+        {weeklyGoalTotal > 0 ? (
+          <path className="goal-line goal-line-weekly" d={linePath(points.map((point) => point.weeklyPace))} />
+        ) : null}
+        {points.some((point) => point.projectedPace !== null) ? (
+          <path className="goal-line goal-line-projected" d={linePath(points.map((point) => point.projectedPace))} />
+        ) : null}
+        {points.length ? (
+          <>
+            <text x={padding.left} y={height - 8} className="goal-axis-label">{shortDateLabel(points[0].date)}</text>
+            <text x={width - padding.right} y={height - 8} textAnchor="end" className="goal-axis-label">
+              {shortDateLabel(points[points.length - 1].date)}
+            </text>
+          </>
+        ) : null}
+      </svg>
+      <div className="goal-legend">
+        <span><i className="legend-dot legend-actual" /> Actual</span>
+        <span><i className="legend-dot legend-eom" /> EOM pace</span>
+        <span><i className="legend-dot legend-weekly" /> Weekly pace</span>
+        <span><i className="legend-dot legend-projected" /> Projected</span>
+      </div>
+    </div>
+  );
+}
+
+function GoalsView({
+  orderLines,
+  salesGoals
+}: {
+  orderLines: OrderLine[];
+  salesGoals: SalesGoal[];
+}) {
+  const router = useRouter();
+  const monthOptions = useMemo(() => goalMonthOptions(orderLines, salesGoals), [orderLines, salesGoals]);
+  const [selectedMonth, setSelectedMonth] = useState(() => (
+    monthOptions.includes(currentMonthKey()) ? currentMonthKey() : monthOptions[0] || currentMonthKey()
+  ));
+  const [brandFilter, setBrandFilter] = useState<"all" | BrandFilter>("all");
+  const weeks = useMemo(() => monthWeeks(selectedMonth), [selectedMonth]);
+  const savedDraft = useMemo(() => (
+    goalsDraftFromRows(salesGoals, selectedMonth, weeks)
+  ), [salesGoals, selectedMonth, weeks]);
+  const [draft, setDraft] = useState<GoalDraft>(savedDraft);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "success" | "error">("idle");
+  const [saveMessage, setSaveMessage] = useState("");
+
+  useEffect(() => {
+    if (!monthOptions.includes(selectedMonth)) {
+      setSelectedMonth(monthOptions[0] || currentMonthKey());
+    }
+  }, [monthOptions, selectedMonth]);
+
+  useEffect(() => {
+    setDraft(savedDraft);
+    setSaveState("idle");
+    setSaveMessage("");
+  }, [savedDraft]);
+
+  const selectedBrands = useMemo(() => goalBrandFilterValues(brandFilter), [brandFilter]);
+  const eomGoal = sumGoalValues(draft.brandEom, selectedBrands);
+  const weeklyGoals = useMemo(() => (
+    Object.fromEntries(
+      weeks.map((week) => [week.id, sumGoalValues(draft.brandWeeks[week.id] || emptyBrandGoalStrings(), selectedBrands)])
+    )
+  ), [draft.brandWeeks, selectedBrands, weeks]);
+  const weeklyGoalTotal = Object.values(weeklyGoals).reduce((total, value) => total + value, 0);
+  const { points, progressDay, salesToDate, projectedEom } = useMemo(() => (
+    buildGoalDailyPoints({
+      orderLines,
+      monthKey: selectedMonth,
+      weeks,
+      eomGoal,
+      weeklyGoals,
+      brands: selectedBrands
+    })
+  ), [eomGoal, orderLines, selectedBrands, selectedMonth, weeklyGoals, weeks]);
+  const activeGoal = eomGoal || weeklyGoalTotal;
+  const remainingDays = Math.max(0, daysBetweenInclusive(addUtcDays(progressDay, 1), monthEndDate(selectedMonth)));
+  const goalGap = eomGoal ? Math.max(0, eomGoal - salesToDate) : 0;
+  const requiredPerDay = remainingDays ? goalGap / remainingDays : 0;
+  const isDirty = goalDraftSignature(draft) !== goalDraftSignature(savedDraft);
+
+  function updateEomGoal(brand: BrandFilter, value: string) {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      brandEom: {
+        ...currentDraft.brandEom,
+        [brand]: value
+      }
+    }));
+  }
+
+  function updateWeekGoal(weekId: string, brand: BrandFilter, value: string) {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      brandWeeks: {
+        ...currentDraft.brandWeeks,
+        [weekId]: {
+          ...(currentDraft.brandWeeks[weekId] || emptyBrandGoalStrings()),
+          [brand]: value
+        }
+      }
+    }));
+  }
+
+  function updateWeekNote(weekId: string, value: string) {
+    setDraft((currentDraft) => ({
+      ...currentDraft,
+      notes: {
+        ...currentDraft.notes,
+        [weekId]: value
+      }
+    }));
+  }
+
+  async function saveGoals() {
+    setSaveState("saving");
+    setSaveMessage("Saving goals...");
+    const rows = [
+      ...TERRITORY_BRANDS.flatMap((brand) => {
+        const goalAmount = cleanGoalNumber(draft.brandEom[brand]);
+        return goalAmount > 0 ? [{
+          goalType: "EOM",
+          brand,
+          goalAmount
+        }] : [];
+      }),
+      ...weeks.flatMap((week) => (
+        TERRITORY_BRANDS.flatMap((brand) => {
+          const goalAmount = cleanGoalNumber(draft.brandWeeks[week.id]?.[brand]);
+          return goalAmount > 0 ? [{
+            goalType: "Week",
+            weekId: week.id,
+            weekLabel: week.label,
+            brand,
+            goalAmount
+          }] : [];
+        })
+      )),
+      ...weeks.flatMap((week) => {
+        const note = String(draft.notes[week.id] || "").trim();
+        return note ? [{
+          goalType: "Week Note",
+          weekId: week.id,
+          weekLabel: week.label,
+          notes: note
+        }] : [];
+      })
+    ];
+
+    try {
+      const response = await fetch("/api/sales-goals", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          month: selectedMonth,
+          rows
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result?.error || "Could not save goals.");
+      }
+      setSaveState("success");
+      setSaveMessage(`Saved ${Number(result.rows || 0).toLocaleString()} goal rows for ${monthLabel(selectedMonth)}.`);
+      router.refresh();
+    } catch (error) {
+      setSaveState("error");
+      setSaveMessage(error instanceof Error ? error.message : "Could not save goals.");
+    }
+  }
+
+  const weeklyRows = weeks.map((week) => {
+    const weekActual = points
+      .filter((point) => point.date >= week.start && point.date <= week.end)
+      .reduce((total, point) => total + point.dailySales, 0);
+    const weekGoal = weeklyGoals[week.id] || 0;
+    return {
+      week,
+      actual: weekActual,
+      goal: weekGoal,
+      variance: weekActual - weekGoal
+    };
+  });
+
+  return (
+    <section className="goals-view">
+      <section className="panel goals-controls">
+        <div className="field">
+          <label>Month</label>
+          <select value={selectedMonth} onChange={(event) => setSelectedMonth(event.target.value)}>
+            {monthOptions.map((month) => (
+              <option key={month} value={month}>{monthLabel(month)}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>Brand Filter</label>
+          <select value={brandFilter} onChange={(event) => setBrandFilter(event.target.value as "all" | BrandFilter)}>
+            <option value="all">All brands</option>
+            {TERRITORY_BRANDS.map((brand) => (
+              <option key={brand} value={brand}>{brand}</option>
+            ))}
+          </select>
+        </div>
+        <div className="goals-save">
+          <button className="primary-button" disabled={saveState === "saving"} type="button" onClick={saveGoals}>
+            {saveState === "saving" ? "Saving..." : "Save Goals"}
+          </button>
+          {isDirty ? <span className="caption">Unsaved changes</span> : <span className="caption">Supabase goals</span>}
+        </div>
+      </section>
+
+      {saveMessage ? (
+        <div className={`sync-message sync-message-${saveState}`} role="status">
+          {saveMessage}
+        </div>
+      ) : null}
+
+      <section className="metrics orders-metrics">
+        <DetailStat label="Sales to Date" value={formatUsd(salesToDate)} />
+        <DetailStat label="EOM Goal" value={formatUsd(eomGoal)} />
+        <DetailStat label="Progress" value={percentLabel(salesToDate, activeGoal)} />
+        <DetailStat label="Projected EOM" value={formatUsd(projectedEom)} />
+        <DetailStat label="Per Day Needed" value={formatUsd(requiredPerDay)} />
+      </section>
+
+      <section className="goals-grid">
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Brand Goals</h3>
+            <span className="table-meta">{monthLabel(selectedMonth)}</span>
+          </div>
+          <div className="goal-input-grid">
+            {TERRITORY_BRANDS.map((brand) => (
+              <div className="field" key={brand}>
+                <label>
+                  <span
+                    aria-hidden="true"
+                    className="brand-dot"
+                    style={{ background: BRAND_DOT_COLORS[brand] ?? "var(--muted)" }}
+                  />
+                  {brand} EOM
+                </label>
+                <input
+                  inputMode="numeric"
+                  min="0"
+                  type="number"
+                  value={draft.brandEom[brand]}
+                  onChange={(event) => updateEomGoal(brand, event.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Pace</h3>
+            <span className="table-meta">{shortDateLabel(monthStartDate(selectedMonth))} - {shortDateLabel(monthEndDate(selectedMonth))}</span>
+          </div>
+          <GoalPaceChart points={points} eomGoal={eomGoal} weeklyGoalTotal={weeklyGoalTotal} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h3>Weekly Goals</h3>
+          <span className="table-meta">{formatUsd(goalGap)} remaining</span>
+        </div>
+        <div className="table-scroll">
+          <table className="data-table goal-table">
+            <thead>
+              <tr>
+                <th>Week</th>
+                {TERRITORY_BRANDS.map((brand) => <th key={brand}>{brand}</th>)}
+                <th>Goal</th>
+                <th>Actual</th>
+                <th>Progress</th>
+                <th>Variance</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {weeklyRows.map(({ week, actual, goal, variance }) => (
+                <tr key={week.id}>
+                  <td>{week.label}</td>
+                  {TERRITORY_BRANDS.map((brand) => (
+                    <td key={brand}>
+                      <input
+                        className="table-input"
+                        inputMode="numeric"
+                        min="0"
+                        type="number"
+                        value={draft.brandWeeks[week.id]?.[brand] || ""}
+                        onChange={(event) => updateWeekGoal(week.id, brand, event.target.value)}
+                      />
+                    </td>
+                  ))}
+                  <td>{formatUsd(goal)}</td>
+                  <td>{formatUsd(actual)}</td>
+                  <td>{percentLabel(actual, goal)}</td>
+                  <td>{formatUsd(variance)}</td>
+                  <td>
+                    <input
+                      className="table-input notes-input"
+                      value={draft.notes[week.id] || ""}
+                      onChange={(event) => updateWeekNote(week.id, event.target.value)}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  );
+}
+
 function StoreDetailDrawer({
   selectedStore,
   activeTab,
   setActiveTab,
   onBuyerSaved,
   onContactLogSaved,
+  orderLines = [],
   routeAction
 }: {
   selectedStore?: StoreRollup;
@@ -1941,6 +3385,7 @@ function StoreDetailDrawer({
   setActiveTab: (tab: DetailTab) => void;
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
+  orderLines?: OrderLine[];
   routeAction?: {
     disabled: boolean;
     isAdded: boolean;
@@ -1996,6 +3441,7 @@ function StoreDetailDrawer({
           store={selectedStore}
           onBuyerSaved={onBuyerSaved}
           onContactLogSaved={onContactLogSaved}
+          orderLines={orderLines}
         />
       ) : null}
     </aside>
@@ -2006,19 +3452,29 @@ function StoreDetailContent({
   activeTab,
   store,
   onBuyerSaved,
-  onContactLogSaved
+  onContactLogSaved,
+  orderLines = []
 }: {
   activeTab: DetailTab;
   store: StoreRollup;
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
+  orderLines?: OrderLine[];
 }) {
   if (activeTab === "orders") {
+    const paidLines = orderLines.filter(isPaidOrderLine);
+    const recentLines = [...paidLines]
+      .sort((left, right) => orderTimestamp(right.submittedAt) - orderTimestamp(left.submittedAt))
+      .slice(0, 8);
+
     return (
       <div className="detail-stack">
         <div className="metrics detail-metrics">
-          <DetailStat label="Orders" value={store.orders.toLocaleString()} />
-          <DetailStat label="Brand Revenue" value={formatUsd(store.brandRevenue)} />
+          <DetailStat label="Orders" value={(paidLines.length ? uniqueOrderCount(paidLines) : store.orders).toLocaleString()} />
+          <DetailStat
+            label="Brand Revenue"
+            value={formatUsd(paidLines.length ? paidLines.reduce((total, line) => total + line.lineTotal, 0) : store.brandRevenue)}
+          />
         </div>
         <div className="detail-list">
           <DetailRow label="Last order" value={formatDate(store.lastOrderAt)} />
@@ -2028,6 +3484,30 @@ function StoreDetailContent({
           <DetailRow label="Mayfield active" value={formatUsd(store.mayfieldActiveRevenue)} />
           <DetailRow label="Leisure Land active" value={formatUsd(store.leisureLandActiveRevenue)} />
         </div>
+        {recentLines.length ? (
+          <table className="mini-table">
+            <thead>
+              <tr>
+                <th>Order</th>
+                <th>Brand</th>
+                <th>Product</th>
+                <th>Units</th>
+                <th>Sales</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentLines.map((line) => (
+                <tr key={line.orderItemId}>
+                  <td>{line.orderNumber}</td>
+                  <td>{line.brand}</td>
+                  <td>{line.productName || "-"}</td>
+                  <td>{line.units.toLocaleString()}</td>
+                  <td>{formatUsd(line.lineTotal)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
       </div>
     );
   }
@@ -2075,12 +3555,14 @@ function StoreDetailContent({
   );
 }
 
-export function StoreDashboard({ snapshot }: StoreDashboardProps) {
+export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   const [stores, setStores] = useState(snapshot.stores);
+  const orderLines = snapshot.orderLines || [];
+  const salesGoals = snapshot.salesGoals || [];
   const [storeQuery, setStoreQuery] = useState("");
   const [draftFilters, setDraftFilters] = useState<StoreFilters>(defaultStoreFilters);
   const [appliedFilters, setAppliedFilters] = useState<StoreFilters>(defaultStoreFilters);
-  const [activeView, setActiveView] = useState<ViewMode>("stores");
+  const [activeView, setActiveView] = useState<ViewMode>(() => normalizeViewMode(initialView));
   const [activeTab, setActiveTab] = useState<DetailTab>("contact");
   const [sortKey, setSortKey] = useState<SortKey>("storeRevenue");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -2118,7 +3600,35 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   const appliedBrandFilters = normalizeBrandFilters(appliedFilters.brand);
   const draftActiveFilterCount = countActiveFilters(draftFilters);
   const appliedActiveFilterCount = countActiveFilters(appliedFilters);
-  const selectedStore = sortedStores.find((store) => storeKey(store) === selectedStoreKey) || sortedStores[0];
+  const selectedStore = stores.find((store) => storeKey(store) === selectedStoreKey) || sortedStores[0] || stores[0];
+  const selectedStoreKeys = useMemo(() => (
+    selectedStore ? new Set(storeIdentityKeys(selectedStore)) : new Set<string>()
+  ), [selectedStore]);
+  const selectedStoreOrderLines = useMemo(() => (
+    selectedStoreKeys.size
+      ? orderLines.filter((line) => orderLineStoreKeys(line).some((key) => selectedStoreKeys.has(key)))
+      : []
+  ), [orderLines, selectedStoreKeys]);
+  const viewTitle = activeView === "map"
+    ? "Map"
+    : activeView === "orders"
+    ? "Orders"
+    : activeView === "goals"
+    ? "Goals"
+    : activeView === "sync"
+    ? "Sync"
+    : "Stores";
+  const viewCaption = activeView === "map"
+    ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores · ${tripStoreKeys.length.toLocaleString()} stops planned`
+    : activeView === "orders"
+    ? `${orderLines.length.toLocaleString()} order lines · ${uniqueOrderCount(orderLines).toLocaleString()} orders`
+    : activeView === "goals"
+    ? `${salesGoals.length.toLocaleString()} saved goal rows · ${uniqueOrderCount(orderLines).toLocaleString()} orders feeding actuals`
+    : activeView === "sync"
+    ? `${uniqueOrderCount(orderLines).toLocaleString()} synced orders · ${orderLines.length.toLocaleString()} line items`
+    : snapshot.source === "demo"
+    ? "Demo shell. Connect Supabase to load live CRM data."
+    : "Live Supabase data";
   const rowMetaBase = normalizedStoreQuery
     ? `${sortedStores.length.toLocaleString()} of ${stores.length.toLocaleString()} rows`
     : `${sortedStores.length.toLocaleString()} rows`;
@@ -2131,14 +3641,29 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
   }, [snapshot.stores]);
 
   useEffect(() => {
-    if (!sortedStores.length) {
+    setActiveView(normalizeViewMode(initialView));
+  }, [initialView]);
+
+  useEffect(() => {
+    function handlePopState() {
+      const params = new URLSearchParams(window.location.search);
+      setActiveView(normalizeViewMode(params.get("view")));
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    const selectionScope = activeView === "orders" || activeView === "goals" || activeView === "sync" ? stores : sortedStores;
+    if (!selectionScope.length) {
       setSelectedStoreKey("");
       return;
     }
-    if (!sortedStores.some((store) => storeKey(store) === selectedStoreKey)) {
-      setSelectedStoreKey(storeKey(sortedStores[0]));
+    if (!selectionScope.some((store) => storeKey(store) === selectedStoreKey)) {
+      setSelectedStoreKey(storeKey(selectionScope[0]));
     }
-  }, [selectedStoreKey, sortedStores]);
+  }, [activeView, selectedStoreKey, sortedStores, stores]);
 
   useEffect(() => {
     setTripStoreKeys((currentKeys) => {
@@ -2179,6 +3704,17 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
 
   const handleStoreSelect = useCallback((nextStoreKey: string) => {
     setSelectedStoreKey(nextStoreKey);
+  }, []);
+
+  const handleViewChange = useCallback((nextView: ViewMode) => {
+    setActiveView(nextView);
+    if (typeof window === "undefined") {
+      return;
+    }
+    const nextUrl = nextView === "stores"
+      ? window.location.pathname
+      : `${window.location.pathname}?view=${nextView}`;
+    window.history.pushState(null, "", nextUrl);
   }, []);
 
   const handleSetRouteDestination = useCallback((nextStoreKey: string) => {
@@ -2258,23 +3794,21 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
           <span>Balaclava Brands</span>
         </div>
         <nav className="nav" aria-label="Main navigation">
-          <button
-            className={activeView === "stores" ? "active" : ""}
-            type="button"
-            onClick={() => setActiveView("stores")}
-          >
+          <a className={activeView === "stores" ? "active" : ""} href="/">
             Stores
-          </button>
-          <button
-            className={activeView === "map" ? "active" : ""}
-            type="button"
-            onClick={() => setActiveView("map")}
-          >
+          </a>
+          <a className={activeView === "map" ? "active" : ""} href="/?view=map">
             Map
-          </button>
-          <button type="button">Orders</button>
-          <button type="button">Goals</button>
-          <button type="button">Sync</button>
+          </a>
+          <a className={activeView === "orders" ? "active" : ""} href="/?view=orders">
+            Orders
+          </a>
+          <a className={activeView === "goals" ? "active" : ""} href="/?view=goals">
+            Goals
+          </a>
+          <a className={activeView === "sync" ? "active" : ""} href="/?view=sync">
+            Sync
+          </a>
         </nav>
       </aside>
 
@@ -2282,161 +3816,159 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
         <section className="toolbar">
           <div className="toolbar-title">
             <div>
-              <h2>{activeView === "map" ? "Map" : "Stores"}</h2>
-              <div className="caption">
-                {activeView === "map"
-                  ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores · ${tripStoreKeys.length.toLocaleString()} stops planned`
-                  : snapshot.source === "demo"
-                  ? "Demo shell. Connect Supabase to load live CRM data."
-                  : "Live Supabase data"}
-              </div>
+              <h2>{viewTitle}</h2>
+              <div className="caption">{viewCaption}</div>
             </div>
-            <button className="primary-button" type="button" onClick={() => setActiveView("map")}>
+            <button className="primary-button" type="button" onClick={() => handleViewChange("map")}>
               <MapIcon size={16} /> Launch Map
             </button>
           </div>
 
-          <form className="filters" aria-label="Store filters" onSubmit={handleApplyFilters}>
-            <div className="field store-filter-field">
-              <label>Stores</label>
-              <input
-                type="search"
-                value={storeQuery}
-                onChange={(event) => setStoreQuery(event.target.value)}
-                placeholder="Name or license"
-              />
-            </div>
-            <div className="field">
-              <FilterLabel active={appliedFilters.balaclavaSales !== "all"}>Balaclava Sales</FilterLabel>
-              <select
-                value={draftFilters.balaclavaSales}
-                onChange={(event) => (
-                  updateDraftFilter("balaclavaSales", event.target.value as BalaclavaSalesFilter)
-                )}
-              >
-                <option value="all">Any range</option>
-                <option value="1000">$1k+</option>
-                <option value="5000">$5k+</option>
-              </select>
-            </div>
-            <div className="field">
-              <FilterLabel active={appliedFilters.storeRevenue !== "all"}>Store Revenue</FilterLabel>
-              <select
-                value={draftFilters.storeRevenue}
-                onChange={(event) => (
-                  updateDraftFilter("storeRevenue", event.target.value as StoreRevenueFilter)
-                )}
-              >
-                <option value="all">Any range</option>
-                <option value="300">$300+</option>
-                <option value="50000">$50k+</option>
-                <option value="100000">$100k+</option>
-              </select>
-            </div>
-            <div className="field">
-              <FilterLabel active={appliedBrandFilters.length > 0}>Brand</FilterLabel>
-              <details className="multi-select">
-                <summary className="multi-select-trigger">{brandFilterLabel(draftBrandFilters)}</summary>
-                <div className="multi-select-menu">
-                  <label className="check-option">
-                    <input
-                      checked={!draftBrandFilters.length}
-                      onChange={() => updateDraftFilter("brand", [])}
-                      type="checkbox"
-                    />
-                    <span className="check-option-label">All brands</span>
-                    <span aria-hidden="true" className="filter-brand-dots">
-                      {TERRITORY_BRANDS.map((brand) => (
-                        <span
-                          className="filter-brand-dot"
-                          key={brand}
-                          style={{ background: BRAND_DOT_COLORS[brand] ?? "var(--muted)" }}
-                        />
-                      ))}
-                    </span>
-                  </label>
-                  {TERRITORY_BRANDS.map((brand) => (
-                    <label className="check-option" key={brand}>
+          {activeView === "stores" || activeView === "map" ? (
+            <form className="filters" aria-label="Store filters" onSubmit={handleApplyFilters}>
+              <div className="field store-filter-field">
+                <label>Stores</label>
+                <input
+                  type="search"
+                  value={storeQuery}
+                  onChange={(event) => setStoreQuery(event.target.value)}
+                  placeholder="Name or license"
+                />
+              </div>
+              <div className="field">
+                <FilterLabel active={appliedFilters.balaclavaSales !== "all"}>Balaclava Sales</FilterLabel>
+                <select
+                  value={draftFilters.balaclavaSales}
+                  onChange={(event) => (
+                    updateDraftFilter("balaclavaSales", event.target.value as BalaclavaSalesFilter)
+                  )}
+                >
+                  <option value="all">Any range</option>
+                  <option value="1000">$1k+</option>
+                  <option value="5000">$5k+</option>
+                </select>
+              </div>
+              <div className="field">
+                <FilterLabel active={appliedFilters.storeRevenue !== "all"}>Store Revenue</FilterLabel>
+                <select
+                  value={draftFilters.storeRevenue}
+                  onChange={(event) => (
+                    updateDraftFilter("storeRevenue", event.target.value as StoreRevenueFilter)
+                  )}
+                >
+                  <option value="all">Any range</option>
+                  <option value="300">$300+</option>
+                  <option value="50000">$50k+</option>
+                  <option value="100000">$100k+</option>
+                </select>
+              </div>
+              <div className="field">
+                <FilterLabel active={appliedBrandFilters.length > 0}>Brand</FilterLabel>
+                <details className="multi-select">
+                  <summary className="multi-select-trigger">{brandFilterLabel(draftBrandFilters)}</summary>
+                  <div className="multi-select-menu">
+                    <label className="check-option">
                       <input
-                        checked={draftBrandFilters.includes(brand)}
-                        onChange={(event) => toggleDraftBrand(brand, event.target.checked)}
+                        checked={!draftBrandFilters.length}
+                        onChange={() => updateDraftFilter("brand", [])}
                         type="checkbox"
                       />
-                      <span className="check-option-label">{brand}</span>
-                      <span
-                        aria-hidden="true"
-                        className="filter-brand-dot"
-                        style={{ background: BRAND_DOT_COLORS[brand] ?? "var(--muted)" }}
-                      />
+                      <span className="check-option-label">All brands</span>
+                      <span aria-hidden="true" className="filter-brand-dots">
+                        {TERRITORY_BRANDS.map((brand) => (
+                          <span
+                            className="filter-brand-dot"
+                            key={brand}
+                            style={{ background: BRAND_DOT_COLORS[brand] ?? "var(--muted)" }}
+                          />
+                        ))}
+                      </span>
                     </label>
+                    {TERRITORY_BRANDS.map((brand) => (
+                      <label className="check-option" key={brand}>
+                        <input
+                          checked={draftBrandFilters.includes(brand)}
+                          onChange={(event) => toggleDraftBrand(brand, event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span className="check-option-label">{brand}</span>
+                        <span
+                          aria-hidden="true"
+                          className="filter-brand-dot"
+                          style={{ background: BRAND_DOT_COLORS[brand] ?? "var(--muted)" }}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </details>
+              </div>
+              <div className="field">
+                <FilterLabel active={appliedFilters.pareto !== "all"}>Pareto</FilterLabel>
+                <select
+                  value={draftFilters.pareto}
+                  onChange={(event) => updateDraftFilter("pareto", event.target.value as ParetoFilter)}
+                >
+                  <option value="all">All stores</option>
+                  <option value="top30">Top 30</option>
+                  <option value="eighty">80% revenue set</option>
+                </select>
+              </div>
+              <div className="field">
+                <FilterLabel active={appliedFilters.priority !== "all"}>Priority</FilterLabel>
+                <select
+                  value={draftFilters.priority}
+                  onChange={(event) => updateDraftFilter("priority", event.target.value as PriorityFilter)}
+                >
+                  <option value="all">All priorities</option>
+                  <option value="lapsed">Lapsed</option>
+                  <option value="open-lane">Open lane</option>
+                </select>
+              </div>
+              <div className="field">
+                <FilterLabel active={appliedFilters.region !== "all"}>Region</FilterLabel>
+                <select
+                  value={draftFilters.region}
+                  onChange={(event) => updateDraftFilter("region", event.target.value)}
+                >
+                  <option value="all">All regions</option>
+                  {regionOptions.map((region) => (
+                    <option key={region} value={region}>
+                      {region.replace(/\b\w/g, (letter) => letter.toUpperCase())}
+                    </option>
                   ))}
-                </div>
-              </details>
-            </div>
-            <div className="field">
-              <FilterLabel active={appliedFilters.pareto !== "all"}>Pareto</FilterLabel>
-              <select
-                value={draftFilters.pareto}
-                onChange={(event) => updateDraftFilter("pareto", event.target.value as ParetoFilter)}
-              >
-                <option value="all">All stores</option>
-                <option value="top30">Top 30</option>
-                <option value="eighty">80% revenue set</option>
-              </select>
-            </div>
-            <div className="field">
-              <FilterLabel active={appliedFilters.priority !== "all"}>Priority</FilterLabel>
-              <select
-                value={draftFilters.priority}
-                onChange={(event) => updateDraftFilter("priority", event.target.value as PriorityFilter)}
-              >
-                <option value="all">All priorities</option>
-                <option value="lapsed">Lapsed</option>
-                <option value="open-lane">Open lane</option>
-              </select>
-            </div>
-            <div className="field">
-              <FilterLabel active={appliedFilters.region !== "all"}>Region</FilterLabel>
-              <select
-                value={draftFilters.region}
-                onChange={(event) => updateDraftFilter("region", event.target.value)}
-              >
-                <option value="all">All regions</option>
-                {regionOptions.map((region) => (
-                  <option key={region} value={region}>
-                    {region.replace(/\b\w/g, (letter) => letter.toUpperCase())}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <button className="primary-button" type="submit">
-              <SlidersHorizontal size={16} /> Apply{draftActiveFilterCount ? ` (${draftActiveFilterCount})` : ""}
-            </button>
-          </form>
+                </select>
+              </div>
+              <button className="primary-button" type="submit">
+                <SlidersHorizontal size={16} /> Apply{draftActiveFilterCount ? ` (${draftActiveFilterCount})` : ""}
+              </button>
+            </form>
+          ) : null}
         </section>
 
-        <section className="metrics">
-          <div className="metric">
-            <div className="metric-label">Retailers</div>
-            <div className="metric-value">{metrics.totalRetailers.toLocaleString()}</div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">Mapped</div>
-            <div className="metric-value">{metrics.mappedStores.toLocaleString()}</div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">Lapsed Priority</div>
-            <div className="metric-value">{metrics.lapsedPriority.toLocaleString()}</div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">Open Lane</div>
-            <div className="metric-value">{metrics.openLanePriority.toLocaleString()}</div>
-          </div>
-          <div className="metric">
-            <div className="metric-label">Pitch Mayfield</div>
-            <div className="metric-value">{metrics.pitchMayfield.toLocaleString()}</div>
-          </div>
-        </section>
+        {activeView === "stores" || activeView === "map" ? (
+          <section className="metrics">
+            <div className="metric">
+              <div className="metric-label">Retailers</div>
+              <div className="metric-value">{metrics.totalRetailers.toLocaleString()}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Mapped</div>
+              <div className="metric-value">{metrics.mappedStores.toLocaleString()}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Lapsed Priority</div>
+              <div className="metric-value">{metrics.lapsedPriority.toLocaleString()}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Open Lane</div>
+              <div className="metric-value">{metrics.openLanePriority.toLocaleString()}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Pitch Mayfield</div>
+              <div className="metric-value">{metrics.pitchMayfield.toLocaleString()}</div>
+            </div>
+          </section>
+        ) : null}
 
         {activeView === "stores" ? (
           <section className="content-grid">
@@ -2518,11 +4050,13 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
               setActiveTab={setActiveTab}
               onBuyerSaved={handleBuyerSaved}
               onContactLogSaved={handleContactLogSaved}
+              orderLines={selectedStoreOrderLines}
             />
           </section>
-        ) : (
+        ) : activeView === "map" ? (
           <TripPlanner
             stores={sortedStores}
+            orderLines={orderLines}
             selectedStore={selectedStore}
             activeTab={activeTab}
             setActiveTab={setActiveTab}
@@ -2536,6 +4070,24 @@ export function StoreDashboard({ snapshot }: StoreDashboardProps) {
             onSelectStore={handleStoreSelect}
             onBuyerSaved={handleBuyerSaved}
             onContactLogSaved={handleContactLogSaved}
+          />
+        ) : activeView === "orders" ? (
+          <OrdersView
+            orderLines={orderLines}
+            stores={stores}
+            selectedStore={selectedStore}
+            onSelectStore={handleStoreSelect}
+          />
+        ) : activeView === "sync" ? (
+          <SyncView
+            orderLines={orderLines}
+            salesGoals={salesGoals}
+            stores={stores}
+          />
+        ) : (
+          <GoalsView
+            orderLines={orderLines}
+            salesGoals={salesGoals}
           />
         )}
       </main>

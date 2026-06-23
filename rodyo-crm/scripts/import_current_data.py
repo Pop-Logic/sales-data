@@ -211,6 +211,18 @@ class SupabaseRestClient:
             prefer="return=minimal",
         )
 
+    def delete_where_in(self, table: str, column: str, values: list[str], *, chunk_size: int = 250) -> None:
+        if not values:
+            return
+        for chunk in chunks([{"value": value} for value in values], chunk_size):
+            in_values = ",".join(str(row["value"]) for row in chunk)
+            self.request(
+                "DELETE",
+                table,
+                params={column: f"in.({in_values})"},
+                prefer="return=minimal",
+            )
+
 
 def chunks(values: list[dict[str, Any]], size: int):
     for index in range(0, len(values), size):
@@ -939,6 +951,8 @@ def import_orders(ctx: ImportContext, orders_df: pd.DataFrame) -> tuple[int, int
             (row["order_number"], row.get("license_key") or ""): row
             for row in client.select("orders", "id,order_number,license_key")
         }
+        imported_order_ids = sorted({str(row["id"]) for row in imported_orders.values() if row.get("id")})
+        client.delete_where_in("order_items", "order_id", imported_order_ids)
         for _, row in orders_df.iterrows():
             order_number = clean_reference(row.get(order_number_col))
             license_key = license_match_key(row.get(license_col))

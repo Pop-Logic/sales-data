@@ -985,6 +985,354 @@ textarea {
   font-weight: 700;
 }
 
+.orders-view {
+  display: grid;
+  gap: 14px;
+}
+
+.orders-filter-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.orders-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sync-message {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.sync-message-success {
+  border-color: rgba(46, 204, 113, 0.45);
+  color: var(--green);
+}
+
+.sync-message-error {
+  border-color: rgba(255, 91, 143, 0.45);
+  color: var(--pink);
+}
+
+.orders-filter-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.5fr) repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.orders-metrics {
+  margin-top: 0;
+}
+
+.brand-summary-grid,
+.product-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.brand-summary-card,
+.product-summary {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 12px;
+}
+
+.brand-summary-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand-summary-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-summary-value {
+  font-size: 1.25rem;
+  font-weight: 800;
+}
+
+.brand-summary-meta {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.summary-bar {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.summary-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+}
+
+.orders-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.sync-view {
+  display: grid;
+  gap: 14px;
+}
+
+.sync-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+}
+
+.sync-hero h3 {
+  margin: 0;
+}
+
+.sync-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.sync-brand-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.goals-view {
+  display: grid;
+  gap: 14px;
+}
+
+.goals-controls {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 14px;
+}
+
+.goals-save {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 220px;
+}
+
+.goals-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.82fr) minmax(420px, 1.18fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.goal-input-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.goal-input-grid label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.goal-chart {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px 14px;
+}
+
+.goal-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.goal-grid-line {
+  stroke: rgba(165, 176, 186, 0.22);
+  stroke-width: 1;
+}
+
+.goal-axis-label {
+  fill: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.goal-daily-bar {
+  fill: rgba(55, 138, 221, 0.38);
+}
+
+.goal-line {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.goal-line-actual {
+  stroke: var(--green);
+}
+
+.goal-line-eom {
+  stroke: var(--gold);
+  stroke-dasharray: 8 6;
+}
+
+.goal-line-weekly {
+  stroke: var(--orange);
+  stroke-dasharray: 4 5;
+}
+
+.goal-line-projected {
+  stroke: var(--muted);
+  stroke-dasharray: 8 6;
+}
+
+.goal-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.goal-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+}
+
+.legend-actual {
+  background: var(--green);
+}
+
+.legend-eom {
+  background: var(--gold);
+}
+
+.legend-weekly {
+  background: var(--orange);
+}
+
+.legend-projected {
+  background: var(--muted);
+}
+
+.table-input {
+  width: 100%;
+  min-width: 88px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 8px;
+}
+
+.notes-input {
+  min-width: 190px;
+}
+
+.goal-table td {
+  vertical-align: top;
+}
+
+.table-scroll {
+  overflow: auto;
+}
+
+.data-table,
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table th,
+.data-table td,
+.mini-table th,
+.mini-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 9px 10px;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.data-table th,
+.mini-table th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.data-table td,
+.mini-table td {
+  font-size: 0.84rem;
+}
+
+.data-table tbody tr {
+  cursor: pointer;
+}
+
+.data-table tbody tr:hover,
+.data-table tbody tr.is-selected {
+  background: rgba(125, 194, 174, 0.1);
+}
+
+.mini-table {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mini-table td {
+  color: var(--text);
+}
+
+.mini-table td:first-child,
+.data-table td:first-child {
+  min-width: 150px;
+}
+
 @media (max-width: 1080px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -998,8 +1346,27 @@ textarea {
   .filters,
   .metrics,
   .content-grid,
-  .trip-layout {
+  .trip-layout,
+  .orders-filter-grid,
+  .sync-grid,
+  .sync-brand-grid,
+  .goals-controls,
+  .goals-grid,
+  .goal-input-grid,
+  .brand-summary-grid,
+  .product-summary-grid,
+  .orders-grid {
     grid-template-columns: 1fr;
+  }
+
+  .goals-save {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+
+  .sync-hero {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .map-side-rail {

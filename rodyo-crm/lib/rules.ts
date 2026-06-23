@@ -74,6 +74,35 @@ export type StoreRollup = {
   hasContactThisWeek: boolean;
 };
 
+export type OrderLine = {
+  orderId: string;
+  orderItemId: string;
+  orderNumber: string;
+  storeId?: string | null;
+  license?: string | null;
+  licenseKey?: string | null;
+  storeName: string;
+  submittedAt?: string | null;
+  status?: string | null;
+  brand: string;
+  productName?: string | null;
+  subProductLine?: string | null;
+  units: number;
+  lineTotal: number;
+};
+
+export type SalesGoal = {
+  id?: string;
+  goalMonth: string;
+  goalType: string;
+  weekId?: string | null;
+  weekLabel?: string | null;
+  brand?: string | null;
+  goalAmount: number;
+  notes?: string | null;
+  updatedAt?: string | null;
+};
+
 export function priorityFromScore(score: number): PriorityLevel {
   if (score >= 0.75) return "High";
   if (score >= 0.4) return "Medium";
