@@ -544,7 +544,7 @@ function sortValueForStore(store: StoreRollup, sortKey: SortKey) {
     return prioritySortValue(store);
   }
   if (sortKey === "balaclava") {
-    return store.latestMonthRevenue;
+    return latestBalaclavaRevenue(store);
   }
   if (sortKey === "storeRevenue") {
     return store.marketSalesLastMonth;
@@ -732,7 +732,7 @@ function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
 
   if (filters.balaclavaSales !== "all") {
     const minimum = Number(filters.balaclavaSales);
-    nextStores = nextStores.filter((store) => store.latestMonthRevenue >= minimum);
+    nextStores = nextStores.filter((store) => latestBalaclavaRevenue(store) >= minimum);
   }
 
   if (filters.storeRevenue !== "all") {
@@ -1324,7 +1324,16 @@ function latestMonthBrandContributions(store: StoreRollup) {
 }
 
 function latestBalaclavaMonthLabel(store: StoreRollup) {
-  return formatMonth(store.latestMonth || store.latestBrandMonth || store.kSavageLastOrderAt);
+  // Prefer the latest month the store actually ordered a Balaclava brand (from
+  // the orders feed) over the realized monthly-revenue profile, which lags
+  // behind orders that aren't Paid yet.
+  return formatMonth(store.latestBrandMonth || store.latestMonth || store.kSavageLastOrderAt);
+}
+
+// Balaclava revenue for the latest actual order month, falling back to the
+// realized monthly figure for stores with no recent brand orders.
+function latestBalaclavaRevenue(store: StoreRollup) {
+  return store.latestMonthBrandRevenue > 0 ? store.latestMonthBrandRevenue : store.latestMonthRevenue;
 }
 
 function LatestMonthStat({ store }: { store: StoreRollup }) {
@@ -1379,7 +1388,7 @@ function StoreDetailSummary({ store }: { store: StoreRollup }) {
         <DetailRow label="Location" value={location} />
         <DetailRow
           label={latestMonthLabel ? `Latest Balaclava (${latestMonthLabel})` : "Latest Balaclava"}
-          value={formatUsd(store.latestMonthRevenue)}
+          value={formatUsd(latestBalaclavaRevenue(store))}
         />
         <DetailRow label="Market sales" value={formatUsd(store.marketSalesLastMonth)} />
         <DetailRow label="Orders" value={store.orders.toLocaleString()} />
@@ -1652,7 +1661,7 @@ function createPopupContent(store: StoreRollup) {
   container.appendChild(brands);
 
   const revenue = document.createElement("span");
-  revenue.textContent = `Balaclava ${formatUsd(store.latestMonthRevenue)} · Market ${formatUsd(store.marketSalesLastMonth)}`;
+  revenue.textContent = `Balaclava ${formatUsd(latestBalaclavaRevenue(store))} · Market ${formatUsd(store.marketSalesLastMonth)}`;
   container.appendChild(revenue);
 
   return container;
@@ -2095,7 +2104,7 @@ function TripPlanner({
   const estimatedMiles = estimatedTripMiles(orderedTripStores, routeStart);
   const routeUrl = googleMapsRouteUrl(orderedTripStores, routeStart);
   const launchStopCount = Math.min(orderedTripStores.length, GOOGLE_MAPS_ROUTE_STOP_LIMIT);
-  const tripBalaclava = orderedTripStores.reduce((total, store) => total + store.latestMonthRevenue, 0);
+  const tripBalaclava = orderedTripStores.reduce((total, store) => total + latestBalaclavaRevenue(store), 0);
   const tripMarket = orderedTripStores.reduce((total, store) => total + store.marketSalesLastMonth, 0);
   const selectedStoreKey = selectedStore ? storeKey(selectedStore) : "";
   const selectedStoreKeys = useMemo(() => (
@@ -4362,7 +4371,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
                       <td className="priority-cell">
                         <PriorityDot store={store} />
                       </td>
-                      <td>{formatUsd(store.latestMonthRevenue)}</td>
+                      <td>{formatUsd(latestBalaclavaRevenue(store))}</td>
                       <td>{formatUsd(store.marketSalesLastMonth)}</td>
                       <td>{formatShortDate(store.lastOrderAt)}</td>
                       <td>{store.territoryRep || "-"}</td>
