@@ -810,7 +810,8 @@ function formatDate(value?: string | null) {
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
-    year: "numeric"
+    year: "numeric",
+    timeZone: "UTC"
   }).format(date);
 }
 
@@ -825,7 +826,8 @@ function formatShortDate(value?: string | null) {
   return new Intl.DateTimeFormat("en-US", {
     month: "2-digit",
     day: "2-digit",
-    year: "2-digit"
+    year: "2-digit",
+    timeZone: "UTC"
   }).format(date);
 }
 
