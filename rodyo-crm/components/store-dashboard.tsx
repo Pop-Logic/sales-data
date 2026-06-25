@@ -19,6 +19,7 @@ import {
   TERRITORY_MAP_COLORS,
   formatUsd,
   isStoreOverdue,
+  overdueColor,
   type OrderLine,
   type SalesGoal,
   type StoreRollup
@@ -624,6 +625,18 @@ function prioritySortValue(store: StoreRollup) {
 }
 
 function PriorityDot({ store }: { store: StoreRollup }) {
+  if (isStoreOverdue(store)) {
+    const label = `Overdue${store.priorityLevel ? ` · ${store.priorityLevel} priority` : ""}`;
+    return (
+      <span
+        aria-label={label}
+        className="priority-dot"
+        style={{ background: overdueColor(store) }}
+        title={label}
+      />
+    );
+  }
+
   const rank = priorityRank(store);
   if (!rank) {
     return <span aria-label="No priority status" className="priority-empty" />;
@@ -1766,9 +1779,19 @@ function StoreMap({
       const element = document.createElement("button");
       element.type = "button";
       element.className = `map-marker${key === selectedStoreKeyRef.current ? " is-selected" : ""}`;
-      element.style.background = TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)";
+      element.style.background = isStoreOverdue(store)
+        ? overdueColor(store)
+        : (TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)");
       element.setAttribute("aria-label", `Select ${store.storeName}`);
-      element.addEventListener("click", () => onSelect(key));
+      element.addEventListener("click", () => {
+        // Close any other open popup so only the clicked pin's popup shows.
+        markersRef.current.forEach(({ marker: openMarker }, markerKey) => {
+          if (markerKey !== key) {
+            openMarker.getPopup()?.remove();
+          }
+        });
+        onSelect(key);
+      });
 
       const popup = new maplibregl.Popup({
         closeButton: false,
@@ -3692,7 +3715,10 @@ function StoreDetailContent({
   }
 
   return (
-    <ContactLogForm store={store} onSaved={onContactLogSaved} />
+    <div className="detail-stack">
+      <ContactLogForm store={store} onSaved={onContactLogSaved} />
+      <ContactLogHistory store={store} />
+    </div>
   );
 }
 

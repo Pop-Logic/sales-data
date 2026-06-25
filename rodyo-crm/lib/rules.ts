@@ -139,6 +139,25 @@ export function isStoreOverdue(store: StoreRollup): boolean {
   return days === null ? true : days > OVERDUE_REORDER_DAYS;
 }
 
+// Red pin/dot palette for Overdue stores, shaded by priority where a level is
+// available (lapsed stores carry High/Medium/Low; other overdue stores default
+// to the mid red). Overdue red takes precedence over the lapsed gold range.
+export const OVERDUE_MAP_COLORS: Record<PriorityLevel, string> = {
+  High: "#B11A1A",
+  Medium: "#E03131",
+  Low: "#FF8A8A"
+};
+
+export function overdueColor(store: StoreRollup): string {
+  if (store.priorityLevel === "High") {
+    return OVERDUE_MAP_COLORS.High;
+  }
+  if (store.priorityLevel === "Low") {
+    return OVERDUE_MAP_COLORS.Low;
+  }
+  return OVERDUE_MAP_COLORS.Medium;
+}
+
 export function contactCheckmarks(store: StoreRollup) {
   return {
     ever: store.hasContactEver,
