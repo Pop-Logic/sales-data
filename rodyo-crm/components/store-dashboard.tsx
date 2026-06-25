@@ -599,6 +599,16 @@ function matchesPriorityFilter(store: StoreRollup, priority: PriorityFilter) {
   return true;
 }
 
+function isStoreLapsed(store: StoreRollup) {
+  return store.mapCategory.toLowerCase().includes("lapsed");
+}
+
+// Overdue gets a red pin/dot, but only until a store fully lapses — lapsed
+// stores keep their gold range so both bands stay distinct on the map.
+function showsOverdueColor(store: StoreRollup) {
+  return isStoreOverdue(store) && !isStoreLapsed(store);
+}
+
 function priorityRank(store: StoreRollup) {
   if (!store.mapCategory.includes("Priority")) {
     return 0;
@@ -625,7 +635,7 @@ function prioritySortValue(store: StoreRollup) {
 }
 
 function PriorityDot({ store }: { store: StoreRollup }) {
-  if (isStoreOverdue(store)) {
+  if (showsOverdueColor(store)) {
     const label = `Overdue${store.priorityLevel ? ` · ${store.priorityLevel} priority` : ""}`;
     return (
       <span
@@ -1779,7 +1789,7 @@ function StoreMap({
       const element = document.createElement("button");
       element.type = "button";
       element.className = `map-marker${key === selectedStoreKeyRef.current ? " is-selected" : ""}`;
-      element.style.background = isStoreOverdue(store)
+      element.style.background = showsOverdueColor(store)
         ? overdueColor(store)
         : (TERRITORY_MAP_COLORS[store.mapCategory] ?? "var(--muted)");
       element.setAttribute("aria-label", `Select ${store.storeName}`);
