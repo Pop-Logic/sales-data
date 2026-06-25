@@ -7,3 +7,4 @@ dist/
 *.tsbuildinfo
 supabase/.branches/
 supabase/.temp/
+.vercel

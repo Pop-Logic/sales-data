@@ -1,0 +1,9 @@
+sales-ops-dashboard
+sales-ops-dashboard.zip
+Data
+__pycache__
+*.zip
+.git
+**/node_modules
+**/.next
+**/.env*

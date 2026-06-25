@@ -8,3 +8,4 @@ Data/*.sqlite3-*
 Data/*.db
 venv/
 .venv/
+.vercel
