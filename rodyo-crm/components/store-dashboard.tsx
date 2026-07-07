@@ -31,9 +31,12 @@ type StoreDashboardProps = {
   initialView?: string | null;
 };
 
-type ViewMode = "stores" | "map" | "orders" | "goals" | "sync";
+type ViewMode = "stores" | "map" | "orders" | "skus" | "goals" | "sync";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
 type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "rep" | "log";
+type SkuSortKey = "product" | "category" | "brand" | "units" | "revenue" | "stores" | "coverage" | "avgUnits" | "lastOrdered";
+type CatSortKey = "category" | "skuCount" | "units" | "revenue" | "stores" | "coverage";
+type SkuGroupMode = "sku" | "category";
 type SortDirection = "asc" | "desc";
 type BalaclavaSalesFilter = "all" | "1000" | "5000";
 type StoreRevenueFilter = "all" | "300" | "50000" | "100000";
@@ -72,7 +75,7 @@ type ContactLogPatch = {
 type SyncState = "idle" | "syncing" | "success" | "error";
 
 function normalizeViewMode(value?: string | null): ViewMode {
-  return value === "map" || value === "orders" || value === "goals" || value === "sync" ? value : "stores";
+  return value === "map" || value === "orders" || value === "skus" || value === "goals" || value === "sync" ? value : "stores";
 }
 
 const defaultStoreFilters: StoreFilters = {
@@ -829,6 +832,12 @@ function formatShortDate(value?: string | null) {
     year: "2-digit",
     timeZone: "UTC"
   }).format(date);
+}
+
+function normalizeCategory(subProductLine?: string | null): string {
+  if (!subProductLine) return "Uncategorized";
+  const stripped = subProductLine.replace(/^(KS|MF|LL)[- ]/i, "").trim();
+  return stripped || subProductLine;
 }
 
 function formatSyncDateTime(value?: string | null) {
@@ -3473,6 +3482,509 @@ function GoalsView({
   );
 }
 
+function SkuAnalyticsView({
+  orderLines
+}: {
+  orderLines: OrderLine[];
+  stores: StoreRollup[];
+}) {
+  const [skuQuery, setSkuQuery] = useState("");
+  const [brandFilter, setBrandFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [groupMode, setGroupMode] = useState<SkuGroupMode>("sku");
+  const [skuSortKey, setSkuSortKey] = useState<SkuSortKey>("units");
+  const [skuSortDir, setSkuSortDir] = useState<SortDirection>("desc");
+  const [catSortKey, setCatSortKey] = useState<CatSortKey>("units");
+  const [catSortDir, setCatSortDir] = useState<SortDirection>("desc");
+
+  const baseLines = useMemo(() => orderLines.filter(isPaidOrderLine), [orderLines]);
+  const bounds = useMemo(() => orderDateBounds(baseLines), [baseLines]);
+  const effectiveDateFrom = dateFrom || bounds.defaultFrom;
+  const effectiveDateTo = dateTo || bounds.defaultTo;
+
+  useEffect(() => {
+    setDateFrom("");
+    setDateTo("");
+  }, [bounds.defaultFrom, bounds.defaultTo]);
+
+  const windowLines = useMemo(() => (
+    baseLines.filter((line) => lineIsInsideDateRange(line, effectiveDateFrom, effectiveDateTo))
+  ), [baseLines, effectiveDateFrom, effectiveDateTo]);
+
+  const allActiveStoreCount = useMemo(() => (
+    new Set(windowLines.map(orderLineStoreKey)).size
+  ), [windowLines]);
+
+  const categoryOptions = useMemo(() => {
+    const cats = new Set(windowLines.map((line) => normalizeCategory(line.subProductLine)));
+    return [...cats].filter(Boolean).sort();
+  }, [windowLines]);
+
+  const brandOptions = useMemo(() => {
+    const extra = [...new Set(windowLines.map(orderBrandValue))]
+      .filter((b) => !TERRITORY_BRANDS.includes(b as BrandFilter))
+      .sort();
+    return [...TERRITORY_BRANDS, ...extra];
+  }, [windowLines]);
+
+  const normalizedSkuQuery = skuQuery.trim().toLowerCase();
+  const filteredLines = useMemo(() => (
+    windowLines.filter((line) => {
+      if (brandFilter !== "all" && orderBrandValue(line) !== brandFilter) return false;
+      if (categoryFilter !== "all" && normalizeCategory(line.subProductLine) !== categoryFilter) return false;
+      if (normalizedSkuQuery) {
+        return [line.productName, line.subProductLine, line.brand]
+          .some((v) => String(v ?? "").toLowerCase().includes(normalizedSkuQuery));
+      }
+      return true;
+    })
+  ), [windowLines, brandFilter, categoryFilter, normalizedSkuQuery]);
+
+  type SkuRow = {
+    key: string;
+    product: string;
+    category: string;
+    brand: string;
+    units: number;
+    revenue: number;
+    storeCount: number;
+    coverage: number;
+    avgUnitsPerStore: number;
+    lastOrdered: string | null;
+  };
+
+  const skuRows = useMemo((): SkuRow[] => {
+    const byKey = new Map<string, {
+      product: string; category: string; brand: string;
+      units: number; revenue: number; storeKeys: Set<string>; maxTs: number;
+    }>();
+
+    filteredLines.forEach((line) => {
+      const product = line.productName || "Unnamed";
+      const brand = orderBrandValue(line);
+      const key = `${brand}\x00${product}`;
+      const current = byKey.get(key) ?? {
+        product, brand, category: normalizeCategory(line.subProductLine),
+        units: 0, revenue: 0, storeKeys: new Set<string>(), maxTs: 0
+      };
+      current.units += line.units;
+      current.revenue += line.lineTotal;
+      const sk = orderLineStoreKey(line);
+      if (sk) current.storeKeys.add(sk);
+      const ts = orderTimestamp(line.submittedAt);
+      if (ts > current.maxTs) current.maxTs = ts;
+      byKey.set(key, current);
+    });
+
+    return [...byKey.entries()].map(([key, data]) => {
+      const storeCount = data.storeKeys.size;
+      return {
+        key,
+        product: data.product,
+        category: data.category,
+        brand: data.brand,
+        units: data.units,
+        revenue: data.revenue,
+        storeCount,
+        coverage: allActiveStoreCount > 0 ? storeCount / allActiveStoreCount : 0,
+        avgUnitsPerStore: storeCount > 0 ? data.units / storeCount : 0,
+        lastOrdered: data.maxTs ? new Date(data.maxTs).toISOString() : null
+      };
+    });
+  }, [filteredLines, allActiveStoreCount]);
+
+  type CatRow = {
+    category: string;
+    skuCount: number;
+    units: number;
+    revenue: number;
+    storeCount: number;
+    coverage: number;
+  };
+
+  const categoryRows = useMemo((): CatRow[] => {
+    const byCat = new Map<string, {
+      skuKeys: Set<string>; units: number; revenue: number; storeKeys: Set<string>;
+    }>();
+
+    filteredLines.forEach((line) => {
+      const cat = normalizeCategory(line.subProductLine);
+      const current = byCat.get(cat) ?? {
+        skuKeys: new Set<string>(), units: 0, revenue: 0, storeKeys: new Set<string>()
+      };
+      current.skuKeys.add(`${orderBrandValue(line)}\x00${line.productName || "Unnamed"}`);
+      current.units += line.units;
+      current.revenue += line.lineTotal;
+      const sk = orderLineStoreKey(line);
+      if (sk) current.storeKeys.add(sk);
+      byCat.set(cat, current);
+    });
+
+    return [...byCat.entries()].map(([category, data]) => {
+      const storeCount = data.storeKeys.size;
+      return {
+        category,
+        skuCount: data.skuKeys.size,
+        units: data.units,
+        revenue: data.revenue,
+        storeCount,
+        coverage: allActiveStoreCount > 0 ? storeCount / allActiveStoreCount : 0
+      };
+    });
+  }, [filteredLines, allActiveStoreCount]);
+
+  const sortedSkuRows = useMemo(() => {
+    const dir = skuSortDir === "asc" ? 1 : -1;
+    return [...skuRows].sort((a, b) => {
+      let diff = 0;
+      switch (skuSortKey) {
+        case "product": diff = a.product.localeCompare(b.product); break;
+        case "category": diff = a.category.localeCompare(b.category); break;
+        case "brand": diff = a.brand.localeCompare(b.brand); break;
+        case "units": diff = a.units - b.units; break;
+        case "revenue": diff = a.revenue - b.revenue; break;
+        case "stores": diff = a.storeCount - b.storeCount; break;
+        case "coverage": diff = a.coverage - b.coverage; break;
+        case "avgUnits": diff = a.avgUnitsPerStore - b.avgUnitsPerStore; break;
+        case "lastOrdered": diff = orderTimestamp(a.lastOrdered) - orderTimestamp(b.lastOrdered); break;
+      }
+      return diff * dir || a.product.localeCompare(b.product);
+    });
+  }, [skuRows, skuSortKey, skuSortDir]);
+
+  const sortedCatRows = useMemo(() => {
+    const dir = catSortDir === "asc" ? 1 : -1;
+    return [...categoryRows].sort((a, b) => {
+      let diff = 0;
+      switch (catSortKey) {
+        case "category": diff = a.category.localeCompare(b.category); break;
+        case "skuCount": diff = a.skuCount - b.skuCount; break;
+        case "units": diff = a.units - b.units; break;
+        case "revenue": diff = a.revenue - b.revenue; break;
+        case "stores": diff = a.storeCount - b.storeCount; break;
+        case "coverage": diff = a.coverage - b.coverage; break;
+      }
+      return diff * dir || a.category.localeCompare(b.category);
+    });
+  }, [categoryRows, catSortKey, catSortDir]);
+
+  const skuMetrics = useMemo(() => ({
+    skuCount: skuRows.length,
+    storeCount: allActiveStoreCount,
+    units: filteredLines.reduce((sum, l) => sum + l.units, 0),
+    revenue: filteredLines.reduce((sum, l) => sum + l.lineTotal, 0),
+    avgCoverage: skuRows.length
+      ? skuRows.reduce((sum, r) => sum + r.coverage, 0) / skuRows.length
+      : 0
+  }), [filteredLines, skuRows, allActiveStoreCount]);
+
+  const topCategories = useMemo(() => {
+    const byCat = new Map<string, number>();
+    windowLines.forEach((line) => {
+      const cat = normalizeCategory(line.subProductLine);
+      byCat.set(cat, (byCat.get(cat) ?? 0) + line.units);
+    });
+    return [...byCat.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([cat, units]) => ({ cat, units }));
+  }, [windowLines]);
+
+  const maxCategoryUnits = Math.max(1, ...topCategories.map((c) => c.units));
+  const maxSkuUnits = Math.max(1, ...skuRows.map((r) => r.units));
+
+  function handleSkuSort(key: SkuSortKey) {
+    if (key === skuSortKey) {
+      setSkuSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSkuSortKey(key);
+      setSkuSortDir(key === "product" || key === "category" || key === "brand" ? "asc" : "desc");
+    }
+  }
+
+  function handleCatSort(key: CatSortKey) {
+    if (key === catSortKey) {
+      setCatSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setCatSortKey(key);
+      setCatSortDir(key === "category" ? "asc" : "desc");
+    }
+  }
+
+  const skuTableColumns: { key: SkuSortKey; label: string }[] = [
+    { key: "product", label: "Product" },
+    { key: "category", label: "Category" },
+    { key: "brand", label: "Brand" },
+    { key: "units", label: "Units" },
+    { key: "revenue", label: "Revenue" },
+    { key: "stores", label: "Stores" },
+    { key: "coverage", label: "Sell-Through" },
+    { key: "avgUnits", label: "Avg Units/Store" },
+    { key: "lastOrdered", label: "Last Ordered" }
+  ];
+
+  const catTableColumns: { key: CatSortKey; label: string }[] = [
+    { key: "category", label: "Category" },
+    { key: "skuCount", label: "SKUs" },
+    { key: "units", label: "Units" },
+    { key: "revenue", label: "Revenue" },
+    { key: "stores", label: "Stores" },
+    { key: "coverage", label: "Sell-Through" }
+  ];
+
+  return (
+    <section className="sku-view">
+      <div className="panel sku-filter-panel">
+        <div className="sku-filter-top">
+          <div className="sku-group-tabs">
+            <button
+              className={`secondary-button${groupMode === "sku" ? " active-tab" : ""}`}
+              type="button"
+              onClick={() => setGroupMode("sku")}
+            >
+              By SKU
+            </button>
+            <button
+              className={`secondary-button${groupMode === "category" ? " active-tab" : ""}`}
+              type="button"
+              onClick={() => setGroupMode("category")}
+            >
+              By Category
+            </button>
+          </div>
+          <div className="sku-filter-grid">
+            <div className="field">
+              <label>Search</label>
+              <input
+                type="search"
+                value={skuQuery}
+                onChange={(e) => setSkuQuery(e.target.value)}
+                placeholder="Product name or category"
+              />
+            </div>
+            <div className="field">
+              <label>Brand</label>
+              <select value={brandFilter} onChange={(e) => setBrandFilter(e.target.value)}>
+                <option value="all">All brands</option>
+                {brandOptions.map((b) => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>Category</label>
+              <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+                <option value="all">All categories</option>
+                {categoryOptions.map((cat) => (
+                  <option key={cat} value={cat}>{cat}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>From</label>
+              <input
+                type="date"
+                value={dateFrom}
+                min={bounds.min}
+                max={bounds.max}
+                onChange={(e) => setDateFrom(e.target.value)}
+              />
+            </div>
+            <div className="field">
+              <label>To</label>
+              <input
+                type="date"
+                value={dateTo}
+                min={bounds.min}
+                max={bounds.max}
+                onChange={(e) => setDateTo(e.target.value)}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="metrics orders-metrics">
+        <div className="metric">
+          <div className="metric-label">SKUs</div>
+          <div className="metric-value">{skuMetrics.skuCount.toLocaleString()}</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Active Stores</div>
+          <div className="metric-value">{skuMetrics.storeCount.toLocaleString()}</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Total Units</div>
+          <div className="metric-value">{skuMetrics.units.toLocaleString()}</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Revenue</div>
+          <div className="metric-value">{formatUsd(skuMetrics.revenue)}</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Avg Coverage</div>
+          <div className="metric-value">
+            {skuMetrics.skuCount ? `${Math.round(skuMetrics.avgCoverage * 100)}%` : "—"}
+          </div>
+        </div>
+      </div>
+
+      {groupMode === "sku" && topCategories.length > 0 ? (
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Categories</h3>
+            <span className="table-meta">
+              {topCategories.length} product lines · click to filter
+            </span>
+          </div>
+          <div className="sku-category-rail">
+            <div className="sku-category-cards">
+              {topCategories.map(({ cat, units }) => (
+                <button
+                  key={cat}
+                  className={`sku-category-card${categoryFilter === cat ? " is-active" : ""}`}
+                  type="button"
+                  onClick={() => setCategoryFilter((prev) => (prev === cat ? "all" : cat))}
+                >
+                  <div className="sku-category-name">{cat}</div>
+                  <div className="sku-category-units">{units.toLocaleString()} units</div>
+                  <div className="summary-bar" style={{ marginTop: 6 }}>
+                    <span style={{ width: `${(units / maxCategoryUnits) * 100}%` }} />
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="panel">
+        <div className="panel-header">
+          <h3>{groupMode === "sku" ? "SKU Performance" : "Category Performance"}</h3>
+          <span className="table-meta">
+            {groupMode === "sku"
+              ? `${sortedSkuRows.length.toLocaleString()} products · sell-through vs ${allActiveStoreCount} active accounts`
+              : `${sortedCatRows.length.toLocaleString()} categories`}
+          </span>
+        </div>
+        <div className="table-scroll">
+          {groupMode === "sku" ? (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  {skuTableColumns.map((col) => (
+                    <th key={col.key}>
+                      <button className="sort-header" type="button" onClick={() => handleSkuSort(col.key)}>
+                        <span>{col.label}</span>
+                        <span className="sort-indicator" aria-hidden="true">
+                          {skuSortKey === col.key ? (skuSortDir === "asc" ? "↑" : "↓") : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedSkuRows.map((row) => (
+                  <tr key={row.key}>
+                    <td>
+                      <div className="sku-product-name">{row.product}</div>
+                      <div className="summary-bar" style={{ marginTop: 4, maxWidth: 140 }}>
+                        <span style={{ width: `${(row.units / maxSkuUnits) * 100}%` }} />
+                      </div>
+                    </td>
+                    <td style={{ color: "var(--muted)", fontSize: "0.82rem" }}>{row.category}</td>
+                    <td>
+                      <span
+                        className="sku-brand-badge"
+                        style={{ background: BRAND_DOT_COLORS[row.brand as BrandFilter] ?? "var(--muted)" }}
+                      >
+                        {row.brand}
+                      </span>
+                    </td>
+                    <td>{row.units.toLocaleString()}</td>
+                    <td>{formatUsd(row.revenue)}</td>
+                    <td>{row.storeCount}</td>
+                    <td>
+                      <div className="sku-coverage">
+                        <span>{Math.round(row.coverage * 100)}%</span>
+                        <div className="sku-coverage-bar">
+                          <span style={{ width: `${row.coverage * 100}%` }} />
+                        </div>
+                      </div>
+                    </td>
+                    <td>{row.avgUnitsPerStore.toFixed(1)}</td>
+                    <td>{formatShortDate(row.lastOrdered)}</td>
+                  </tr>
+                ))}
+                {!sortedSkuRows.length ? (
+                  <tr>
+                    <td colSpan={9} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
+                      No SKUs match the current filters.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  {catTableColumns.map((col) => (
+                    <th key={col.key}>
+                      <button className="sort-header" type="button" onClick={() => handleCatSort(col.key)}>
+                        <span>{col.label}</span>
+                        <span className="sort-indicator" aria-hidden="true">
+                          {catSortKey === col.key ? (catSortDir === "asc" ? "↑" : "↓") : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedCatRows.map((row) => (
+                  <tr key={row.category}>
+                    <td><strong>{row.category}</strong></td>
+                    <td>{row.skuCount}</td>
+                    <td>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span>{row.units.toLocaleString()}</span>
+                        <div className="summary-bar" style={{ flex: "1 1 60px", maxWidth: 100 }}>
+                          <span style={{ width: `${(row.units / maxCategoryUnits) * 100}%` }} />
+                        </div>
+                      </div>
+                    </td>
+                    <td>{formatUsd(row.revenue)}</td>
+                    <td>{row.storeCount}</td>
+                    <td>
+                      <div className="sku-coverage">
+                        <span>{Math.round(row.coverage * 100)}%</span>
+                        <div className="sku-coverage-bar">
+                          <span style={{ width: `${row.coverage * 100}%` }} />
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!sortedCatRows.length ? (
+                  <tr>
+                    <td colSpan={6} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
+                      No categories match the current filters.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function StoreNameEditor({
   store,
   onSaved
@@ -3944,6 +4456,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? "Map"
     : activeView === "orders"
     ? "Orders"
+    : activeView === "skus"
+    ? "SKU Analytics"
     : activeView === "goals"
     ? "Goals"
     : activeView === "sync"
@@ -3953,6 +4467,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores · ${tripStoreKeys.length.toLocaleString()} stops planned`
     : activeView === "orders"
     ? `${orderLines.length.toLocaleString()} order lines · ${uniqueOrderCount(orderLines).toLocaleString()} orders`
+    : activeView === "skus"
+    ? `${orderLines.filter(isPaidOrderLine).length.toLocaleString()} paid lines · sell-through by store coverage`
     : activeView === "goals"
     ? `${salesGoals.length.toLocaleString()} saved goal rows · ${uniqueOrderCount(orderLines).toLocaleString()} orders feeding actuals`
     : activeView === "sync"
@@ -3986,7 +4502,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   }, []);
 
   useEffect(() => {
-    const selectionScope = activeView === "orders" || activeView === "goals" || activeView === "sync" ? stores : sortedStores;
+    const selectionScope = activeView === "orders" || activeView === "skus" || activeView === "goals" || activeView === "sync" ? stores : sortedStores;
     if (!selectionScope.length) {
       setSelectedStoreKey("");
       return;
@@ -4139,6 +4655,9 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
           </a>
           <a className={activeView === "orders" ? "active" : ""} href="/?view=orders">
             Orders
+          </a>
+          <a className={activeView === "skus" ? "active" : ""} href="/?view=skus">
+            SKUs
           </a>
           <a className={activeView === "goals" ? "active" : ""} href="/?view=goals">
             Goals
@@ -4423,6 +4942,11 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
             stores={stores}
             selectedStore={selectedStore}
             onSelectStore={handleStoreSelect}
+          />
+        ) : activeView === "skus" ? (
+          <SkuAnalyticsView
+            orderLines={orderLines}
+            stores={stores}
           />
         ) : activeView === "sync" ? (
           <SyncView
