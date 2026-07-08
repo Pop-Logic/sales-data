@@ -685,7 +685,8 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
       hasContactEver: Boolean(row.has_contact_ever),
       hasContactThisMonth: Boolean(row.has_contact_this_month),
       hasContactThisWeek: Boolean(row.has_contact_this_week),
-      groupName: row.group_name ?? null
+      groupName: row.group_name ?? null,
+      serviceNote: row.service_note ?? null
     };
   });
 

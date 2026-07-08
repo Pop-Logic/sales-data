@@ -1525,6 +1525,80 @@ function GroupEditor({
   );
 }
 
+function ServiceNoteEditor({
+  store,
+  onSaved
+}: {
+  store: StoreRollup;
+  onSaved: (storeId: string, serviceNote: string | null) => void;
+}) {
+  const [note, setNote] = useState(store.serviceNote ?? "");
+  const [isSaving, setIsSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    setNote(store.serviceNote ?? "");
+    setMessage("");
+  }, [store.serviceNote, store.storeId]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!store.storeId) {
+      setMessage("This store is missing a Supabase store id.");
+      return;
+    }
+    setIsSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/store-service-note", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeId: store.storeId, serviceNote: note.trim() || null })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save note.");
+      onSaved(store.storeId, result.serviceNote);
+      setMessage("Saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save note.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <form className="detail-form" onSubmit={handleSubmit}>
+      <div className="detail-form-title">Service Note</div>
+      <div className="field">
+        <label>Special Instructions</label>
+        <textarea
+          rows={3}
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+          placeholder="e.g. Call ahead, ask for back-room buyer"
+          disabled={isSaving}
+          style={{ resize: "vertical" }}
+        />
+      </div>
+      <div className="detail-form-actions">
+        <button className="primary-button" type="submit" disabled={isSaving}>
+          {isSaving ? "Saving…" : "Save Note"}
+        </button>
+        {note && !isSaving ? (
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => { setNote(""); }}
+          >
+            Clear
+          </button>
+        ) : null}
+      </div>
+      {message ? <span className="status-message">{message}</span> : null}
+    </form>
+  );
+}
+
 type BuyerContact = {
   id: string;
   contactName: string | null;
@@ -2301,6 +2375,7 @@ function TripPlanner({
   existingGroups,
   onBuyerSaved,
   onGroupSaved,
+  onServiceNoteSaved,
   onContactLogSaved,
   onStoreNameSaved
 }: {
@@ -2320,6 +2395,7 @@ function TripPlanner({
   existingGroups: string[];
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
+  onServiceNoteSaved: (storeId: string, serviceNote: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   onStoreNameSaved: (storeId: string, storeName: string) => void;
 }) {
@@ -2501,6 +2577,7 @@ function TripPlanner({
           existingGroups={existingGroups}
           onBuyerSaved={onBuyerSaved}
           onGroupSaved={onGroupSaved}
+          onServiceNoteSaved={onServiceNoteSaved}
           onContactLogSaved={onContactLogSaved}
           onStoreNameSaved={onStoreNameSaved}
           orderLines={selectedStoreOrderLines}
@@ -4913,6 +4990,7 @@ function StoreDetailDrawer({
   existingGroups,
   onBuyerSaved,
   onGroupSaved,
+  onServiceNoteSaved,
   onContactLogSaved,
   onStoreNameSaved,
   orderLines = [],
@@ -4924,6 +5002,7 @@ function StoreDetailDrawer({
   existingGroups: string[];
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
+  onServiceNoteSaved: (storeId: string, serviceNote: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   onStoreNameSaved: (storeId: string, storeName: string) => void;
   orderLines?: OrderLine[];
@@ -4987,6 +5066,7 @@ function StoreDetailDrawer({
           existingGroups={existingGroups}
           onBuyerSaved={onBuyerSaved}
           onGroupSaved={onGroupSaved}
+          onServiceNoteSaved={onServiceNoteSaved}
           onContactLogSaved={onContactLogSaved}
           orderLines={orderLines}
         />
@@ -5107,6 +5187,7 @@ function StoreDetailContent({
   existingGroups,
   onBuyerSaved,
   onGroupSaved,
+  onServiceNoteSaved,
   onContactLogSaved,
   orderLines = []
 }: {
@@ -5115,6 +5196,7 @@ function StoreDetailContent({
   existingGroups: string[];
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
+  onServiceNoteSaved: (storeId: string, serviceNote: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   orderLines?: OrderLine[];
 }) {
@@ -5173,6 +5255,7 @@ function StoreDetailContent({
     return (
       <div className="detail-stack">
         <GroupEditor store={store} existingGroups={existingGroups} onSaved={onGroupSaved} />
+        <ServiceNoteEditor store={store} onSaved={onServiceNoteSaved} />
         <BuyerEditor store={store} onSaved={onBuyerSaved} />
       </div>
     );
@@ -5371,6 +5454,12 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   function handleGroupSaved(storeId: string, groupName: string | null) {
     setStores((currentStores) => currentStores.map((store) => (
       store.storeId === storeId ? { ...store, groupName } : store
+    )));
+  }
+
+  function handleServiceNoteSaved(storeId: string, serviceNote: string | null) {
+    setStores((currentStores) => currentStores.map((store) => (
+      store.storeId === storeId ? { ...store, serviceNote } : store
     )));
   }
 
@@ -5769,6 +5858,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
               existingGroups={existingGroups}
               onBuyerSaved={handleBuyerSaved}
               onGroupSaved={handleGroupSaved}
+              onServiceNoteSaved={handleServiceNoteSaved}
               onContactLogSaved={handleContactLogSaved}
               onStoreNameSaved={handleStoreNameSaved}
               orderLines={selectedStoreOrderLines}
@@ -5792,6 +5882,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
             existingGroups={existingGroups}
             onBuyerSaved={handleBuyerSaved}
             onGroupSaved={handleGroupSaved}
+            onServiceNoteSaved={handleServiceNoteSaved}
             onContactLogSaved={handleContactLogSaved}
             onStoreNameSaved={handleStoreNameSaved}
           />

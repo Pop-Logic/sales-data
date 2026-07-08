@@ -73,6 +73,7 @@ export type StoreRollup = {
   hasContactThisMonth: boolean;
   hasContactThisWeek: boolean;
   groupName?: string | null;
+  serviceNote?: string | null;
 };
 
 export type ContactLog = {
