@@ -1761,6 +1761,79 @@ textarea {
   gap: 16px;
 }
 
+/* Multi-buyer editor */
+.buyer-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.buyer-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.buyer-contact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.buyer-contact-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.buyer-contact-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.buyer-contact-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.buyer-contact-name {
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.buyer-contact-role {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.buyer-contact-detail {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.buyer-contact-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.buyer-contact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.buyer-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
 /* Log Entries view */
 .logs-view {
   display: grid;

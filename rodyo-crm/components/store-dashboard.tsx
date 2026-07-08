@@ -1518,6 +1518,78 @@ function GroupEditor({
   );
 }
 
+type BuyerContact = {
+  id: string;
+  contactName: string | null;
+  phoneNumber: string | null;
+  email: string | null;
+  role: string | null;
+};
+
+type BuyerFormState = {
+  contactName: string;
+  phoneNumber: string;
+  email: string;
+  role: string;
+};
+
+function emptyBuyerForm(): BuyerFormState {
+  return { contactName: "", phoneNumber: "", email: "", role: "" };
+}
+
+function BuyerContactForm({
+  initial,
+  isSaving,
+  onSubmit,
+  onCancel
+}: {
+  initial: BuyerFormState;
+  isSaving: boolean;
+  onSubmit: (form: BuyerFormState) => void;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState<BuyerFormState>(initial);
+
+  function field(key: keyof BuyerFormState) {
+    return (event: React.ChangeEvent<HTMLInputElement>) =>
+      setForm((prev) => ({ ...prev, [key]: event.target.value }));
+  }
+
+  return (
+    <form
+      className="buyer-contact-form"
+      onSubmit={(event) => { event.preventDefault(); onSubmit(form); }}
+    >
+      <div className="form-grid">
+        <div className="field">
+          <label>Name</label>
+          <input value={form.contactName} onChange={field("contactName")} placeholder="Buyer name" disabled={isSaving} />
+        </div>
+        <div className="field">
+          <label>Role</label>
+          <input value={form.role} onChange={field("role")} placeholder="e.g. Head Buyer, Owner" disabled={isSaving} />
+        </div>
+        <div className="field">
+          <label>Phone</label>
+          <input value={form.phoneNumber} onChange={field("phoneNumber")} placeholder="Phone number" type="tel" disabled={isSaving} />
+        </div>
+        <div className="field">
+          <label>Email</label>
+          <input value={form.email} onChange={field("email")} placeholder="Email address" type="email" disabled={isSaving} />
+        </div>
+      </div>
+      <div className="buyer-form-actions">
+        <button className="primary-button" type="submit" disabled={isSaving}>
+          {isSaving ? "Saving…" : "Save"}
+        </button>
+        <button className="secondary-button" type="button" onClick={onCancel} disabled={isSaving}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function BuyerEditor({
   store,
   onSaved
@@ -1525,102 +1597,184 @@ function BuyerEditor({
   store: StoreRollup;
   onSaved: (storeId: string, buyer: BuyerContactPatch) => void;
 }) {
-  const [contactName, setContactName] = useState(store.contactName ?? "");
-  const [phoneNumber, setPhoneNumber] = useState(store.phoneNumber ?? "");
-  const [email, setEmail] = useState(store.email ?? "");
+  const [contacts, setContacts] = useState<BuyerContact[]>([]);
+  const [loadStatus, setLoadStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    setContactName(store.contactName ?? "");
-    setPhoneNumber(store.phoneNumber ?? "");
-    setEmail(store.email ?? "");
+    if (!store.storeId) return;
+    const controller = new AbortController();
+    setLoadStatus("loading");
+    setEditingId(null);
+    setIsAdding(false);
     setMessage("");
-  }, [store.contactName, store.email, store.phoneNumber, store.storeId]);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!store.storeId) {
-      setMessage("This store is missing a Supabase store id.");
-      return;
+    fetch(`/api/store-contacts?storeId=${encodeURIComponent(store.storeId)}`, { signal: controller.signal })
+      .then((r) => r.json())
+      .then((result) => {
+        setContacts(Array.isArray(result.contacts) ? result.contacts : []);
+        setLoadStatus("idle");
+      })
+      .catch((err) => {
+        if (err?.name !== "AbortError") setLoadStatus("error");
+      });
+
+    return () => controller.abort();
+  }, [store.storeId]);
+
+  function syncSnapshot(nextContacts: BuyerContact[]) {
+    const first = nextContacts[0] ?? null;
+    if (store.storeId) {
+      onSaved(store.storeId, {
+        contactName: first?.contactName ?? null,
+        phoneNumber: first?.phoneNumber ?? null,
+        email: first?.email ?? null
+      });
     }
+  }
 
+  async function handleSave(form: BuyerFormState, id?: string) {
+    if (!store.storeId) return;
     setIsSaving(true);
     setMessage("");
-
     try {
       const response = await fetch("/api/store-contacts", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          storeId: store.storeId,
-          contactName,
-          phoneNumber,
-          email
-        })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeId: store.storeId, id: id ?? null, ...form })
       });
       const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.error || "Could not save buyer contact.");
-      }
-
-      onSaved(result.storeId, {
-        contactName: result.contactName,
-        phoneNumber: result.phoneNumber,
-        email: result.email
-      });
-      setMessage("Saved");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not save buyer contact.");
+      if (!response.ok) throw new Error(result.error || "Could not save.");
+      const saved: BuyerContact = result.contact;
+      const nextContacts = id
+        ? contacts.map((c) => (c.id === id ? saved : c))
+        : [...contacts, saved];
+      setContacts(nextContacts);
+      syncSnapshot(nextContacts);
+      setEditingId(null);
+      setIsAdding(false);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not save.");
     } finally {
       setIsSaving(false);
     }
   }
 
+  async function handleDelete(id: string) {
+    if (!store.storeId) return;
+    setIsSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/store-contacts", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, storeId: store.storeId })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not delete.");
+      const nextContacts = contacts.filter((c) => c.id !== id);
+      setContacts(nextContacts);
+      syncSnapshot(nextContacts);
+      if (editingId === id) setEditingId(null);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not delete.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  if (loadStatus === "loading") {
+    return <p className="detail-note">Loading buyers…</p>;
+  }
+
+  if (loadStatus === "error") {
+    return <p className="detail-note">Could not load buyer contacts.</p>;
+  }
+
   return (
-    <form className="detail-stack" onSubmit={handleSubmit}>
-      <div className="form-grid">
-        <div className="field">
-          <label>Buyer</label>
-          <input
-            value={contactName}
-            onChange={(event) => setContactName(event.target.value)}
-            placeholder="Buyer name"
-          />
-        </div>
-        <div className="field">
-          <label>Phone</label>
-          <input
-            value={phoneNumber}
-            onChange={(event) => setPhoneNumber(event.target.value)}
-            placeholder="Phone number"
-            type="tel"
-          />
-        </div>
-        <div className="field">
-          <label>Email</label>
-          <input
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            placeholder="Email address"
-            type="email"
-          />
-        </div>
+    <div className="buyer-editor">
+      <div className="buyer-editor-header">
+        <span className="detail-form-title">Buyer Contacts</span>
+        {!isAdding && (
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => { setIsAdding(true); setEditingId(null); }}
+          >
+            + Add buyer
+          </button>
+        )}
       </div>
-      <button className="primary-button detail-save-button" type="submit" disabled={isSaving}>
-        {isSaving ? "Saving..." : "Save Buyer"}
-      </button>
-      {message ? <div className="status-message">{message}</div> : null}
-      <div className="detail-list">
-        <DetailRow label="License" value={store.license} />
-        <DetailRow label="Rep" value={store.territoryRep} />
-        <DetailRow label="County" value={store.county} />
-        <DetailRow label="Location" value={[store.city, store.state, store.zip].filter(Boolean).join(", ")} />
+
+      {contacts.length === 0 && !isAdding ? (
+        <p className="detail-note">No buyers added yet.</p>
+      ) : null}
+
+      <div className="buyer-contact-list">
+        {contacts.map((contact) => (
+          <div key={contact.id} className="buyer-contact-card">
+            {editingId === contact.id ? (
+              <BuyerContactForm
+                initial={{
+                  contactName: contact.contactName ?? "",
+                  phoneNumber: contact.phoneNumber ?? "",
+                  email: contact.email ?? "",
+                  role: contact.role ?? ""
+                }}
+                isSaving={isSaving}
+                onSubmit={(form) => handleSave(form, contact.id)}
+                onCancel={() => setEditingId(null)}
+              />
+            ) : (
+              <div className="buyer-contact-row">
+                <div className="buyer-contact-info">
+                  <span className="buyer-contact-name">
+                    {contact.contactName || <em className="muted">No name</em>}
+                  </span>
+                  {contact.role ? <span className="buyer-contact-role">{contact.role}</span> : null}
+                  {contact.phoneNumber ? <span className="buyer-contact-detail">{contact.phoneNumber}</span> : null}
+                  {contact.email ? <span className="buyer-contact-detail">{contact.email}</span> : null}
+                </div>
+                <div className="buyer-contact-actions">
+                  <button
+                    className="icon-button"
+                    type="button"
+                    title="Edit"
+                    onClick={() => { setEditingId(contact.id); setIsAdding(false); }}
+                    disabled={isSaving}
+                  >
+                    <Pencil size={13} />
+                  </button>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    title="Delete"
+                    onClick={() => handleDelete(contact.id)}
+                    disabled={isSaving}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
       </div>
-    </form>
+
+      {isAdding ? (
+        <BuyerContactForm
+          initial={emptyBuyerForm()}
+          isSaving={isSaving}
+          onSubmit={(form) => handleSave(form)}
+          onCancel={() => setIsAdding(false)}
+        />
+      ) : null}
+
+      {message ? <span className="status-message">{message}</span> : null}
+    </div>
   );
 }
 
