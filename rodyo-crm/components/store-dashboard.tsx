@@ -56,6 +56,7 @@ type StoreFilters = {
   pareto: ParetoFilter;
   priority: PriorityFilter;
   region: string;
+  group: string;
 };
 
 type BuyerContactPatch = {
@@ -86,7 +87,8 @@ const defaultStoreFilters: StoreFilters = {
   brand: [],
   pareto: "all",
   priority: "all",
-  region: "all"
+  region: "all",
+  group: "all"
 };
 
 const detailTabs: { id: DetailTab; label: string }[] = [
@@ -768,6 +770,10 @@ function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
     nextStores = nextStores.filter((store) => textSortValue(store.county) === filters.region);
   }
 
+  if (filters.group !== "all") {
+    nextStores = nextStores.filter((store) => store.groupName === filters.group);
+  }
+
   if (filters.pareto === "top30") {
     const topKeys = new Set(
       [...nextStores]
@@ -808,7 +814,8 @@ function countActiveFilters(filters: StoreFilters) {
     normalizeBrandFilters(filters.brand).length > 0,
     filters.pareto !== "all",
     filters.priority !== "all",
-    filters.region !== "all"
+    filters.region !== "all",
+    filters.group !== "all"
   ].filter(Boolean).length;
 }
 
@@ -3769,6 +3776,7 @@ function SkuAnalyticsView({
   const [skuSortDir, setSkuSortDir] = useState<SortDirection>("desc");
   const [catSortKey, setCatSortKey] = useState<CatSortKey>("units");
   const [catSortDir, setCatSortDir] = useState<SortDirection>("desc");
+  const [catDetailMode, setCatDetailMode] = useState<"size" | "strain">("size");
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(() => new Set());
 
   function toggleExpanded(cat: string) {
@@ -3810,17 +3818,24 @@ function SkuAnalyticsView({
   }, [windowLines]);
 
   const normalizedSkuQuery = skuQuery.trim().toLowerCase();
-  const filteredLines = useMemo(() => (
+
+  const brandSearchLines = useMemo(() => (
     windowLines.filter((line) => {
       if (brandFilter !== "all" && orderBrandValue(line) !== brandFilter) return false;
-      if (categoryFilter !== "all" && normalizeCategory(line.subProductLine) !== categoryFilter) return false;
       if (normalizedSkuQuery) {
         return [line.productName, line.subProductLine, line.brand]
           .some((v) => String(v ?? "").toLowerCase().includes(normalizedSkuQuery));
       }
       return true;
     })
-  ), [windowLines, brandFilter, categoryFilter, normalizedSkuQuery]);
+  ), [windowLines, brandFilter, normalizedSkuQuery]);
+
+  const filteredLines = useMemo(() => (
+    brandSearchLines.filter((line) => {
+      if (categoryFilter !== "all" && normalizeCategory(line.subProductLine) !== categoryFilter) return false;
+      return true;
+    })
+  ), [brandSearchLines, categoryFilter]);
 
   type SkuRow = {
     key: string;
@@ -3950,6 +3965,91 @@ function SkuAnalyticsView({
     });
   }, [categoryRows, catSortKey, catSortDir]);
 
+  const sizeRows = useMemo(() => {
+    const bySize = new Map<string, {
+      units: number; revenue: number; stores: Set<string>;
+      strains: Map<string, { units: number; revenue: number }>;
+    }>();
+    filteredLines.forEach((line) => {
+      const size = extractUnitSize(line.productName);
+      if (!bySize.has(size)) bySize.set(size, { units: 0, revenue: 0, stores: new Set(), strains: new Map() });
+      const entry = bySize.get(size)!;
+      entry.units += line.units;
+      entry.revenue += line.lineTotal;
+      const sk = orderLineStoreKey(line);
+      if (sk) entry.stores.add(sk);
+      const strain = extractStrain(line.productName);
+      if (strain) {
+        const c = entry.strains.get(strain) ?? { units: 0, revenue: 0 };
+        c.units += line.units; c.revenue += line.lineTotal;
+        entry.strains.set(strain, c);
+      }
+    });
+    return [...bySize.entries()].map(([size, e]) => ({
+      size,
+      units: e.units,
+      revenue: e.revenue,
+      storeCount: e.stores.size,
+      coverage: allActiveStoreCount > 0 ? e.stores.size / allActiveStoreCount : 0,
+      strains: [...e.strains.entries()]
+        .map(([label, { units: u, revenue: r }]) => ({ label, units: u, revenue: r }))
+        .sort((a, b) => b.units - a.units)
+    }));
+  }, [filteredLines, allActiveStoreCount]);
+
+  const strainRows = useMemo(() => {
+    const byStrain = new Map<string, {
+      units: number; revenue: number; stores: Set<string>;
+      sizes: Map<string, { units: number; revenue: number }>;
+    }>();
+    filteredLines.forEach((line) => {
+      const strain = extractStrain(line.productName);
+      if (!strain) return;
+      if (!byStrain.has(strain)) byStrain.set(strain, { units: 0, revenue: 0, stores: new Set(), sizes: new Map() });
+      const entry = byStrain.get(strain)!;
+      entry.units += line.units;
+      entry.revenue += line.lineTotal;
+      const sk = orderLineStoreKey(line);
+      if (sk) entry.stores.add(sk);
+      const size = extractUnitSize(line.productName);
+      const c = entry.sizes.get(size) ?? { units: 0, revenue: 0 };
+      c.units += line.units; c.revenue += line.lineTotal;
+      entry.sizes.set(size, c);
+    });
+    return [...byStrain.entries()].map(([strain, e]) => ({
+      strain,
+      units: e.units,
+      revenue: e.revenue,
+      storeCount: e.stores.size,
+      coverage: allActiveStoreCount > 0 ? e.stores.size / allActiveStoreCount : 0,
+      sizes: [...e.sizes.entries()]
+        .map(([label, { units: u, revenue: r }]) => ({ label, units: u, revenue: r }))
+        .sort((a, b) => b.units - a.units)
+    }));
+  }, [filteredLines, allActiveStoreCount]);
+
+  const sortedSizeRows = useMemo(() => {
+    return [...sizeRows].sort((a, b) => {
+      if (catSortKey === "category") return catSortDir === "asc" ? a.size.localeCompare(b.size) : b.size.localeCompare(a.size);
+      if (catSortKey === "units") return catSortDir === "asc" ? a.units - b.units : b.units - a.units;
+      if (catSortKey === "revenue") return catSortDir === "asc" ? a.revenue - b.revenue : b.revenue - a.revenue;
+      if (catSortKey === "stores") return catSortDir === "asc" ? a.storeCount - b.storeCount : b.storeCount - a.storeCount;
+      if (catSortKey === "coverage") return catSortDir === "asc" ? a.coverage - b.coverage : b.coverage - a.coverage;
+      return b.units - a.units;
+    });
+  }, [sizeRows, catSortKey, catSortDir]);
+
+  const sortedStrainRows = useMemo(() => {
+    return [...strainRows].sort((a, b) => {
+      if (catSortKey === "category") return catSortDir === "asc" ? a.strain.localeCompare(b.strain) : b.strain.localeCompare(a.strain);
+      if (catSortKey === "units") return catSortDir === "asc" ? a.units - b.units : b.units - a.units;
+      if (catSortKey === "revenue") return catSortDir === "asc" ? a.revenue - b.revenue : b.revenue - a.revenue;
+      if (catSortKey === "stores") return catSortDir === "asc" ? a.storeCount - b.storeCount : b.storeCount - a.storeCount;
+      if (catSortKey === "coverage") return catSortDir === "asc" ? a.coverage - b.coverage : b.coverage - a.coverage;
+      return b.units - a.units;
+    });
+  }, [strainRows, catSortKey, catSortDir]);
+
   const skuMetrics = useMemo(() => ({
     skuCount: skuRows.length,
     storeCount: allActiveStoreCount,
@@ -3962,7 +4062,7 @@ function SkuAnalyticsView({
 
   const topCategories = useMemo(() => {
     const byCat = new Map<string, { units: number; revenue: number }>();
-    windowLines.forEach((line) => {
+    brandSearchLines.forEach((line) => {
       const cat = normalizeCategory(line.subProductLine);
       const current = byCat.get(cat) ?? { units: 0, revenue: 0 };
       current.units += line.units;
@@ -3973,7 +4073,7 @@ function SkuAnalyticsView({
       .sort((a, b) => b[1].units - a[1].units)
       .slice(0, 8)
       .map(([cat, { units, revenue }]) => ({ cat, units, revenue }));
-  }, [windowLines]);
+  }, [brandSearchLines]);
 
   const maxCategoryUnits = Math.max(1, ...topCategories.map((c) => c.units));
   const maxSkuUnits = Math.max(1, ...skuRows.map((r) => r.units));
@@ -3982,7 +4082,7 @@ function SkuAnalyticsView({
     const sizeMaps = new Map<string, Map<string, number>>();
     const strainMaps = new Map<string, Map<string, number>>();
 
-    windowLines.forEach((line) => {
+    brandSearchLines.forEach((line) => {
       const cat = normalizeCategory(line.subProductLine);
 
       if (!sizeMaps.has(cat)) sizeMaps.set(cat, new Map());
@@ -4016,7 +4116,7 @@ function SkuAnalyticsView({
     });
 
     return result;
-  }, [windowLines]);
+  }, [brandSearchLines]);
 
   function handleSkuSort(key: SkuSortKey) {
     if (key === skuSortKey) {
@@ -4154,7 +4254,7 @@ function SkuAnalyticsView({
         </div>
       </div>
 
-      {groupMode === "sku" && topCategories.length > 0 ? (
+      {topCategories.length > 0 ? (
         <div className="panel">
           <div className="panel-header">
             <h3>Categories</h3>
@@ -4304,114 +4404,193 @@ function SkuAnalyticsView({
               </tbody>
             </table>
           ) : (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th style={{ width: 36 }} />
-                  {catTableColumns.map((col) => (
-                    <th key={col.key}>
-                      <button className="sort-header" type="button" onClick={() => handleCatSort(col.key)}>
-                        <span>{col.label}</span>
-                        <span className="sort-indicator" aria-hidden="true">
-                          {catSortKey === col.key ? (catSortDir === "asc" ? "↑" : "↓") : "↕"}
-                        </span>
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedCatRows.flatMap((row) => {
-                  const isExpanded = expandedCategories.has(row.category);
-                  const breakdown = categoryBreakdowns.get(row.category);
-                  const maxSize = breakdown?.sizes[0]?.units ?? 1;
-                  const maxStrain = breakdown?.strains[0]?.units ?? 1;
-
-                  const mainRow = (
-                    <tr key={row.category}>
-                      <td>
-                        <button
-                          className="sku-row-expand-btn"
-                          type="button"
-                          title={isExpanded ? "Collapse" : "Expand"}
-                          onClick={() => toggleExpanded(row.category)}
-                        >
-                          {isExpanded ? "↑" : "↓"}
-                        </button>
-                      </td>
-                      <td><strong>{row.category}</strong></td>
-                      <td>{row.skuCount}</td>
-                      <td>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span>{row.units.toLocaleString()}</span>
-                          <div className="summary-bar" style={{ flex: "1 1 60px", maxWidth: 100 }}>
-                            <span style={{ width: `${(row.units / maxCategoryUnits) * 100}%` }} />
-                          </div>
-                        </div>
-                      </td>
-                      <td>{formatUsd(row.revenue)}</td>
-                      <td>{row.storeCount}</td>
-                      <td>
-                        <div className="sku-coverage">
-                          <span>{Math.round(row.coverage * 100)}%</span>
-                          <div className="sku-coverage-bar">
-                            <span style={{ width: `${row.coverage * 100}%` }} />
-                          </div>
-                        </div>
-                      </td>
+            <>
+              <div className="sku-detail-toggle">
+                <button
+                  className={`sku-group-tab${catDetailMode === "size" ? " active-tab" : ""}`}
+                  type="button"
+                  onClick={() => { setCatDetailMode("size"); setExpandedCategories(new Set()); }}
+                >
+                  By Size
+                </button>
+                <button
+                  className={`sku-group-tab${catDetailMode === "strain" ? " active-tab" : ""}`}
+                  type="button"
+                  onClick={() => { setCatDetailMode("strain"); setExpandedCategories(new Set()); }}
+                >
+                  By Strain
+                </button>
+              </div>
+              {catDetailMode === "size" ? (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 36 }} />
+                      {([
+                        { key: "category" as CatSortKey, label: "Size" },
+                        { key: "units" as CatSortKey, label: "Units" },
+                        { key: "revenue" as CatSortKey, label: "Revenue" },
+                        { key: "stores" as CatSortKey, label: "Stores" },
+                        { key: "coverage" as CatSortKey, label: "Coverage" }
+                      ]).map((col) => (
+                        <th key={col.key}>
+                          <button className="sort-header" type="button" onClick={() => handleCatSort(col.key)}>
+                            <span>{col.label}</span>
+                            <span className="sort-indicator" aria-hidden="true">
+                              {catSortKey === col.key ? (catSortDir === "asc" ? "↑" : "↓") : "↕"}
+                            </span>
+                          </button>
+                        </th>
+                      ))}
                     </tr>
-                  );
-
-                  if (!isExpanded || !breakdown) return [mainRow];
-
-                  const detailRow = (
-                    <tr key={`${row.category}-detail`} className="sku-cat-detail-row">
-                      <td colSpan={7} className="sku-cat-detail-cell">
-                        <div className="sku-cat-detail-grid">
-                          {breakdown.sizes.length > 0 ? (
-                            <div className="sku-detail-section">
-                              <div className="sku-detail-section-title">By Size</div>
-                              {breakdown.sizes.map(({ label, units: u }) => (
-                                <div key={label} className="sku-detail-row">
-                                  <span className="sku-detail-label">{label}</span>
-                                  <div className="sku-detail-bar">
-                                    <span style={{ width: `${(u / maxSize) * 100}%` }} />
-                                  </div>
-                                  <span className="sku-detail-count">{u.toLocaleString()}</span>
-                                </div>
-                              ))}
+                  </thead>
+                  <tbody>
+                    {sortedSizeRows.flatMap((row) => {
+                      const isExpanded = expandedCategories.has(row.size);
+                      const maxStrain = row.strains[0]?.units ?? 1;
+                      const mainRow = (
+                        <tr key={row.size}>
+                          <td>
+                            <button
+                              className="sku-row-expand-btn"
+                              type="button"
+                              title={isExpanded ? "Collapse" : "Expand"}
+                              onClick={() => toggleExpanded(row.size)}
+                            >
+                              {isExpanded ? "↑" : "↓"}
+                            </button>
+                          </td>
+                          <td><strong>{row.size}</strong></td>
+                          <td>{row.units.toLocaleString()}</td>
+                          <td>{formatUsd(row.revenue)}</td>
+                          <td>{row.storeCount}</td>
+                          <td>
+                            <div className="sku-coverage">
+                              <span>{Math.round(row.coverage * 100)}%</span>
+                              <div className="sku-coverage-bar">
+                                <span style={{ width: `${row.coverage * 100}%` }} />
+                              </div>
                             </div>
-                          ) : null}
-                          {breakdown.strains.length > 0 ? (
+                          </td>
+                        </tr>
+                      );
+                      if (!isExpanded || !row.strains.length) return [mainRow];
+                      const detailRow = (
+                        <tr key={`${row.size}-detail`} className="sku-cat-detail-row">
+                          <td colSpan={6} className="sku-cat-detail-cell">
                             <div className="sku-detail-section">
                               <div className="sku-detail-section-title">By Strain</div>
-                              {breakdown.strains.map(({ label, units: u }) => (
+                              {row.strains.map(({ label, units: u, revenue: r }) => (
                                 <div key={label} className="sku-detail-row">
                                   <span className="sku-detail-label">{label}</span>
                                   <div className="sku-detail-bar">
                                     <span style={{ width: `${(u / maxStrain) * 100}%` }} />
                                   </div>
                                   <span className="sku-detail-count">{u.toLocaleString()}</span>
+                                  <span className="sku-detail-revenue">{formatUsd(r)}</span>
                                 </div>
                               ))}
                             </div>
-                          ) : null}
-                        </div>
-                      </td>
+                          </td>
+                        </tr>
+                      );
+                      return [mainRow, detailRow];
+                    })}
+                    {!sortedSizeRows.length ? (
+                      <tr>
+                        <td colSpan={6} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
+                          No sizes match the current filters.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 36 }} />
+                      {([
+                        { key: "category" as CatSortKey, label: "Strain" },
+                        { key: "units" as CatSortKey, label: "Units" },
+                        { key: "revenue" as CatSortKey, label: "Revenue" },
+                        { key: "stores" as CatSortKey, label: "Stores" },
+                        { key: "coverage" as CatSortKey, label: "Coverage" }
+                      ]).map((col) => (
+                        <th key={col.key}>
+                          <button className="sort-header" type="button" onClick={() => handleCatSort(col.key)}>
+                            <span>{col.label}</span>
+                            <span className="sort-indicator" aria-hidden="true">
+                              {catSortKey === col.key ? (catSortDir === "asc" ? "↑" : "↓") : "↕"}
+                            </span>
+                          </button>
+                        </th>
+                      ))}
                     </tr>
-                  );
-
-                  return [mainRow, detailRow];
-                })}
-                {!sortedCatRows.length ? (
-                  <tr>
-                    <td colSpan={7} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
-                      No categories match the current filters.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody>
+                    {sortedStrainRows.flatMap((row) => {
+                      const isExpanded = expandedCategories.has(row.strain);
+                      const maxSize = row.sizes[0]?.units ?? 1;
+                      const mainRow = (
+                        <tr key={row.strain}>
+                          <td>
+                            <button
+                              className="sku-row-expand-btn"
+                              type="button"
+                              title={isExpanded ? "Collapse" : "Expand"}
+                              onClick={() => toggleExpanded(row.strain)}
+                            >
+                              {isExpanded ? "↑" : "↓"}
+                            </button>
+                          </td>
+                          <td><strong>{row.strain}</strong></td>
+                          <td>{row.units.toLocaleString()}</td>
+                          <td>{formatUsd(row.revenue)}</td>
+                          <td>{row.storeCount}</td>
+                          <td>
+                            <div className="sku-coverage">
+                              <span>{Math.round(row.coverage * 100)}%</span>
+                              <div className="sku-coverage-bar">
+                                <span style={{ width: `${row.coverage * 100}%` }} />
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                      if (!isExpanded || !row.sizes.length) return [mainRow];
+                      const detailRow = (
+                        <tr key={`${row.strain}-detail`} className="sku-cat-detail-row">
+                          <td colSpan={6} className="sku-cat-detail-cell">
+                            <div className="sku-detail-section">
+                              <div className="sku-detail-section-title">By Size</div>
+                              {row.sizes.map(({ label, units: u, revenue: r }) => (
+                                <div key={label} className="sku-detail-row">
+                                  <span className="sku-detail-label">{label}</span>
+                                  <div className="sku-detail-bar">
+                                    <span style={{ width: `${(u / maxSize) * 100}%` }} />
+                                  </div>
+                                  <span className="sku-detail-count">{u.toLocaleString()}</span>
+                                  <span className="sku-detail-revenue">{formatUsd(r)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                      return [mainRow, detailRow];
+                    })}
+                    {!sortedStrainRows.length ? (
+                      <tr>
+                        <td colSpan={6} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
+                          No strains match the current filters.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -5456,6 +5635,20 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
                   ))}
                 </select>
               </div>
+              {existingGroups.length > 0 ? (
+                <div className="field">
+                  <FilterLabel active={appliedFilters.group !== "all"}>Group</FilterLabel>
+                  <select
+                    value={draftFilters.group}
+                    onChange={(event) => updateDraftFilter("group", event.target.value)}
+                  >
+                    <option value="all">All groups</option>
+                    {existingGroups.map((g) => (
+                      <option key={g} value={g}>{g}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
               <button className="primary-button" type="submit">
                 <SlidersHorizontal size={16} /> Apply{draftActiveFilterCount ? ` (${draftActiveFilterCount})` : ""}
               </button>

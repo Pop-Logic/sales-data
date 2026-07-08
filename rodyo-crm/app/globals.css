@@ -1872,3 +1872,17 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+/* SKU category detail mode toggle */
+.sku-detail-toggle {
+  display: flex;
+  gap: 8px;
+  padding: 10px 0 4px;
+}
+
+.sku-detail-revenue {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-left: 4px;
+  flex-shrink: 0;
+}
