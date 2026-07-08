@@ -3717,15 +3717,18 @@ function SkuAnalyticsView({
   }), [filteredLines, skuRows, allActiveStoreCount]);
 
   const topCategories = useMemo(() => {
-    const byCat = new Map<string, number>();
+    const byCat = new Map<string, { units: number; revenue: number }>();
     windowLines.forEach((line) => {
       const cat = normalizeCategory(line.subProductLine);
-      byCat.set(cat, (byCat.get(cat) ?? 0) + line.units);
+      const current = byCat.get(cat) ?? { units: 0, revenue: 0 };
+      current.units += line.units;
+      current.revenue += line.lineTotal;
+      byCat.set(cat, current);
     });
     return [...byCat.entries()]
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1].units - a[1].units)
       .slice(0, 8)
-      .map(([cat, units]) => ({ cat, units }));
+      .map(([cat, { units, revenue }]) => ({ cat, units, revenue }));
   }, [windowLines]);
 
   const maxCategoryUnits = Math.max(1, ...topCategories.map((c) => c.units));
@@ -3917,7 +3920,7 @@ function SkuAnalyticsView({
           </div>
           <div className="sku-category-rail">
             <div className="sku-category-cards">
-              {topCategories.map(({ cat, units }) => {
+              {topCategories.map(({ cat, units, revenue }) => {
                 const isExpanded = expandedCategories.has(cat);
                 const breakdown = categoryBreakdowns.get(cat);
                 const maxSize = breakdown?.sizes[0]?.units ?? 1;
@@ -3934,7 +3937,7 @@ function SkuAnalyticsView({
                         onClick={() => setCategoryFilter((prev) => (prev === cat ? "all" : cat))}
                       >
                         <div className="sku-category-name">{cat}</div>
-                        <div className="sku-category-units">{units.toLocaleString()} units</div>
+                        <div className="sku-category-units">{units.toLocaleString()} units · {formatUsd(revenue)}</div>
                         <div className="summary-bar" style={{ marginTop: 6 }}>
                           <span style={{ width: `${(units / maxCategoryUnits) * 100}%` }} />
                         </div>
