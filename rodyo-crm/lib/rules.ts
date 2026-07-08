@@ -72,6 +72,20 @@ export type StoreRollup = {
   hasContactEver: boolean;
   hasContactThisMonth: boolean;
   hasContactThisWeek: boolean;
+  groupName?: string | null;
+};
+
+export type ContactLog = {
+  id: string;
+  storeId: string | null;
+  licenseKey: string | null;
+  storeName: string | null;
+  dateContacted: string | null;
+  savedAt: string | null;
+  contactMethod: string | null;
+  initials: string | null;
+  personContacted: string | null;
+  notes: string | null;
 };
 
 export type OrderLine = {

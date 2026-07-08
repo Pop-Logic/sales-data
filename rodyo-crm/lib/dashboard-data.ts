@@ -1,7 +1,7 @@
 import { unstable_cache } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
-import { TERRITORY_BRANDS, priorityFromScore, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
+import { TERRITORY_BRANDS, priorityFromScore, type ContactLog, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
 
 // Cache tag for the dashboard snapshot. Write routes (order sync, contact logs,
 // buyer contacts, sales goals) call revalidateTag with this so a successful
@@ -23,6 +23,7 @@ export type DashboardSnapshot = {
   stores: StoreRollup[];
   orderLines: OrderLine[];
   salesGoals: SalesGoal[];
+  contactLogs: ContactLog[];
   cultiveraLastSyncedAt?: string | null;
   metrics: {
     totalRetailers: number;
@@ -314,6 +315,7 @@ function demoSnapshot(): DashboardSnapshot {
     stores,
     orderLines: demoOrderLines,
     salesGoals: [],
+    contactLogs: [],
     cultiveraLastSyncedAt: demoOrderLines[0]?.importedAt ?? null,
     metrics: summarize(stores)
   };
@@ -458,7 +460,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
 
   const { data: logData } = await supabase
     .from("contact_logs")
-    .select("store_id, license_key, date_contacted, saved_at, contact_method, person_contacted, notes")
+    .select("id, store_id, license_key, store_name, date_contacted, saved_at, contact_method, initials, person_contacted, notes")
     .order("saved_at", { ascending: false });
 
   (logData || []).forEach((row) => {
@@ -476,6 +478,19 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     }
     logByStore.set(key, current);
   });
+
+  const contactLogs: ContactLog[] = (logData || []).map((row) => ({
+    id: String(row.id ?? ""),
+    storeId: row.store_id ? String(row.store_id) : null,
+    licenseKey: row.license_key ? String(row.license_key) : null,
+    storeName: row.store_name ? String(row.store_name) : null,
+    dateContacted: row.date_contacted ? String(row.date_contacted) : null,
+    savedAt: row.saved_at ? String(row.saved_at) : null,
+    contactMethod: row.contact_method ? String(row.contact_method) : null,
+    initials: row.initials ? String(row.initials) : null,
+    personContacted: row.person_contacted ? String(row.person_contacted) : null,
+    notes: row.notes ? String(row.notes) : null
+  }));
 
   const { data: sampleData } = await supabase
     .from("sample_drops")
@@ -669,7 +684,8 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
       latestSampleProduct: sample?.latestSampleProduct ?? null,
       hasContactEver: Boolean(row.has_contact_ever),
       hasContactThisMonth: Boolean(row.has_contact_this_month),
-      hasContactThisWeek: Boolean(row.has_contact_this_week)
+      hasContactThisWeek: Boolean(row.has_contact_this_week),
+      groupName: row.group_name ?? null
     };
   });
 
@@ -680,6 +696,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     stores: normalizedStores,
     orderLines,
     salesGoals,
+    contactLogs,
     cultiveraLastSyncedAt,
     metrics: summarize(normalizedStores)
   };

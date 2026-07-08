@@ -1726,3 +1726,76 @@ textarea {
   background: var(--green);
   border-radius: inherit;
 }
+
+.sku-row-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 0;
+}
+
+.sku-row-expand-btn:hover {
+  color: var(--text);
+  border-color: var(--blue);
+}
+
+.sku-cat-detail-row td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.sku-cat-detail-cell {
+  padding: 12px 16px 16px !important;
+}
+
+.sku-cat-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+/* Log Entries view */
+.logs-view {
+  display: grid;
+  gap: 14px;
+}
+
+.logs-filter-panel {
+  padding: 14px;
+}
+
+.logs-filter-grid {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr;
+  gap: 12px;
+  align-items: end;
+}
+
+.log-notes-cell {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.group-cell {
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1080px) {
+  .logs-filter-grid {
+    grid-template-columns: 1fr;
+  }
+}

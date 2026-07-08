@@ -21,6 +21,7 @@ import {
   formatUsd,
   isStoreOverdue,
   overdueColor,
+  type ContactLog,
   type OrderLine,
   type SalesGoal,
   type StoreRollup
@@ -31,9 +32,10 @@ type StoreDashboardProps = {
   initialView?: string | null;
 };
 
-type ViewMode = "stores" | "map" | "orders" | "skus" | "goals" | "sync";
+type ViewMode = "stores" | "map" | "orders" | "skus" | "goals" | "logs" | "sync";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
-type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "rep" | "log";
+type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "lastLog" | "group" | "rep" | "log";
+type LogSortKey = "date" | "store" | "rep" | "method";
 type SkuSortKey = "product" | "category" | "brand" | "units" | "revenue" | "stores" | "coverage" | "avgUnits" | "lastOrdered";
 type CatSortKey = "category" | "skuCount" | "units" | "revenue" | "stores" | "coverage";
 type SkuGroupMode = "sku" | "category";
@@ -75,7 +77,7 @@ type ContactLogPatch = {
 type SyncState = "idle" | "syncing" | "success" | "error";
 
 function normalizeViewMode(value?: string | null): ViewMode {
-  return value === "map" || value === "orders" || value === "skus" || value === "goals" || value === "sync" ? value : "stores";
+  return value === "map" || value === "orders" || value === "skus" || value === "goals" || value === "logs" || value === "sync" ? value : "stores";
 }
 
 const defaultStoreFilters: StoreFilters = {
@@ -96,14 +98,16 @@ const detailTabs: { id: DetailTab; label: string }[] = [
 ];
 
 const sortableColumns: { key: SortKey; label: string; width?: string }[] = [
-  { key: "store", label: "Store", width: "22%" },
+  { key: "store", label: "Store", width: "20%" },
   { key: "brand", label: "Brand" },
-  { key: "priority", label: "Priority", width: "8%" },
+  { key: "priority", label: "Priority", width: "7%" },
   { key: "balaclava", label: "Balaclava" },
   { key: "storeRevenue", label: "Store Revenue" },
   { key: "lastOrder", label: "Last Order" },
-  { key: "rep", label: "Rep", width: "7%" },
-  { key: "log", label: "Log", width: "7%" }
+  { key: "lastLog", label: "Last Log" },
+  { key: "group", label: "Group", width: "9%" },
+  { key: "rep", label: "Rep", width: "6%" },
+  { key: "log", label: "Log", width: "5%" }
 ];
 
 const BRAND_DOT_COLORS: Record<BrandFilter, string> = {
@@ -554,6 +558,12 @@ function sortValueForStore(store: StoreRollup, sortKey: SortKey) {
   }
   if (sortKey === "lastOrder") {
     return orderTimestamp(store.lastOrderAt);
+  }
+  if (sortKey === "lastLog") {
+    return orderTimestamp(store.lastContactDate);
+  }
+  if (sortKey === "group") {
+    return textSortValue(store.groupName);
   }
   if (sortKey === "rep") {
     return textSortValue(store.territoryRep);
@@ -1434,6 +1444,72 @@ function StoreDetailSummary({ store }: { store: StoreRollup }) {
   );
 }
 
+function GroupEditor({
+  store,
+  onSaved
+}: {
+  store: StoreRollup;
+  onSaved: (storeId: string, groupName: string | null) => void;
+}) {
+  const [groupName, setGroupName] = useState(store.groupName ?? "");
+  const [isSaving, setIsSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    setGroupName(store.groupName ?? "");
+    setMessage("");
+  }, [store.groupName, store.storeId]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!store.storeId) {
+      setMessage("This store is missing a Supabase store id.");
+      return;
+    }
+    setIsSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/store-group", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeId: store.storeId, groupName: groupName.trim() || null })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || "Could not save group.");
+      }
+      onSaved(store.storeId, result.groupName);
+      setMessage("Saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save group.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <form className="detail-form" onSubmit={handleSubmit}>
+      <div className="detail-form-title">Store Group</div>
+      <div className="field">
+        <label>Group / Chain</label>
+        <input
+          type="text"
+          value={groupName}
+          onChange={(event) => setGroupName(event.target.value)}
+          placeholder="e.g. Hemptown, Green Leaf"
+          disabled={isSaving}
+        />
+      </div>
+      <div className="detail-form-actions">
+        <button className="primary-button" type="submit" disabled={isSaving}>
+          {isSaving ? "Saving…" : "Save Group"}
+        </button>
+      </div>
+      {message ? <span className="status-message">{message}</span> : null}
+    </form>
+  );
+}
+
 function BuyerEditor({
   store,
   onSaved
@@ -2054,6 +2130,7 @@ function TripPlanner({
   onSetDestination,
   onSelectStore,
   onBuyerSaved,
+  onGroupSaved,
   onContactLogSaved,
   onStoreNameSaved
 }: {
@@ -2071,6 +2148,7 @@ function TripPlanner({
   onSetDestination: (key: string) => void;
   onSelectStore: (key: string) => void;
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
+  onGroupSaved: (storeId: string, groupName: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   onStoreNameSaved: (storeId: string, storeName: string) => void;
 }) {
@@ -2250,6 +2328,7 @@ function TripPlanner({
           activeTab={activeTab}
           setActiveTab={setActiveTab}
           onBuyerSaved={onBuyerSaved}
+          onGroupSaved={onGroupSaved}
           onContactLogSaved={onContactLogSaved}
           onStoreNameSaved={onStoreNameSaved}
           orderLines={selectedStoreOrderLines}
@@ -4063,6 +4142,7 @@ function SkuAnalyticsView({
             <table className="data-table">
               <thead>
                 <tr>
+                  <th style={{ width: 36 }} />
                   {catTableColumns.map((col) => (
                     <th key={col.key}>
                       <button className="sort-header" type="button" onClick={() => handleCatSort(col.key)}>
@@ -4076,33 +4156,91 @@ function SkuAnalyticsView({
                 </tr>
               </thead>
               <tbody>
-                {sortedCatRows.map((row) => (
-                  <tr key={row.category}>
-                    <td><strong>{row.category}</strong></td>
-                    <td>{row.skuCount}</td>
-                    <td>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span>{row.units.toLocaleString()}</span>
-                        <div className="summary-bar" style={{ flex: "1 1 60px", maxWidth: 100 }}>
-                          <span style={{ width: `${(row.units / maxCategoryUnits) * 100}%` }} />
+                {sortedCatRows.flatMap((row) => {
+                  const isExpanded = expandedCategories.has(row.category);
+                  const breakdown = categoryBreakdowns.get(row.category);
+                  const maxSize = breakdown?.sizes[0]?.units ?? 1;
+                  const maxStrain = breakdown?.strains[0]?.units ?? 1;
+
+                  const mainRow = (
+                    <tr key={row.category}>
+                      <td>
+                        <button
+                          className="sku-row-expand-btn"
+                          type="button"
+                          title={isExpanded ? "Collapse" : "Expand"}
+                          onClick={() => toggleExpanded(row.category)}
+                        >
+                          {isExpanded ? "↑" : "↓"}
+                        </button>
+                      </td>
+                      <td><strong>{row.category}</strong></td>
+                      <td>{row.skuCount}</td>
+                      <td>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span>{row.units.toLocaleString()}</span>
+                          <div className="summary-bar" style={{ flex: "1 1 60px", maxWidth: 100 }}>
+                            <span style={{ width: `${(row.units / maxCategoryUnits) * 100}%` }} />
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td>{formatUsd(row.revenue)}</td>
-                    <td>{row.storeCount}</td>
-                    <td>
-                      <div className="sku-coverage">
-                        <span>{Math.round(row.coverage * 100)}%</span>
-                        <div className="sku-coverage-bar">
-                          <span style={{ width: `${row.coverage * 100}%` }} />
+                      </td>
+                      <td>{formatUsd(row.revenue)}</td>
+                      <td>{row.storeCount}</td>
+                      <td>
+                        <div className="sku-coverage">
+                          <span>{Math.round(row.coverage * 100)}%</span>
+                          <div className="sku-coverage-bar">
+                            <span style={{ width: `${row.coverage * 100}%` }} />
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                    </tr>
+                  );
+
+                  if (!isExpanded || !breakdown) return [mainRow];
+
+                  const detailRow = (
+                    <tr key={`${row.category}-detail`} className="sku-cat-detail-row">
+                      <td colSpan={7} className="sku-cat-detail-cell">
+                        <div className="sku-cat-detail-grid">
+                          {breakdown.sizes.length > 0 ? (
+                            <div className="sku-detail-section">
+                              <div className="sku-detail-section-title">By Size</div>
+                              {breakdown.sizes.map(({ label, units: u }) => (
+                                <div key={label} className="sku-detail-row">
+                                  <span className="sku-detail-label">{label}</span>
+                                  <div className="sku-detail-bar">
+                                    <span style={{ width: `${(u / maxSize) * 100}%` }} />
+                                  </div>
+                                  <span className="sku-detail-count">{u.toLocaleString()}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                          {breakdown.strains.length > 0 ? (
+                            <div className="sku-detail-section">
+                              <div className="sku-detail-section-title">By Strain</div>
+                              {breakdown.strains.map(({ label, units: u }) => (
+                                <div key={label} className="sku-detail-row">
+                                  <span className="sku-detail-label">{label}</span>
+                                  <div className="sku-detail-bar">
+                                    <span style={{ width: `${(u / maxStrain) * 100}%` }} />
+                                  </div>
+                                  <span className="sku-detail-count">{u.toLocaleString()}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+
+                  return [mainRow, detailRow];
+                })}
                 {!sortedCatRows.length ? (
                   <tr>
-                    <td colSpan={6} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
+                    <td colSpan={7} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
                       No categories match the current filters.
                     </td>
                   </tr>
@@ -4113,6 +4251,201 @@ function SkuAnalyticsView({
         </div>
       </div>
     </section>
+  );
+}
+
+function LogEntriesView({
+  contactLogs,
+  stores
+}: {
+  contactLogs: ContactLog[];
+  stores: StoreRollup[];
+}) {
+  const [logQuery, setLogQuery] = useState("");
+  const [methodFilter, setMethodFilter] = useState("all");
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [logSortKey, setLogSortKey] = useState<LogSortKey>("date");
+  const [logSortDir, setLogSortDir] = useState<SortDirection>("desc");
+
+  const storeById = useMemo(() => {
+    const map = new Map<string, StoreRollup>();
+    stores.forEach((store) => {
+      if (store.storeId) map.set(store.storeId, store);
+    });
+    return map;
+  }, [stores]);
+
+  const storeByLicenseKey = useMemo(() => {
+    const map = new Map<string, StoreRollup>();
+    stores.forEach((store) => {
+      if (store.licenseKey) map.set(store.licenseKey, store);
+    });
+    return map;
+  }, [stores]);
+
+  type EnrichedLog = ContactLog & { store?: StoreRollup };
+
+  const enrichedLogs = useMemo<EnrichedLog[]>(() =>
+    contactLogs.map((log) => ({
+      ...log,
+      store: (log.storeId ? storeById.get(log.storeId) : undefined)
+        || (log.licenseKey ? storeByLicenseKey.get(log.licenseKey) : undefined)
+    })),
+    [contactLogs, storeById, storeByLicenseKey]
+  );
+
+  const methodOptions = useMemo(() => {
+    const methods = new Set(contactLogs.map((l) => l.contactMethod || "").filter(Boolean));
+    return [...methods].sort();
+  }, [contactLogs]);
+
+  const filteredLogs = useMemo(() => {
+    const normalized = logQuery.trim().toLowerCase();
+    return enrichedLogs.filter((log) => {
+      const logDate = log.dateContacted || (log.savedAt ? log.savedAt.slice(0, 10) : null);
+      if (dateFrom && logDate && logDate < dateFrom) return false;
+      if (dateTo && logDate && logDate > dateTo) return false;
+      if (methodFilter !== "all" && (log.contactMethod || "").toLowerCase() !== methodFilter.toLowerCase()) return false;
+      const store = log.store;
+      if (priorityFilter !== "all") {
+        if (!store || !matchesPriorityFilter(store, priorityFilter)) return false;
+      }
+      if (normalized) {
+        return [log.storeName, log.licenseKey, log.personContacted, log.initials, log.notes]
+          .some((v) => String(v ?? "").toLowerCase().includes(normalized));
+      }
+      return true;
+    });
+  }, [enrichedLogs, logQuery, dateFrom, dateTo, methodFilter, priorityFilter]);
+
+  const sortedLogs = useMemo(() => {
+    const dir = logSortDir === "asc" ? 1 : -1;
+    return [...filteredLogs].sort((a, b) => {
+      if (logSortKey === "store") {
+        const aName = a.store?.storeName || a.storeName || "";
+        const bName = b.store?.storeName || b.storeName || "";
+        return textSortValue(aName).localeCompare(textSortValue(bName)) * dir;
+      }
+      if (logSortKey === "method") {
+        return (a.contactMethod || "").localeCompare(b.contactMethod || "") * dir;
+      }
+      if (logSortKey === "rep") {
+        return (a.initials || "").localeCompare(b.initials || "") * dir;
+      }
+      const aDate = a.dateContacted || (a.savedAt ? a.savedAt.slice(0, 10) : "");
+      const bDate = b.dateContacted || (b.savedAt ? b.savedAt.slice(0, 10) : "");
+      return aDate.localeCompare(bDate) * dir;
+    });
+  }, [filteredLogs, logSortKey, logSortDir]);
+
+  function toggleLogSort(key: LogSortKey) {
+    if (key === logSortKey) {
+      setLogSortDir(logSortDir === "asc" ? "desc" : "asc");
+    } else {
+      setLogSortKey(key);
+      setLogSortDir(key === "date" ? "desc" : "asc");
+    }
+  }
+
+  const logColumns: { key: LogSortKey; label: string }[] = [
+    { key: "date", label: "Date" },
+    { key: "store", label: "Store" },
+    { key: "rep", label: "Rep" },
+    { key: "method", label: "Method" }
+  ];
+
+  return (
+    <div className="logs-view">
+      <div className="panel logs-filter-panel">
+        <div className="logs-filter-grid">
+          <div className="field">
+            <label>Search</label>
+            <input
+              type="search"
+              value={logQuery}
+              onChange={(event) => setLogQuery(event.target.value)}
+              placeholder="Store, person, notes…"
+            />
+          </div>
+          <div className="field">
+            <label>Method</label>
+            <select value={methodFilter} onChange={(event) => setMethodFilter(event.target.value)}>
+              <option value="all">All methods</option>
+              {methodOptions.map((m) => (
+                <option key={m} value={m.toLowerCase()}>{m}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label>Store priority</label>
+            <select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value as PriorityFilter)}>
+              <option value="all">All stores</option>
+              <option value="lapsed">Lapsed</option>
+              <option value="overdue">Overdue</option>
+              <option value="open-lane">Open Lane</option>
+            </select>
+          </div>
+          <div className="field">
+            <label>From</label>
+            <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
+          </div>
+          <div className="field">
+            <label>To</label>
+            <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
+          </div>
+        </div>
+      </div>
+      <div className="panel">
+        <div className="panel-header">
+          <h3>Log Entries</h3>
+          <span className="table-meta">
+            {filteredLogs.length.toLocaleString()} of {contactLogs.length.toLocaleString()}
+          </span>
+        </div>
+        <table className="store-table">
+          <thead>
+            <tr>
+              {logColumns.map((col) => (
+                <th key={col.key}>
+                  <button className="sort-header" type="button" onClick={() => toggleLogSort(col.key)}>
+                    <span>{col.label}</span>
+                    <span aria-hidden="true" className="sort-indicator">
+                      {logSortKey === col.key ? (logSortDir === "asc" ? "↑" : "↓") : "↕"}
+                    </span>
+                  </button>
+                </th>
+              ))}
+              <th>Person</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedLogs.map((log) => (
+              <tr key={log.id}>
+                <td style={{ whiteSpace: "nowrap" }}>{formatShortDate(log.dateContacted || log.savedAt)}</td>
+                <td>
+                  <div className="store-name">{log.store?.storeName || log.storeName || "-"}</div>
+                  <div className="store-subtext">{log.licenseKey}</div>
+                </td>
+                <td>{log.initials || "-"}</td>
+                <td>{log.contactMethod || "-"}</td>
+                <td>{log.personContacted || "-"}</td>
+                <td className="log-notes-cell">{log.notes || "-"}</td>
+              </tr>
+            ))}
+            {!sortedLogs.length ? (
+              <tr>
+                <td colSpan={6} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
+                  No log entries match that search.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -4234,6 +4567,7 @@ function StoreDetailDrawer({
   activeTab,
   setActiveTab,
   onBuyerSaved,
+  onGroupSaved,
   onContactLogSaved,
   onStoreNameSaved,
   orderLines = [],
@@ -4243,6 +4577,7 @@ function StoreDetailDrawer({
   activeTab: DetailTab;
   setActiveTab: (tab: DetailTab) => void;
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
+  onGroupSaved: (storeId: string, groupName: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   onStoreNameSaved: (storeId: string, storeName: string) => void;
   orderLines?: OrderLine[];
@@ -4304,6 +4639,7 @@ function StoreDetailDrawer({
           activeTab={activeTab}
           store={selectedStore}
           onBuyerSaved={onBuyerSaved}
+          onGroupSaved={onGroupSaved}
           onContactLogSaved={onContactLogSaved}
           orderLines={orderLines}
         />
@@ -4422,12 +4758,14 @@ function StoreDetailContent({
   activeTab,
   store,
   onBuyerSaved,
+  onGroupSaved,
   onContactLogSaved,
   orderLines = []
 }: {
   activeTab: DetailTab;
   store: StoreRollup;
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
+  onGroupSaved: (storeId: string, groupName: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   orderLines?: OrderLine[];
 }) {
@@ -4483,7 +4821,12 @@ function StoreDetailContent({
   }
 
   if (activeTab === "buyer") {
-    return <BuyerEditor store={store} onSaved={onBuyerSaved} />;
+    return (
+      <div className="detail-stack">
+        <GroupEditor store={store} onSaved={onGroupSaved} />
+        <BuyerEditor store={store} onSaved={onBuyerSaved} />
+      </div>
+    );
   }
 
   if (activeTab === "history") {
@@ -4591,6 +4934,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? "SKU Analytics"
     : activeView === "goals"
     ? "Goals"
+    : activeView === "logs"
+    ? "Log Entries"
     : activeView === "sync"
     ? "Sync"
     : "Stores";
@@ -4602,6 +4947,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? `${orderLines.filter(isPaidOrderLine).length.toLocaleString()} paid lines · sell-through by store coverage`
     : activeView === "goals"
     ? `${salesGoals.length.toLocaleString()} saved goal rows · ${uniqueOrderCount(orderLines).toLocaleString()} orders feeding actuals`
+    : activeView === "logs"
+    ? `${snapshot.contactLogs.length.toLocaleString()} total log entries`
     : activeView === "sync"
     ? `${uniqueOrderCount(orderLines).toLocaleString()} synced orders · ${orderLines.length.toLocaleString()} line items`
     : snapshot.source === "demo"
@@ -4633,7 +4980,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   }, []);
 
   useEffect(() => {
-    const selectionScope = activeView === "orders" || activeView === "skus" || activeView === "goals" || activeView === "sync" ? stores : sortedStores;
+    const selectionScope = activeView === "orders" || activeView === "skus" || activeView === "goals" || activeView === "logs" || activeView === "sync" ? stores : sortedStores;
     if (!selectionScope.length) {
       setSelectedStoreKey("");
       return;
@@ -4665,6 +5012,12 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   function handleStoreNameSaved(storeId: string, storeName: string) {
     setStores((currentStores) => currentStores.map((store) => (
       store.storeId === storeId ? { ...store, storeName } : store
+    )));
+  }
+
+  function handleGroupSaved(storeId: string, groupName: string | null) {
+    setStores((currentStores) => currentStores.map((store) => (
+      store.storeId === storeId ? { ...store, groupName } : store
     )));
   }
 
@@ -4766,7 +5119,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
 
     setSortKey(nextSortKey);
     setSortDirection(
-      nextSortKey === "balaclava" || nextSortKey === "storeRevenue" || nextSortKey === "lastOrder" || nextSortKey === "priority" || nextSortKey === "log" ? "desc" : "asc"
+      nextSortKey === "balaclava" || nextSortKey === "storeRevenue" || nextSortKey === "lastOrder" || nextSortKey === "lastLog" || nextSortKey === "priority" || nextSortKey === "log" ? "desc" : "asc"
     );
   }
 
@@ -4792,6 +5145,9 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
           </a>
           <a className={activeView === "goals" ? "active" : ""} href="/?view=goals">
             Goals
+          </a>
+          <a className={activeView === "logs" ? "active" : ""} href="/?view=logs">
+            Logs
           </a>
           <a className={activeView === "sync" ? "active" : ""} href="/?view=sync">
             Sync
@@ -5024,13 +5380,15 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
                       <td>{formatUsd(latestBalaclavaRevenue(store))}</td>
                       <td>{formatUsd(store.marketSalesLastMonth)}</td>
                       <td>{formatShortDate(store.lastOrderAt)}</td>
+                      <td>{formatShortDate(store.lastContactDate)}</td>
+                      <td className="group-cell">{store.groupName || "-"}</td>
                       <td>{store.territoryRep || "-"}</td>
                       <td>{store.hasContactEver ? "✅" : ""}</td>
                     </tr>
                   ))}
                   {!sortedStores.length ? (
                     <tr>
-                      <td colSpan={8}>No stores match that search.</td>
+                      <td colSpan={10}>No stores match that search.</td>
                     </tr>
                   ) : null}
                 </tbody>
@@ -5042,6 +5400,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
               activeTab={activeTab}
               setActiveTab={setActiveTab}
               onBuyerSaved={handleBuyerSaved}
+              onGroupSaved={handleGroupSaved}
               onContactLogSaved={handleContactLogSaved}
               onStoreNameSaved={handleStoreNameSaved}
               orderLines={selectedStoreOrderLines}
@@ -5063,6 +5422,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
             onSetDestination={handleSetRouteDestination}
             onSelectStore={handleStoreSelect}
             onBuyerSaved={handleBuyerSaved}
+            onGroupSaved={handleGroupSaved}
             onContactLogSaved={handleContactLogSaved}
             onStoreNameSaved={handleStoreNameSaved}
           />
@@ -5077,6 +5437,11 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
         ) : activeView === "skus" ? (
           <SkuAnalyticsView
             orderLines={orderLines}
+            stores={stores}
+          />
+        ) : activeView === "logs" ? (
+          <LogEntriesView
+            contactLogs={snapshot.contactLogs}
             stores={stores}
           />
         ) : activeView === "sync" ? (
