@@ -1,6 +1,8 @@
 alter table public.stores add column if not exists group_name text;
 
-create or replace view public.crm_store_rollup as
+drop view if exists public.crm_store_rollup;
+
+create view public.crm_store_rollup as
 with base as (
   select
     s.id as store_id,
