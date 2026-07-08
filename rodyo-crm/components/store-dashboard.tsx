@@ -840,6 +840,33 @@ function normalizeCategory(subProductLine?: string | null): string {
   return stripped || subProductLine;
 }
 
+function extractUnitSize(productName?: string | null): string {
+  if (!productName) return "Other";
+  const weightMatch = productName.match(/\b(\d+(?:\.\d+)?)\s*(g|mg|oz|ml)\b/i);
+  if (weightMatch) return `${weightMatch[1]}${weightMatch[2].toLowerCase()}`;
+  const packMatch = productName.match(/\b(\d+)\s*[-]?\s*(?:pk|pack)\b/i);
+  if (packMatch) return `${packMatch[1]}pk`;
+  return "Other";
+}
+
+function extractStrain(productName?: string | null): string {
+  if (!productName) return "";
+  let name = productName.trim();
+  for (const brand of [...TERRITORY_BRANDS].sort((a, b) => b.length - a.length)) {
+    if (name.toLowerCase().startsWith(brand.toLowerCase())) {
+      name = name.slice(brand.length).trim();
+      break;
+    }
+  }
+  name = name.replace(/\b\d+(?:\.\d+)?\s*(?:g|mg|oz|ml)\b/gi, "").trim();
+  name = name.replace(/\b\d+\s*[-]?\s*(?:pk|pack)\b/gi, "").trim();
+  name = name.replace(
+    /\b(?:flower|pre[-\s]?roll|preroll|cartridge|cart|concentrate|extract|live\s+resin|live\s+rosin|rosin|resin|wax|shatter|crumble|vape|pod|disposable|tincture|topical|capsule|gummy|gummies|infused|edible|hash|kief|distillate|oil|sugar|badder|batter|diamonds|sauce)\b/gi,
+    ""
+  ).replace(/\s+/g, " ").trim();
+  return name;
+}
+
 function formatSyncDateTime(value?: string | null) {
   if (!value) {
     return "";
@@ -3498,6 +3525,15 @@ function SkuAnalyticsView({
   const [skuSortDir, setSkuSortDir] = useState<SortDirection>("desc");
   const [catSortKey, setCatSortKey] = useState<CatSortKey>("units");
   const [catSortDir, setCatSortDir] = useState<SortDirection>("desc");
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(() => new Set());
+
+  function toggleExpanded(cat: string) {
+    setExpandedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat); else next.add(cat);
+      return next;
+    });
+  }
 
   const baseLines = useMemo(() => orderLines.filter(isPaidOrderLine), [orderLines]);
   const bounds = useMemo(() => orderDateBounds(baseLines), [baseLines]);
@@ -3695,6 +3731,46 @@ function SkuAnalyticsView({
   const maxCategoryUnits = Math.max(1, ...topCategories.map((c) => c.units));
   const maxSkuUnits = Math.max(1, ...skuRows.map((r) => r.units));
 
+  const categoryBreakdowns = useMemo(() => {
+    const sizeMaps = new Map<string, Map<string, number>>();
+    const strainMaps = new Map<string, Map<string, number>>();
+
+    windowLines.forEach((line) => {
+      const cat = normalizeCategory(line.subProductLine);
+
+      if (!sizeMaps.has(cat)) sizeMaps.set(cat, new Map());
+      const sizeKey = extractUnitSize(line.productName);
+      const sizeMap = sizeMaps.get(cat)!;
+      sizeMap.set(sizeKey, (sizeMap.get(sizeKey) ?? 0) + line.units);
+
+      if (!strainMaps.has(cat)) strainMaps.set(cat, new Map());
+      const strainKey = extractStrain(line.productName);
+      if (strainKey) {
+        const strainMap = strainMaps.get(cat)!;
+        strainMap.set(strainKey, (strainMap.get(strainKey) ?? 0) + line.units);
+      }
+    });
+
+    const result = new Map<string, {
+      sizes: { label: string; units: number }[];
+      strains: { label: string; units: number }[];
+    }>();
+
+    sizeMaps.forEach((sizeMap, cat) => {
+      result.set(cat, {
+        sizes: [...sizeMap.entries()]
+          .map(([label, units]) => ({ label, units }))
+          .sort((a, b) => b.units - a.units),
+        strains: [...(strainMaps.get(cat)?.entries() ?? [])]
+          .map(([label, units]) => ({ label, units }))
+          .sort((a, b) => b.units - a.units)
+          .slice(0, 10)
+      });
+    });
+
+    return result;
+  }, [windowLines]);
+
   function handleSkuSort(key: SkuSortKey) {
     if (key === skuSortKey) {
       setSkuSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -3841,20 +3917,72 @@ function SkuAnalyticsView({
           </div>
           <div className="sku-category-rail">
             <div className="sku-category-cards">
-              {topCategories.map(({ cat, units }) => (
-                <button
-                  key={cat}
-                  className={`sku-category-card${categoryFilter === cat ? " is-active" : ""}`}
-                  type="button"
-                  onClick={() => setCategoryFilter((prev) => (prev === cat ? "all" : cat))}
-                >
-                  <div className="sku-category-name">{cat}</div>
-                  <div className="sku-category-units">{units.toLocaleString()} units</div>
-                  <div className="summary-bar" style={{ marginTop: 6 }}>
-                    <span style={{ width: `${(units / maxCategoryUnits) * 100}%` }} />
+              {topCategories.map(({ cat, units }) => {
+                const isExpanded = expandedCategories.has(cat);
+                const breakdown = categoryBreakdowns.get(cat);
+                const maxSize = breakdown?.sizes[0]?.units ?? 1;
+                const maxStrain = breakdown?.strains[0]?.units ?? 1;
+                return (
+                  <div
+                    key={cat}
+                    className={`sku-category-card${categoryFilter === cat ? " is-active" : ""}${isExpanded ? " is-expanded" : ""}`}
+                  >
+                    <div className="sku-category-header">
+                      <button
+                        className="sku-category-main"
+                        type="button"
+                        onClick={() => setCategoryFilter((prev) => (prev === cat ? "all" : cat))}
+                      >
+                        <div className="sku-category-name">{cat}</div>
+                        <div className="sku-category-units">{units.toLocaleString()} units</div>
+                        <div className="summary-bar" style={{ marginTop: 6 }}>
+                          <span style={{ width: `${(units / maxCategoryUnits) * 100}%` }} />
+                        </div>
+                      </button>
+                      <button
+                        className="sku-expand-btn"
+                        type="button"
+                        title={isExpanded ? "Collapse" : "Expand"}
+                        onClick={() => toggleExpanded(cat)}
+                      >
+                        {isExpanded ? "↑" : "↓"}
+                      </button>
+                    </div>
+                    {isExpanded && breakdown ? (
+                      <div className="sku-category-detail">
+                        {breakdown.sizes.length > 0 ? (
+                          <div className="sku-detail-section">
+                            <div className="sku-detail-section-title">By Size</div>
+                            {breakdown.sizes.map(({ label, units: u }) => (
+                              <div key={label} className="sku-detail-row">
+                                <span className="sku-detail-label">{label}</span>
+                                <div className="sku-detail-bar">
+                                  <span style={{ width: `${(u / maxSize) * 100}%` }} />
+                                </div>
+                                <span className="sku-detail-count">{u.toLocaleString()}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {breakdown.strains.length > 0 ? (
+                          <div className="sku-detail-section">
+                            <div className="sku-detail-section-title">By Strain</div>
+                            {breakdown.strains.map(({ label, units: u }) => (
+                              <div key={label} className="sku-detail-row">
+                                <span className="sku-detail-label">{label}</span>
+                                <div className="sku-detail-bar">
+                                  <span style={{ width: `${(u / maxStrain) * 100}%` }} />
+                                </div>
+                                <span className="sku-detail-count">{u.toLocaleString()}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
-                </button>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
