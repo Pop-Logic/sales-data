@@ -1446,9 +1446,11 @@ function StoreDetailSummary({ store }: { store: StoreRollup }) {
 
 function GroupEditor({
   store,
+  existingGroups,
   onSaved
 }: {
   store: StoreRollup;
+  existingGroups: string[];
   onSaved: (storeId: string, groupName: string | null) => void;
 }) {
   const [groupName, setGroupName] = useState(store.groupName ?? "");
@@ -1494,11 +1496,17 @@ function GroupEditor({
         <label>Group / Chain</label>
         <input
           type="text"
+          list="existing-groups"
           value={groupName}
           onChange={(event) => setGroupName(event.target.value)}
           placeholder="e.g. Hemptown, Green Leaf"
           disabled={isSaving}
         />
+        {existingGroups.length ? (
+          <datalist id="existing-groups">
+            {existingGroups.map((g) => <option key={g} value={g} />)}
+          </datalist>
+        ) : null}
       </div>
       <div className="detail-form-actions">
         <button className="primary-button" type="submit" disabled={isSaving}>
@@ -2129,6 +2137,7 @@ function TripPlanner({
   onClearTrip,
   onSetDestination,
   onSelectStore,
+  existingGroups,
   onBuyerSaved,
   onGroupSaved,
   onContactLogSaved,
@@ -2147,6 +2156,7 @@ function TripPlanner({
   onClearTrip: () => void;
   onSetDestination: (key: string) => void;
   onSelectStore: (key: string) => void;
+  existingGroups: string[];
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
@@ -2327,6 +2337,7 @@ function TripPlanner({
           selectedStore={selectedStore}
           activeTab={activeTab}
           setActiveTab={setActiveTab}
+          existingGroups={existingGroups}
           onBuyerSaved={onBuyerSaved}
           onGroupSaved={onGroupSaved}
           onContactLogSaved={onContactLogSaved}
@@ -4566,6 +4577,7 @@ function StoreDetailDrawer({
   selectedStore,
   activeTab,
   setActiveTab,
+  existingGroups,
   onBuyerSaved,
   onGroupSaved,
   onContactLogSaved,
@@ -4576,6 +4588,7 @@ function StoreDetailDrawer({
   selectedStore?: StoreRollup;
   activeTab: DetailTab;
   setActiveTab: (tab: DetailTab) => void;
+  existingGroups: string[];
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
@@ -4638,6 +4651,7 @@ function StoreDetailDrawer({
         <StoreDetailContent
           activeTab={activeTab}
           store={selectedStore}
+          existingGroups={existingGroups}
           onBuyerSaved={onBuyerSaved}
           onGroupSaved={onGroupSaved}
           onContactLogSaved={onContactLogSaved}
@@ -4757,6 +4771,7 @@ function ContactLogHistory({ store }: { store: StoreRollup }) {
 function StoreDetailContent({
   activeTab,
   store,
+  existingGroups,
   onBuyerSaved,
   onGroupSaved,
   onContactLogSaved,
@@ -4764,6 +4779,7 @@ function StoreDetailContent({
 }: {
   activeTab: DetailTab;
   store: StoreRollup;
+  existingGroups: string[];
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
@@ -4823,7 +4839,7 @@ function StoreDetailContent({
   if (activeTab === "buyer") {
     return (
       <div className="detail-stack">
-        <GroupEditor store={store} onSaved={onGroupSaved} />
+        <GroupEditor store={store} existingGroups={existingGroups} onSaved={onGroupSaved} />
         <BuyerEditor store={store} onSaved={onBuyerSaved} />
       </div>
     );
@@ -4888,6 +4904,10 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   const [selectedStoreKey, setSelectedStoreKey] = useState(() => (
     snapshot.stores[0] ? storeKey(snapshot.stores[0]) : ""
   ));
+  const existingGroups = useMemo(() =>
+    [...new Set(stores.map((s) => s.groupName).filter((g): g is string => Boolean(g)))].sort(),
+    [stores]
+  );
   const normalizedStoreQuery = storeQuery.trim().toLowerCase();
   const filteredStores = useMemo(() => {
     const searchedStores = normalizedStoreQuery
@@ -5399,6 +5419,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
               selectedStore={selectedStore}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
+              existingGroups={existingGroups}
               onBuyerSaved={handleBuyerSaved}
               onGroupSaved={handleGroupSaved}
               onContactLogSaved={handleContactLogSaved}
@@ -5421,6 +5442,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
             onClearTrip={handleClearTrip}
             onSetDestination={handleSetRouteDestination}
             onSelectStore={handleStoreSelect}
+            existingGroups={existingGroups}
             onBuyerSaved={handleBuyerSaved}
             onGroupSaved={handleGroupSaved}
             onContactLogSaved={handleContactLogSaved}
