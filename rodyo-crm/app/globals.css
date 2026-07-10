@@ -1873,6 +1873,124 @@ textarea {
   }
 }
 
+/* Trip log modal */
+.trip-log-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+
+.trip-log-modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.trip-log-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.trip-log-modal-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.trip-log-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+
+.trip-log-fields {
+  display: grid;
+  grid-template-columns: 1.4fr 0.8fr 1fr;
+  gap: 10px;
+}
+
+.trip-log-stop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.trip-log-stop {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trip-log-stop-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.trip-log-stop-name {
+  font-weight: 500;
+}
+
+.trip-log-stop-city {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.trip-log-stop-note {
+  margin-left: 22px;
+  font-size: 0.82rem;
+  padding: 4px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  width: calc(100% - 22px);
+}
+
+.trip-log-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.trip-log-done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px 16px;
+  color: var(--text);
+}
+
+.trip-log-done p {
+  margin: 0;
+  font-size: 1rem;
+}
+
 /* SKU category detail mode toggle */
 .sku-detail-toggle {
   display: flex;

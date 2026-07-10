@@ -2358,6 +2358,190 @@ function StoreMap({
   );
 }
 
+function TripLogModal({
+  stops,
+  onSaved,
+  onClose
+}: {
+  stops: StoreRollup[];
+  onSaved: (storeId: string, log: ContactLogPatch) => void;
+  onClose: () => void;
+}) {
+  const [date, setDate] = useState(localDateInputValue);
+  const [initials, setInitials] = useState("");
+  const [method, setMethod] = useState("Visit");
+  const [sharedNotes, setSharedNotes] = useState("");
+  const [checkedKeys, setCheckedKeys] = useState<Set<string>>(() => new Set(stops.map(storeKey)));
+  const [stopNotes, setStopNotes] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [saveError, setSaveError] = useState("");
+  const [done, setDone] = useState(false);
+
+  function toggleKey(key: string) {
+    setCheckedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const toSave = stops.filter((s) => s.storeId && checkedKeys.has(storeKey(s)));
+    if (!toSave.length) { setSaveError("No stops selected."); return; }
+    setSaving(true);
+    setSaveError("");
+    let savedCount = 0;
+    setProgress({ done: 0, total: toSave.length });
+
+    for (const store of toSave) {
+      const perStop = stopNotes[storeKey(store)]?.trim();
+      const notes = [sharedNotes.trim(), perStop].filter(Boolean).join(" · ") || null;
+      try {
+        const response = await fetch("/api/contact-logs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            storeId: store.storeId,
+            licenseKey: store.licenseKey,
+            storeName: store.storeName,
+            dateContacted: date,
+            contactMethod: method,
+            initials: initials.trim() || null,
+            notes
+          })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error);
+        onSaved(store.storeId!, {
+          storeId: store.storeId!,
+          dateContacted: date,
+          contactMethod: method,
+          initials: initials.trim() || null,
+          personContacted: null,
+          notes,
+          savedAt: result.savedAt
+        });
+        savedCount++;
+      } catch {
+        // continue to next stop
+      }
+      setProgress({ done: savedCount, total: toSave.length });
+    }
+
+    setSaving(false);
+    setDone(true);
+  }
+
+  return (
+    <div
+      className="trip-log-overlay"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="trip-log-modal">
+        <div className="trip-log-modal-header">
+          <h3>Log Trip</h3>
+          <button className="icon-button" type="button" onClick={onClose}>
+            <X size={16} />
+          </button>
+        </div>
+        {done ? (
+          <div className="trip-log-done">
+            <Check size={28} />
+            <p>Logged {progress?.done} of {progress?.total} {progress?.total === 1 ? "stop" : "stops"}.</p>
+            <button className="primary-button" type="button" onClick={onClose}>Done</button>
+          </div>
+        ) : (
+          <form className="trip-log-form" onSubmit={handleSubmit}>
+            <div className="trip-log-fields">
+              <div className="field">
+                <label>Date</label>
+                <input
+                  type="date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="field">
+                <label>Rep</label>
+                <input
+                  type="text"
+                  value={initials}
+                  onChange={(e) => setInitials(e.target.value)}
+                  placeholder="Initials"
+                  maxLength={6}
+                />
+              </div>
+              <div className="field">
+                <label>Method</label>
+                <select value={method} onChange={(e) => setMethod(e.target.value)}>
+                  <option>Visit</option>
+                  <option>Phone</option>
+                  <option>Email</option>
+                  <option>Text</option>
+                </select>
+              </div>
+            </div>
+            <div className="field">
+              <label>Shared notes (applied to all stops)</label>
+              <textarea
+                rows={2}
+                value={sharedNotes}
+                onChange={(e) => setSharedNotes(e.target.value)}
+                placeholder="Optional"
+                style={{ resize: "vertical" }}
+              />
+            </div>
+            <div className="trip-log-stop-list">
+              {stops.map((s) => {
+                const key = storeKey(s);
+                const checked = checkedKeys.has(key);
+                return (
+                  <div key={key} className="trip-log-stop">
+                    <label className="trip-log-stop-label">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleKey(key)}
+                      />
+                      <span className="trip-log-stop-name">{s.storeName}</span>
+                      {s.city ? <span className="trip-log-stop-city">{s.city}</span> : null}
+                    </label>
+                    {checked ? (
+                      <input
+                        className="trip-log-stop-note"
+                        type="text"
+                        placeholder="Stop note (optional)"
+                        value={stopNotes[key] ?? ""}
+                        onChange={(e) => setStopNotes((prev) => ({ ...prev, [key]: e.target.value }))}
+                      />
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+            {saveError ? <span className="status-message">{saveError}</span> : null}
+            <div className="trip-log-footer">
+              {saving && progress ? (
+                <span className="status-message">Saving {progress.done + 1} of {progress.total}…</span>
+              ) : null}
+              <button
+                className="primary-button"
+                disabled={saving || checkedKeys.size === 0}
+                type="submit"
+              >
+                Log {checkedKeys.size} Stop{checkedKeys.size !== 1 ? "s" : ""}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TripPlanner({
   stores,
   orderLines,
@@ -2403,6 +2587,7 @@ function TripPlanner({
   const [maxOffRouteMiles, setMaxOffRouteMiles] = useState(5);
   const [maxSuggestedStops, setMaxSuggestedStops] = useState(6);
   const [destinationRouteCoordinates, setDestinationRouteCoordinates] = useState<[number, number][] | null>(null);
+  const [showTripLog, setShowTripLog] = useState(false);
   const mappedStores = useMemo(() => stores.filter(hasStoreCoordinates), [stores]);
   const mappedStoreByKey = useMemo(() => {
     const byKey = new Map<string, StoreRollup>();
@@ -2760,6 +2945,16 @@ function TripPlanner({
                 <li className="trip-empty">No stops selected.</li>
               ) : null}
             </ol>
+            {orderedTripStores.length > 0 ? (
+              <button
+                className="secondary-button"
+                style={{ marginTop: 10, width: "100%" }}
+                type="button"
+                onClick={() => setShowTripLog(true)}
+              >
+                <ListPlus size={15} /> Log Trip
+              </button>
+            ) : null}
           </div>
 
           <div className="trip-section">
@@ -2845,6 +3040,13 @@ function TripPlanner({
           </div>
         </aside>
       </div>
+      {showTripLog ? (
+        <TripLogModal
+          stops={orderedTripStores}
+          onSaved={onContactLogSaved}
+          onClose={() => setShowTripLog(false)}
+        />
+      ) : null}
     </section>
   );
 }
