@@ -2088,3 +2088,75 @@ textarea {
   margin-left: 4px;
   flex-shrink: 0;
 }
+
+/* Headset sync panel */
+.headset-sync-panel {
+  margin-top: 16px;
+}
+
+.headset-sync-body {
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.headset-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.headset-upload-row input[type="file"] {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.headset-result {
+  font-size: 0.85rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--success, #22c55e) 12%, transparent);
+  color: var(--success, #22c55e);
+}
+
+.headset-result-error {
+  background: color-mix(in srgb, var(--danger, #ef4444) 12%, transparent);
+  color: var(--danger, #ef4444);
+}
+
+.headset-unmatched {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.headset-unmatched-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.headset-map-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.headset-map-name {
+  font-size: 0.85rem;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headset-map-row select {
+  flex: 1;
+  min-width: 140px;
+  max-width: 260px;
+}

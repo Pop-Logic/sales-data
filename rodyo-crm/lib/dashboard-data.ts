@@ -608,6 +608,13 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     });
   });
 
+  const { data: headsetSummaryData } = await supabase
+    .from("headset_store_summary")
+    .select("store_id, last_sale, units_30d, sales_30d");
+  const headsetByStore = new Map(
+    (headsetSummaryData || []).map((r) => [String(r.store_id), r])
+  );
+
   const { data: salesGoalData, error: salesGoalDataError } = await supabase
     .from("sales_goals")
     .select("id, goal_month, goal_type, week_id, week_label, brand, goal_amount, notes, updated_at")
@@ -687,7 +694,10 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
       hasContactThisMonth: Boolean(row.has_contact_this_month),
       hasContactThisWeek: Boolean(row.has_contact_this_week),
       groupName: row.group_name ?? null,
-      serviceNote: row.service_note ?? null
+      serviceNote: row.service_note ?? null,
+      headsetLastSale: headsetByStore.get(String(row.store_id ?? ""))?.last_sale ?? null,
+      headsetUnits30d: Number(headsetByStore.get(String(row.store_id ?? ""))?.units_30d ?? 0),
+      headsetSales30d: Number(headsetByStore.get(String(row.store_id ?? ""))?.sales_30d ?? 0)
     };
   });
 

@@ -33,7 +33,7 @@ type StoreDashboardProps = {
 };
 
 type ViewMode = "stores" | "map" | "orders" | "skus" | "goals" | "logs" | "sync";
-type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples";
+type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples" | "retail";
 type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "lastLog" | "group" | "rep" | "log";
 type LogSortKey = "date" | "store" | "rep" | "method";
 type SkuSortKey = "product" | "category" | "brand" | "units" | "revenue" | "stores" | "coverage" | "avgUnits" | "lastOrdered";
@@ -57,6 +57,7 @@ type StoreFilters = {
   priority: PriorityFilter;
   region: string;
   group: string;
+  reorderGap: boolean;
 };
 
 type BuyerContactPatch = {
@@ -88,7 +89,8 @@ const defaultStoreFilters: StoreFilters = {
   pareto: "all",
   priority: "all",
   region: "all",
-  group: "all"
+  group: "all",
+  reorderGap: false
 };
 
 const detailTabs: { id: DetailTab; label: string }[] = [
@@ -96,7 +98,8 @@ const detailTabs: { id: DetailTab; label: string }[] = [
   { id: "orders", label: "Orders" },
   { id: "buyer", label: "Buyer" },
   { id: "history", label: "History" },
-  { id: "samples", label: "Samples" }
+  { id: "samples", label: "Samples" },
+  { id: "retail", label: "Retail" }
 ];
 
 const sortableColumns: { key: SortKey; label: string; width?: string }[] = [
@@ -774,6 +777,19 @@ function applyStoreFilters(stores: StoreRollup[], filters: StoreFilters) {
     nextStores = nextStores.filter((store) => store.groupName === filters.group);
   }
 
+  if (filters.reorderGap) {
+    const now = Date.now();
+    const RECENT_SALE_MS = 14 * 86_400_000;
+    const STALE_ORDER_MS = 30 * 86_400_000;
+    nextStores = nextStores.filter((store) => {
+      if (!store.headsetLastSale) return false;
+      const lastSaleAge = now - new Date(store.headsetLastSale).getTime();
+      if (lastSaleAge > RECENT_SALE_MS) return false;
+      if (!store.lastOrderAt) return true;
+      return now - new Date(store.lastOrderAt).getTime() > STALE_ORDER_MS;
+    });
+  }
+
   if (filters.pareto === "top30") {
     const topKeys = new Set(
       [...nextStores]
@@ -815,7 +831,8 @@ function countActiveFilters(filters: StoreFilters) {
     filters.pareto !== "all",
     filters.priority !== "all",
     filters.region !== "all",
-    filters.group !== "all"
+    filters.group !== "all",
+    filters.reorderGap
   ].filter(Boolean).length;
 }
 
@@ -3529,6 +3546,154 @@ function OrdersView({
   );
 }
 
+function HeadsetSyncPanel({ stores }: { stores: StoreRollup[] }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [status, setStatus] = useState<"idle" | "parsing" | "uploading" | "done" | "error">("idle");
+  const [result, setResult] = useState<{ imported: number; total: number; unmatched: string[] } | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [mappings, setMappings] = useState<Record<string, string>>({});
+
+  function parseCsv(text: string) {
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 2) return [];
+    const headers = lines[0].split(",").map((h) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, "_"));
+    const col = (name: string) => headers.indexOf(name);
+    const dayIdx = col("day");
+    const storeIdx = col("store_name");
+    const repIdx = col("account_rep");
+    const nameIdx = col("name");
+    const catIdx = col("category");
+    const unitIdx = col("unit");
+    const brandIdx = col("brand");
+    const salesIdx = col("total_sales");
+    const unitsIdx = col("total_units");
+    const priceIdx = col("avg_item_price");
+    const stockIdx = col("__days_in_stock");
+    const costIdx = col("avg_unit_cost");
+    return lines.slice(1).map((line) => {
+      const cols = line.split(",");
+      const get = (i: number) => (i >= 0 ? (cols[i] ?? "").trim().replace(/^"|"$/g, "") : "");
+      const parseNum = (i: number) => { const v = parseFloat(get(i).replace(/[$,%]/g, "")); return isNaN(v) ? null : v; };
+      return {
+        day: get(dayIdx),
+        storeName: get(storeIdx),
+        accountRep: get(repIdx) || null,
+        productName: get(nameIdx),
+        category: get(catIdx) || null,
+        unitSize: get(unitIdx) || null,
+        brand: get(brandIdx) || null,
+        totalSales: parseNum(salesIdx) ?? 0,
+        totalUnits: Math.round(parseNum(unitsIdx) ?? 0),
+        avgItemPrice: parseNum(priceIdx),
+        pctDaysInStock: parseNum(stockIdx),
+        avgUnitCost: parseNum(costIdx)
+      };
+    }).filter((r) => r.day && r.storeName && r.productName);
+  }
+
+  async function handleUpload() {
+    if (!file) return;
+    setStatus("parsing");
+    setErrorMsg(null);
+    try {
+      const text = await file.text();
+      const rows = parseCsv(text);
+      if (!rows.length) throw new Error("No valid rows found in CSV.");
+      setStatus("uploading");
+      const res = await fetch("/api/headset/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setResult(data);
+      setStatus("done");
+    } catch (err) {
+      setErrorMsg(String((err as Error).message || err));
+      setStatus("error");
+    }
+  }
+
+  async function handleSaveMappings() {
+    const entries = Object.entries(mappings).filter(([, v]) => v);
+    if (!entries.length) return;
+    const res = await fetch("/api/headset/map", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mappings: entries.map(([headsetName, storeId]) => ({ headsetName, storeId })) })
+    });
+    const data = await res.json();
+    if (data.error) { setErrorMsg(data.error); return; }
+    setMappings({});
+    setResult((prev) => prev ? { ...prev, unmatched: prev.unmatched.filter((n) => !entries.find(([k]) => k === n)) } : null);
+  }
+
+  const storeOptions = [...stores].sort((a, b) => a.storeName.localeCompare(b.storeName));
+
+  return (
+    <div className="panel headset-sync-panel">
+      <div className="panel-header">
+        <h3>Headset Sell-Through</h3>
+        <span className="table-meta">Upload daily POS CSV</span>
+      </div>
+      <div className="headset-sync-body">
+        <div className="headset-upload-row">
+          <input
+            type="file"
+            accept=".csv"
+            onChange={(e) => { setFile(e.target.files?.[0] ?? null); setStatus("idle"); setResult(null); }}
+          />
+          <button
+            className="primary-button"
+            type="button"
+            disabled={!file || status === "parsing" || status === "uploading"}
+            onClick={handleUpload}
+          >
+            {status === "parsing" ? "Parsing…" : status === "uploading" ? "Uploading…" : "Import CSV"}
+          </button>
+        </div>
+        {status === "done" && result ? (
+          <div className="headset-result">
+            <span className="headset-result-ok">
+              Imported {result.imported.toLocaleString()} / {result.total.toLocaleString()} rows
+            </span>
+          </div>
+        ) : null}
+        {status === "error" && errorMsg ? (
+          <div className="headset-result headset-result-error">{errorMsg}</div>
+        ) : null}
+        {result?.unmatched?.length ? (
+          <div className="headset-unmatched">
+            <div className="headset-unmatched-label">
+              {result.unmatched.length} store{result.unmatched.length !== 1 ? "s" : ""} not matched — map them to your CRM stores:
+            </div>
+            {result.unmatched.map((name) => (
+              <div className="headset-map-row" key={name}>
+                <span className="headset-map-name">{name}</span>
+                <select
+                  value={mappings[name] || ""}
+                  onChange={(e) => setMappings((prev) => ({ ...prev, [name]: e.target.value }))}
+                >
+                  <option value="">— select store —</option>
+                  {storeOptions.map((s) => (
+                    <option key={s.storeId} value={s.storeId ?? ""}>{s.storeName}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+            {Object.values(mappings).some(Boolean) ? (
+              <button className="secondary-button" type="button" style={{ marginTop: 8 }} onClick={handleSaveMappings}>
+                Save Mappings
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function SyncView({
   orderLines,
   salesGoals,
@@ -3640,6 +3805,8 @@ function SyncView({
           </div>
         </div>
       </section>
+
+      <HeadsetSyncPanel stores={stores} />
     </section>
   );
 }
@@ -5494,6 +5661,117 @@ function ContactLogHistory({ store }: { store: StoreRollup }) {
   );
 }
 
+type HeadsetSaleRow = {
+  day: string;
+  productName: string;
+  category: string | null;
+  unitSize: string | null;
+  brand: string | null;
+  totalSales: number;
+  totalUnits: number;
+  avgItemPrice: number | null;
+  pctDaysInStock: number | null;
+  avgUnitCost: number | null;
+};
+
+function RetailTab({ store }: { store: StoreRollup }) {
+  const [sales, setSales] = useState<HeadsetSaleRow[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!store.storeId) return;
+    setLoading(true);
+    setError(null);
+    fetch(`/api/headset/store?storeId=${encodeURIComponent(store.storeId)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.error) throw new Error(data.error);
+        setSales(data.sales || []);
+      })
+      .catch((err) => setError(String(err.message || err)))
+      .finally(() => setLoading(false));
+  }, [store.storeId]);
+
+  const hasHeadset = store.headsetLastSale || (store.headsetUnits30d ?? 0) > 0;
+
+  if (!hasHeadset && !loading && sales !== null && sales.length === 0) {
+    return (
+      <div className="detail-stack">
+        <p className="detail-note">No Headset sell-through data for this store. Upload a CSV in Sync → Headset to get started.</p>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <div className="detail-stack"><p className="detail-note">Loading…</p></div>;
+  }
+
+  if (error) {
+    return <div className="detail-stack"><p className="detail-note" style={{ color: "var(--danger)" }}>{error}</p></div>;
+  }
+
+  const byProduct = new Map<string, { units: number; sales: number; brand: string | null; category: string | null; lastDay: string }>();
+  for (const row of (sales || [])) {
+    const existing = byProduct.get(row.productName);
+    if (existing) {
+      existing.units += row.totalUnits;
+      existing.sales += row.totalSales;
+      if (row.day > existing.lastDay) existing.lastDay = row.day;
+    } else {
+      byProduct.set(row.productName, {
+        units: row.totalUnits,
+        sales: row.totalSales,
+        brand: row.brand,
+        category: row.category,
+        lastDay: row.day
+      });
+    }
+  }
+  const productRows = [...byProduct.entries()]
+    .sort((a, b) => b[1].units - a[1].units)
+    .slice(0, 20);
+
+  return (
+    <div className="detail-stack">
+      <div className="metrics detail-metrics">
+        <DetailStat label="Last Sale" value={formatDate(store.headsetLastSale)} />
+        <DetailStat label="Units (30d)" value={(store.headsetUnits30d ?? 0).toLocaleString()} />
+        <DetailStat label="Revenue (30d)" value={formatUsd(store.headsetSales30d ?? 0)} />
+      </div>
+      {productRows.length > 0 ? (
+        <>
+          <div className="panel-header" style={{ marginTop: 8 }}>
+            <span className="table-meta">Top products (90d)</span>
+          </div>
+          <table className="mini-table">
+            <thead>
+              <tr>
+                <th>Product</th>
+                <th>Units</th>
+                <th>Revenue</th>
+                <th>Last Sale</th>
+              </tr>
+            </thead>
+            <tbody>
+              {productRows.map(([name, data]) => (
+                <tr key={name}>
+                  <td>{name}</td>
+                  <td>{data.units.toLocaleString()}</td>
+                  <td>{formatUsd(data.sales)}</td>
+                  <td>{formatShortDate(data.lastDay)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : (
+        <p className="detail-note">No sell-through data in the last 90 days.</p>
+      )}
+    </div>
+  );
+}
+
 function StoreDetailContent({
   activeTab,
   store,
@@ -5606,6 +5884,10 @@ function StoreDetailContent({
         </div>
       </div>
     );
+  }
+
+  if (activeTab === "retail") {
+    return <RetailTab store={store} />;
   }
 
   return (
@@ -6051,6 +6333,17 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
                   </select>
                 </div>
               ) : null}
+              <div className="field">
+                <FilterLabel active={appliedFilters.reorderGap}>Reorder Gap</FilterLabel>
+                <label className="check-option" style={{ paddingTop: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={draftFilters.reorderGap}
+                    onChange={(event) => updateDraftFilter("reorderGap", event.target.checked)}
+                  />
+                  <span className="check-option-label">Sell-through, no reorder</span>
+                </label>
+              </div>
               <button className="primary-button" type="submit">
                 <SlidersHorizontal size={16} /> Apply{draftActiveFilterCount ? ` (${draftActiveFilterCount})` : ""}
               </button>

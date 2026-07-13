@@ -74,6 +74,9 @@ export type StoreRollup = {
   hasContactThisWeek: boolean;
   groupName?: string | null;
   serviceNote?: string | null;
+  headsetLastSale?: string | null;
+  headsetUnits30d?: number;
+  headsetSales30d?: number;
 };
 
 export type ContactLog = {
