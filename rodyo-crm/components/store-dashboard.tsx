@@ -3676,9 +3676,15 @@ function HeadsetSyncPanel({ stores }: { stores: StoreRollup[] }) {
                   onChange={(e) => setMappings((prev) => ({ ...prev, [name]: e.target.value }))}
                 >
                   <option value="">— select store —</option>
-                  {storeOptions.map((s) => (
-                    <option key={s.storeId} value={s.storeId ?? ""}>{s.storeName}</option>
-                  ))}
+                  {storeOptions.map((s) => {
+                    const location = [s.city, s.state].filter(Boolean).join(", ");
+                    const detail = [location, s.license].filter(Boolean).join(" · ");
+                    return (
+                      <option key={s.storeId} value={s.storeId ?? ""}>
+                        {s.storeName}{detail ? ` — ${detail}` : ""}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             ))}
