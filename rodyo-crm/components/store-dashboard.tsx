@@ -5680,10 +5680,23 @@ type HeadsetSaleRow = {
   avgUnitCost: number | null;
 };
 
+type RetailSortKey = "product" | "units" | "revenue" | "lastSale";
+
 function RetailTab({ store }: { store: StoreRollup }) {
   const [sales, setSales] = useState<HeadsetSaleRow[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sortKey, setSortKey] = useState<RetailSortKey>("units");
+  const [sortDir, setSortDir] = useState<SortDirection>("desc");
+
+  function handleSort(key: RetailSortKey) {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "product" || key === "lastSale" ? "asc" : "desc");
+    }
+  }
 
   useEffect(() => {
     if (!store.storeId) return;
@@ -5734,9 +5747,24 @@ function RetailTab({ store }: { store: StoreRollup }) {
       });
     }
   }
-  const productRows = [...byProduct.entries()]
-    .sort((a, b) => b[1].units - a[1].units)
-    .slice(0, 20);
+
+  const productRows = [...byProduct.entries()].sort((a, b) => {
+    const [nameA, dataA] = a;
+    const [nameB, dataB] = b;
+    let cmp = 0;
+    if (sortKey === "product") cmp = nameA.localeCompare(nameB);
+    else if (sortKey === "units") cmp = dataA.units - dataB.units;
+    else if (sortKey === "revenue") cmp = dataA.sales - dataB.sales;
+    else if (sortKey === "lastSale") cmp = dataA.lastDay.localeCompare(dataB.lastDay);
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
+  const arrow = (key: RetailSortKey) => sortKey === key ? (sortDir === "asc" ? " ▴" : " ▾") : "";
+  const thProps = (key: RetailSortKey): React.ThHTMLAttributes<HTMLTableCellElement> => ({
+    onClick: () => handleSort(key),
+    style: { cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" },
+    "aria-sort": sortKey === key ? (sortDir === "asc" ? "ascending" : "descending") : undefined
+  });
 
   return (
     <div className="detail-stack">
@@ -5748,15 +5776,15 @@ function RetailTab({ store }: { store: StoreRollup }) {
       {productRows.length > 0 ? (
         <>
           <div className="panel-header" style={{ marginTop: 8 }}>
-            <span className="table-meta">Top products (90d)</span>
+            <span className="table-meta">Products (90d) · {productRows.length}</span>
           </div>
           <table className="mini-table">
             <thead>
               <tr>
-                <th>Product</th>
-                <th>Units</th>
-                <th>Revenue</th>
-                <th>Last Sale</th>
+                <th {...thProps("product")}>Product{arrow("product")}</th>
+                <th {...thProps("units")}>Units{arrow("units")}</th>
+                <th {...thProps("revenue")}>Revenue{arrow("revenue")}</th>
+                <th {...thProps("lastSale")}>Last Sale{arrow("lastSale")}</th>
               </tr>
             </thead>
             <tbody>
