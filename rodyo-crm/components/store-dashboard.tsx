@@ -2394,6 +2394,7 @@ function TripLogModal({
     setSaveError("");
     let savedCount = 0;
     setProgress({ done: 0, total: toSave.length });
+    const tripId = crypto.randomUUID();
 
     for (const store of toSave) {
       const perStop = stopNotes[storeKey(store)]?.trim();
@@ -2409,7 +2410,8 @@ function TripLogModal({
             dateContacted: date,
             contactMethod: method,
             initials: initials.trim() || null,
-            notes
+            notes,
+            tripId
           })
         });
         const result = await response.json();
@@ -4884,6 +4886,7 @@ function LogEntriesView({
   contactLogs: ContactLog[];
   stores: StoreRollup[];
 }) {
+  const [logMode, setLogMode] = useState<"all" | "trips">("all");
   const [logQuery, setLogQuery] = useState("");
   const [methodFilter, setMethodFilter] = useState("all");
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
@@ -4891,6 +4894,7 @@ function LogEntriesView({
   const [dateTo, setDateTo] = useState("");
   const [logSortKey, setLogSortKey] = useState<LogSortKey>("date");
   const [logSortDir, setLogSortDir] = useState<SortDirection>("desc");
+  const [expandedTrips, setExpandedTrips] = useState<Set<string>>(() => new Set());
 
   const storeById = useMemo(() => {
     const map = new Map<string, StoreRollup>();
@@ -4963,6 +4967,38 @@ function LogEntriesView({
     });
   }, [filteredLogs, logSortKey, logSortDir]);
 
+  const tripGroups = useMemo(() => {
+    const byTrip = new Map<string, (ContactLog & { store?: StoreRollup })[]>();
+    enrichedLogs.forEach((log) => {
+      if (!log.tripId) return;
+      const group = byTrip.get(log.tripId) ?? [];
+      group.push(log);
+      byTrip.set(log.tripId, group);
+    });
+    return [...byTrip.values()]
+      .map((stops) => {
+        const sorted = [...stops].sort((a, b) => (a.savedAt || "").localeCompare(b.savedAt || ""));
+        const date = sorted[0].dateContacted || (sorted[0].savedAt ? sorted[0].savedAt.slice(0, 10) : "");
+        // apply date/search filters
+        const normalized = logQuery.trim().toLowerCase();
+        if (dateFrom && date && date < dateFrom) return null;
+        if (dateTo && date && date > dateTo) return null;
+        if (normalized && !sorted.some((s) =>
+          [s.storeName, s.initials, s.notes, s.store?.storeName]
+            .some((v) => String(v ?? "").toLowerCase().includes(normalized))
+        )) return null;
+        return {
+          tripId: sorted[0].tripId!,
+          date,
+          initials: sorted[0].initials,
+          method: sorted[0].contactMethod,
+          stops: sorted
+        };
+      })
+      .filter((g): g is NonNullable<typeof g> => g !== null)
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [enrichedLogs, logQuery, dateFrom, dateTo]);
+
   function toggleLogSort(key: LogSortKey) {
     if (key === logSortKey) {
       setLogSortDir(logSortDir === "asc" ? "desc" : "asc");
@@ -4970,6 +5006,14 @@ function LogEntriesView({
       setLogSortKey(key);
       setLogSortDir(key === "date" ? "desc" : "asc");
     }
+  }
+
+  function toggleTrip(tripId: string) {
+    setExpandedTrips((prev) => {
+      const next = new Set(prev);
+      if (next.has(tripId)) next.delete(tripId); else next.add(tripId);
+      return next;
+    });
   }
 
   const logColumns: { key: LogSortKey; label: string }[] = [
@@ -5022,51 +5066,118 @@ function LogEntriesView({
       </div>
       <div className="panel">
         <div className="panel-header">
-          <h3>Log Entries</h3>
-          <span className="table-meta">
-            {filteredLogs.length.toLocaleString()} of {contactLogs.length.toLocaleString()}
-          </span>
+          <h3>{logMode === "trips" ? "Trip Logs" : "Log Entries"}</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span className="table-meta">
+              {logMode === "trips"
+                ? `${tripGroups.length.toLocaleString()} trip${tripGroups.length !== 1 ? "s" : ""}`
+                : `${filteredLogs.length.toLocaleString()} of ${contactLogs.length.toLocaleString()}`}
+            </span>
+            <div className="sku-group-tabs">
+              <button
+                className={`sku-group-tab${logMode === "all" ? " active-tab" : ""}`}
+                type="button"
+                onClick={() => setLogMode("all")}
+              >
+                All Logs
+              </button>
+              <button
+                className={`sku-group-tab${logMode === "trips" ? " active-tab" : ""}`}
+                type="button"
+                onClick={() => setLogMode("trips")}
+              >
+                Trips
+              </button>
+            </div>
+          </div>
         </div>
-        <table className="store-table">
-          <thead>
-            <tr>
-              {logColumns.map((col) => (
-                <th key={col.key}>
-                  <button className="sort-header" type="button" onClick={() => toggleLogSort(col.key)}>
-                    <span>{col.label}</span>
-                    <span aria-hidden="true" className="sort-indicator">
-                      {logSortKey === col.key ? (logSortDir === "asc" ? "↑" : "↓") : "↕"}
-                    </span>
-                  </button>
-                </th>
-              ))}
-              <th>Person</th>
-              <th>Notes</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortedLogs.map((log) => (
-              <tr key={log.id}>
-                <td style={{ whiteSpace: "nowrap" }}>{formatShortDate(log.dateContacted || log.savedAt)}</td>
-                <td>
-                  <div className="store-name">{log.store?.storeName || log.storeName || "-"}</div>
-                  <div className="store-subtext">{log.licenseKey}</div>
-                </td>
-                <td>{log.initials || "-"}</td>
-                <td>{log.contactMethod || "-"}</td>
-                <td>{log.personContacted || "-"}</td>
-                <td className="log-notes-cell">{log.notes || "-"}</td>
-              </tr>
-            ))}
-            {!sortedLogs.length ? (
+        {logMode === "all" ? (
+          <table className="store-table">
+            <thead>
               <tr>
-                <td colSpan={6} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
-                  No log entries match that search.
-                </td>
+                {logColumns.map((col) => (
+                  <th key={col.key}>
+                    <button className="sort-header" type="button" onClick={() => toggleLogSort(col.key)}>
+                      <span>{col.label}</span>
+                      <span aria-hidden="true" className="sort-indicator">
+                        {logSortKey === col.key ? (logSortDir === "asc" ? "↑" : "↓") : "↕"}
+                      </span>
+                    </button>
+                  </th>
+                ))}
+                <th>Person</th>
+                <th>Notes</th>
               </tr>
+            </thead>
+            <tbody>
+              {sortedLogs.map((log) => (
+                <tr key={log.id}>
+                  <td style={{ whiteSpace: "nowrap" }}>{formatShortDate(log.dateContacted || log.savedAt)}</td>
+                  <td>
+                    <div className="store-name">{log.store?.storeName || log.storeName || "-"}</div>
+                    <div className="store-subtext">{log.licenseKey}</div>
+                  </td>
+                  <td>{log.initials || "-"}</td>
+                  <td>{log.contactMethod || "-"}</td>
+                  <td>{log.personContacted || "-"}</td>
+                  <td className="log-notes-cell">{log.notes || "-"}</td>
+                </tr>
+              ))}
+              {!sortedLogs.length ? (
+                <tr>
+                  <td colSpan={6} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
+                    No log entries match that search.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        ) : (
+          <div className="trip-log-groups">
+            {tripGroups.map((group) => {
+              const isExpanded = expandedTrips.has(group.tripId);
+              return (
+                <div key={group.tripId} className="trip-log-group">
+                  <button
+                    className="trip-log-group-header"
+                    type="button"
+                    onClick={() => toggleTrip(group.tripId)}
+                  >
+                    <span className="trip-log-group-date">{formatShortDate(group.date)}</span>
+                    <span className="trip-log-group-meta">
+                      {group.initials ? <strong>{group.initials}</strong> : null}
+                      {group.method ? <span>{group.method}</span> : null}
+                      <span>{group.stops.length} stop{group.stops.length !== 1 ? "s" : ""}</span>
+                    </span>
+                    <span className="trip-log-group-caret">{isExpanded ? "↑" : "↓"}</span>
+                  </button>
+                  {isExpanded ? (
+                    <ol className="trip-log-group-stops">
+                      {group.stops.map((stop, i) => (
+                        <li key={stop.id} className="trip-log-group-stop">
+                          <span className="trip-stop-index">{i + 1}</span>
+                          <div className="trip-log-stop-detail">
+                            <span className="trip-log-stop-name">
+                              {stop.store?.storeName || stop.storeName || "-"}
+                            </span>
+                            {stop.notes ? (
+                              <span className="trip-log-stop-note-text">{stop.notes}</span>
+                            ) : null}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : null}
+                </div>
+              );
+            })}
+            {!tripGroups.length ? (
+              <div style={{ color: "var(--muted)", textAlign: "center", padding: "32px" }}>
+                No trip logs yet. Plan a route in Map view and use Log Trip.
+              </div>
             ) : null}
-          </tbody>
-        </table>
+          </div>
+        )}
       </div>
     </div>
   );

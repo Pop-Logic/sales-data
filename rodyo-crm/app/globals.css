@@ -1991,6 +1991,90 @@ textarea {
   font-size: 1rem;
 }
 
+/* Trip log groups in Logs view */
+.trip-log-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.trip-log-group {
+  border-bottom: 1px solid var(--line);
+}
+
+.trip-log-group:last-child {
+  border-bottom: none;
+}
+
+.trip-log-group-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 16px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+}
+
+.trip-log-group-header:hover {
+  background: var(--panel-2);
+}
+
+.trip-log-group-date {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 72px;
+}
+
+.trip-log-group-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.trip-log-group-meta strong {
+  color: var(--text);
+}
+
+.trip-log-group-caret {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.trip-log-group-stops {
+  list-style: none;
+  margin: 0;
+  padding: 0 16px 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.trip-log-group-stop {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.trip-log-stop-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.trip-log-stop-note-text {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
 /* SKU category detail mode toggle */
 .sku-detail-toggle {
   display: flex;

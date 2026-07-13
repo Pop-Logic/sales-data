@@ -460,7 +460,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
 
   const { data: logData } = await supabase
     .from("contact_logs")
-    .select("id, store_id, license_key, store_name, date_contacted, saved_at, contact_method, initials, person_contacted, notes")
+    .select("id, store_id, license_key, store_name, date_contacted, saved_at, contact_method, initials, person_contacted, notes, trip_id")
     .order("saved_at", { ascending: false });
 
   (logData || []).forEach((row) => {
@@ -489,7 +489,8 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     contactMethod: row.contact_method ? String(row.contact_method) : null,
     initials: row.initials ? String(row.initials) : null,
     personContacted: row.person_contacted ? String(row.person_contacted) : null,
-    notes: row.notes ? String(row.notes) : null
+    notes: row.notes ? String(row.notes) : null,
+    tripId: row.trip_id ? String(row.trip_id) : null
   }));
 
   const { data: sampleData } = await supabase

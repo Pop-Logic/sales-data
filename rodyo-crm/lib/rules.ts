@@ -87,6 +87,7 @@ export type ContactLog = {
   initials: string | null;
   personContacted: string | null;
   notes: string | null;
+  tripId: string | null;
 };
 
 export type OrderLine = {

@@ -13,6 +13,7 @@ type ContactLogPayload = {
   initials?: string | null;
   personContacted?: string | null;
   notes?: string | null;
+  tripId?: string | null;
 };
 
 function cleanOptionalText(value: unknown) {
@@ -137,6 +138,7 @@ export async function POST(request: Request) {
         initials: cleanOptionalText(payload.initials),
         person_contacted: cleanOptionalText(payload.personContacted),
         notes: cleanOptionalText(payload.notes),
+        trip_id: cleanOptionalText(payload.tripId) || null,
         saved_at: new Date().toISOString()
       })
       .select("id, store_id, date_contacted, contact_method, initials, person_contacted, notes, saved_at")
