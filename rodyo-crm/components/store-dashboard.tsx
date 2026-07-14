@@ -887,16 +887,33 @@ function extractUnitSize(productName?: string | null): string {
 function extractStrain(productName?: string | null): string {
   if (!productName) return "";
   let name = productName.trim();
+
+  // Strip "KS | ", "MF | ", "LL | " style brand-code prefix
+  name = name.replace(/^[A-Z]{2,3}\s*\|\s*/i, "");
+
+  // Strip territory brand name prefix (K. Savage, Mayfield, Leisure Land)
   for (const brand of [...TERRITORY_BRANDS].sort((a, b) => b.length - a.length)) {
     if (name.toLowerCase().startsWith(brand.toLowerCase())) {
-      name = name.slice(brand.length).trim();
+      name = name.slice(brand.length).replace(/^\s*[-|]\s*/, "").trim();
       break;
     }
   }
+
+  // Cultivera format: "[Product Type] - [Strain] - [Size] -"
+  // Take the last non-empty, non-size segment.
+  const parts = name.split(" - ").map((s) => s.trim()).filter((s) => s.length > 0);
+  if (parts.length >= 2) {
+    while (parts.length > 1 && /^\d+(?:\.\d+)?\s*(?:g|mg|oz|ml|pk|pack)(?:\s*\([^)]*\))?$/i.test(parts[parts.length - 1])) {
+      parts.pop();
+    }
+    return parts[parts.length - 1];
+  }
+
+  // Fallback: strip product-type words
   name = name.replace(/\b\d+(?:\.\d+)?\s*(?:g|mg|oz|ml)\b/gi, "").trim();
   name = name.replace(/\b\d+\s*[-]?\s*(?:pk|pack)\b/gi, "").trim();
   name = name.replace(
-    /\b(?:flower|pre[-\s]?roll|preroll|cartridge|cart|concentrate|extract|live\s+resin|live\s+rosin|rosin|resin|wax|shatter|crumble|vape|pod|disposable|tincture|topical|capsule|gummy|gummies|infused|edible|hash|kief|distillate|oil|sugar|badder|batter|diamonds|sauce)\b/gi,
+    /\b(?:flower|pre[-\s]?rolls?|prerolls?|cartridge|cart|concentrate|extract|live\s+resin|live\s+rosin|rosin|resin|wax|shatter|crumble|vape|pod|disposable|tincture|topical|capsule|gummy|gummies|infused|edible|hash|kief|distillate|oil|sugar|badder|batter|diamonds|sauce)\b/gi,
     ""
   ).replace(/\s+/g, " ").trim();
   return name;
@@ -3701,8 +3718,8 @@ function HeadsetSyncPanel({ stores }: { stores: StoreRollup[] }) {
   );
 }
 
-type InvSortKey = "product" | "subLine" | "forSale" | "allocated" | "inStock" | "batches" | "batchDate" | "daysOfStock" | "thc";
-type InvGroupFilter = "all" | "finished" | "bulk";
+type InvSortKey = "product" | "subLine" | "strain" | "forSale" | "allocated" | "inStock" | "batches" | "batchDate" | "daysOfStock" | "thc" | "status";
+type InvGroupFilter = "all" | "finished" | "3p" | "bulk";
 type InvMode = "stock" | "processing";
 
 type ProcessingRun = {
@@ -3751,6 +3768,14 @@ function isBulk(item: InventoryItem) {
     (item.subProductLine ?? "") === "" && (item.category ?? "") === "";
 }
 
+// Prerolls, Diamond Doobies, and Skyboxes — the only SKUs Agro Couture processes
+function is3pSku(subProductLine: string | null | undefined): boolean {
+  if (!subProductLine) return false;
+  const s = subProductLine.toLowerCase();
+  return s.includes("preroll") || s.includes("pre-roll") || s.includes("pre roll") ||
+    s.includes("diamond doobie") || s.includes("skybox");
+}
+
 function InventoryView({
   inventoryItems,
   orderLines
@@ -3763,9 +3788,41 @@ function InventoryView({
   const [sortDir, setSortDir] = useState<SortDirection>("desc");
   const [groupFilter, setGroupFilter] = useState<InvGroupFilter>("all");
   const [search, setSearch] = useState("");
+  const [brandFilter, setBrandFilter] = useState("all");
+  const [strainFilter, setStrainFilter] = useState("all");
+  const [subLineFilter, setSubLineFilter] = useState("all");
   const [leadTimeDays, setLeadTimeDays] = useState(21);
 
   const processingRuns = useProcessingRuns(orderLines);
+
+  // For each strain: sum input units + earliest projected return across unconfirmed runs
+  const inProcessByStrain = useMemo(() => {
+    const map = new Map<string, { units: number; projectedDate: string | null }>();
+    for (const run of processingRuns) {
+      // Confirmed if any 3P inventory item for a matching strain has batch date > sentAt
+      const confirmed = inventoryItems.some(
+        (inv) =>
+          is3pSku(inv.subProductLine) &&
+          inv.latestBatchDate != null &&
+          inv.latestBatchDate > run.sentAt &&
+          run.items.some((item) => extractStrain(inv.product).toLowerCase() === item.strain.toLowerCase())
+      );
+      if (confirmed) continue;
+      const projected = new Date(new Date(run.sentAt).getTime() + leadTimeDays * 86_400_000).toISOString();
+      for (const item of run.items) {
+        if (!item.strain) continue;
+        const key = item.strain.toLowerCase();
+        const existing = map.get(key);
+        if (existing) {
+          existing.units += item.units;
+          if (!existing.projectedDate || projected < existing.projectedDate) existing.projectedDate = projected;
+        } else {
+          map.set(key, { units: item.units, projectedDate: projected });
+        }
+      }
+    }
+    return map;
+  }, [processingRuns, inventoryItems, leadTimeDays]);
 
   // Velocity: paid order lines in last 90 days, units per sub_product_line per day
   const velocityMap = useMemo(() => {
@@ -3790,6 +3847,24 @@ function InventoryView({
     return latest;
   }, [inventoryItems]);
 
+  const allBrands = useMemo(() => {
+    const set = new Set<string>();
+    for (const i of inventoryItems) { const b = parseProductBrand(i.subProductLine); if (b) set.add(b); }
+    return [...set].sort();
+  }, [inventoryItems]);
+
+  const allStrains = useMemo(() => {
+    const set = new Set<string>();
+    for (const i of inventoryItems) { const s = extractStrain(i.product); if (s) set.add(s); }
+    return [...set].sort();
+  }, [inventoryItems]);
+
+  const allSubLines = useMemo(() => {
+    const set = new Set<string>();
+    for (const i of inventoryItems) { if (i.subProductLine) set.add(i.subProductLine); }
+    return [...set].sort();
+  }, [inventoryItems]);
+
   function daysOfStock(item: InventoryItem): number | null {
     const vel = velocityMap.get(item.subProductLine ?? "");
     if (!vel || vel <= 0) return null;
@@ -3808,14 +3883,18 @@ function InventoryView({
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      setSortDir(key === "product" || key === "subLine" || key === "batchDate" ? "asc" : "desc");
+      setSortDir(key === "product" || key === "subLine" || key === "strain" || key === "batchDate" ? "asc" : "desc");
     }
   }
 
   const filtered = useMemo(() => {
     let items = inventoryItems;
     if (groupFilter === "finished") items = items.filter((i) => !isBulk(i));
+    if (groupFilter === "3p") items = items.filter((i) => !isBulk(i) && is3pSku(i.subProductLine));
     if (groupFilter === "bulk") items = items.filter(isBulk);
+    if (brandFilter !== "all") items = items.filter((i) => parseProductBrand(i.subProductLine) === brandFilter);
+    if (strainFilter !== "all") items = items.filter((i) => extractStrain(i.product) === strainFilter);
+    if (subLineFilter !== "all") items = items.filter((i) => (i.subProductLine ?? "") === subLineFilter);
     if (search.trim()) {
       const q = search.toLowerCase();
       items = items.filter((i) =>
@@ -3830,6 +3909,7 @@ function InventoryView({
       switch (sortKey) {
         case "product": diff = a.product.localeCompare(b.product); break;
         case "subLine": diff = (a.subProductLine ?? "").localeCompare(b.subProductLine ?? ""); break;
+        case "strain": diff = extractStrain(a.product).localeCompare(extractStrain(b.product)); break;
         case "forSale": diff = a.totalForSale - b.totalForSale; break;
         case "allocated": diff = a.totalAllocated - b.totalAllocated; break;
         case "inStock": diff = a.totalInStock - b.totalInStock; break;
@@ -3837,11 +3917,12 @@ function InventoryView({
         case "batchDate": diff = (a.latestBatchDate ?? "").localeCompare(b.latestBatchDate ?? ""); break;
         case "daysOfStock": diff = (dA ?? -1) - (dB ?? -1); break;
         case "thc": diff = (a.avgTotalThc ?? 0) - (b.avgTotalThc ?? 0); break;
+        case "status": { const order = { out: 0, low: 1, ok: 2 }; diff = order[stockStatus(a)] - order[stockStatus(b)]; break; }
       }
       return sortDir === "asc" ? diff : -diff;
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inventoryItems, groupFilter, search, sortKey, sortDir, velocityMap]);
+  }, [inventoryItems, groupFilter, brandFilter, strainFilter, subLineFilter, search, sortKey, sortDir, velocityMap]);
 
   const metrics = useMemo(() => ({
     total: filtered.length,
@@ -3896,14 +3977,14 @@ function InventoryView({
           {mode === "stock" ? (
             <>
               <div className="sku-group-tabs">
-                {(["all", "finished", "bulk"] as InvGroupFilter[]).map((g) => (
+                {(["all", "finished", "3p", "bulk"] as InvGroupFilter[]).map((g) => (
                   <button
                     key={g}
                     className={`secondary-button${groupFilter === g ? " active-tab" : ""}`}
                     type="button"
                     onClick={() => setGroupFilter(g)}
                   >
-                    {g === "all" ? "All" : g === "finished" ? "Finished" : "Bulk"}
+                    {g === "all" ? "All" : g === "finished" ? "Finished" : g === "3p" ? "3P" : "Bulk"}
                   </button>
                 ))}
               </div>
@@ -3914,6 +3995,24 @@ function InventoryView({
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Search product or sub-line…"
                 />
+              </div>
+              <div className="field" style={{ minWidth: 0 }}>
+                <select value={brandFilter} onChange={(e) => setBrandFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
+                  <option value="all">All Brands</option>
+                  {allBrands.map((b) => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
+              <div className="field" style={{ minWidth: 0 }}>
+                <select value={strainFilter} onChange={(e) => setStrainFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
+                  <option value="all">All Strains</option>
+                  {allStrains.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+              <div className="field" style={{ minWidth: 0 }}>
+                <select value={subLineFilter} onChange={(e) => setSubLineFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
+                  <option value="all">All Sub-Lines</option>
+                  {allSubLines.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
               </div>
             </>
           ) : (
@@ -3968,6 +4067,7 @@ function InventoryView({
                   <tr>
                     <th>{thBtn("product", "Product")}</th>
                     <th>{thBtn("subLine", "Sub-Line")}</th>
+                    <th>{thBtn("strain", "Strain")}</th>
                     <th style={{ textAlign: "right" }}>{thBtn("forSale", "For Sale")}</th>
                     <th style={{ textAlign: "right" }}>{thBtn("allocated", "Allocated")}</th>
                     <th style={{ textAlign: "right" }}>{thBtn("inStock", "In Stock")}</th>
@@ -3975,7 +4075,8 @@ function InventoryView({
                     <th style={{ textAlign: "right" }}>{thBtn("thc", "Total THC%")}</th>
                     <th>{thBtn("batchDate", "Latest Batch")}</th>
                     <th style={{ textAlign: "right" }}>{thBtn("batches", "Batches")}</th>
-                    <th>Status</th>
+                    {groupFilter === "3p" ? <th>In Process</th> : null}
+                    <th>{thBtn("status", "Status")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3997,6 +4098,7 @@ function InventoryView({
                           ) : null}
                         </td>
                         <td style={{ color: "var(--muted)", fontSize: "0.82rem" }}>{item.subProductLine ?? "—"}</td>
+                        <td style={{ fontSize: "0.82rem" }}>{extractStrain(item.product) || <span style={{ color: "var(--muted)" }}>—</span>}</td>
                         <td style={{ textAlign: "right", fontWeight: item.totalForSale > 0 ? 600 : undefined }}>
                           {item.totalForSale.toLocaleString()}
                         </td>
@@ -4018,6 +4120,21 @@ function InventoryView({
                         </td>
                         <td style={{ fontSize: "0.82rem" }}>{formatShortDate(item.latestBatchDate)}</td>
                         <td style={{ textAlign: "right", color: "var(--muted)", fontSize: "0.82rem" }}>{item.batchCount}</td>
+                        {groupFilter === "3p" ? (() => {
+                          const ip = inProcessByStrain.get(extractStrain(item.product).toLowerCase());
+                          return ip ? (
+                            <td style={{ fontSize: "0.82rem" }}>
+                              <div style={{ fontWeight: 600 }}>{ip.units.toLocaleString()} units</div>
+                              {ip.projectedDate ? (
+                                <div style={{ color: "var(--muted)", fontSize: "0.78rem" }}>
+                                  back ~{formatShortDate(ip.projectedDate)}
+                                </div>
+                              ) : null}
+                            </td>
+                          ) : (
+                            <td style={{ color: "var(--muted)" }}>—</td>
+                          );
+                        })() : null}
                         <td>
                           {status === "out" ? (
                             <span className="inv-badge inv-badge-out">Out</span>
@@ -4032,7 +4149,7 @@ function InventoryView({
                   })}
                   {!filtered.length ? (
                     <tr>
-                      <td colSpan={10} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
+                      <td colSpan={groupFilter === "3p" ? 12 : 11} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
                         No products match current filters.
                       </td>
                     </tr>
@@ -4053,18 +4170,70 @@ function InventoryView({
             <div className="proc-runs">
               {processingRuns.map((run) => {
                 const sentDate = new Date(run.sentAt);
-                const expectedReturn = new Date(sentDate.getTime() + leadTimeDays * 86_400_000);
                 const now = Date.now();
                 const daysAgo = Math.round((now - sentDate.getTime()) / 86_400_000);
+                const totalUnits = run.items.reduce((s, i) => s + i.units, 0);
+                const strains = [...new Set(run.items.map((i) => i.strain).filter((s) => s.length > 0))];
+                const strainsLower = strains.map((s) => s.toLowerCase());
+
+                // 1. Inventory: 3P SKU with batch date after sentAt, strain match
+                const invMatches = inventoryItems.filter(
+                  (inv) =>
+                    is3pSku(inv.subProductLine) &&
+                    inv.latestBatchDate != null &&
+                    inv.latestBatchDate > run.sentAt &&
+                    strainsLower.some((s) => extractStrain(inv.product).toLowerCase() === s)
+                );
+                const invReturnDate = invMatches.length
+                  ? invMatches.map((inv) => inv.latestBatchDate!).sort()[0]
+                  : null;
+
+                // 2. Orders: first paid non-Agro-Couture order for matching 3P SKU + strain after sentAt
+                let orderReturnDate: string | null = null;
+                if (!invReturnDate) {
+                  const orderMatches = orderLines
+                    .filter(
+                      (line) =>
+                        isPaidOrderLine(line) &&
+                        !line.storeName.toLowerCase().includes("agro couture") &&
+                        is3pSku(line.subProductLine) &&
+                        (line.submittedAt ?? "") > run.sentAt &&
+                        strainsLower.some((s) => extractStrain(line.productName ?? "").toLowerCase() === s)
+                    )
+                    .sort((a, b) => (a.submittedAt ?? "").localeCompare(b.submittedAt ?? ""));
+                  if (orderMatches.length) orderReturnDate = orderMatches[0].submittedAt ?? null;
+                }
+
+                const actualReturnDate = invReturnDate ?? orderReturnDate;
+                const returnSource = invReturnDate ? "inventory" : orderReturnDate ? "orders" : null;
+
+                // 3. Fallback: estimated from lead time
+                const expectedReturn = new Date(sentDate.getTime() + leadTimeDays * 86_400_000);
                 const daysUntilReturn = Math.round((expectedReturn.getTime() - now) / 86_400_000);
                 const isExpected = daysUntilReturn > 0;
-                const strains = [...new Set(run.items.map((i) => i.strain).filter((s) => s.length > 0))];
-                const totalUnits = run.items.reduce((s, i) => s + i.units, 0);
 
-                // Find related finished-goods inventory by matching strain names
+                let badgeClass: string;
+                let badgeText: string;
+                if (actualReturnDate) {
+                  const leadActual = Math.round((new Date(actualReturnDate).getTime() - sentDate.getTime()) / 86_400_000);
+                  badgeClass = "inv-badge inv-badge-ok";
+                  badgeText = returnSource === "inventory"
+                    ? `Returned ${formatShortDate(actualReturnDate)} · ${leadActual}d lead (actual)`
+                    : `Back by ${formatShortDate(actualReturnDate)} · ${leadActual}d lead (est.)`;
+                } else if (isExpected) {
+                  badgeClass = "inv-badge inv-badge-low";
+                  badgeText = `Expected back in ${daysUntilReturn}d`;
+                } else {
+                  badgeClass = "inv-badge inv-badge-ok";
+                  badgeText = `Est. returned ${Math.abs(daysUntilReturn)}d ago`;
+                }
+
+                // Related 3P finished-goods inventory for matching strains
                 const relatedStock = strains.flatMap((strain) =>
                   inventoryItems.filter(
-                    (inv) => !isBulk(inv) && inv.product.toLowerCase().includes((strain ?? "").toLowerCase())
+                    (inv) =>
+                      is3pSku(inv.subProductLine) &&
+                      extractStrain(inv.product).toLowerCase() === strain.toLowerCase()
                   )
                 );
 
@@ -4076,11 +4245,7 @@ function InventoryView({
                         <span className="table-meta">Order {run.orderNumber}</span>
                         <span className="table-meta">{daysAgo}d ago · {totalUnits.toLocaleString()} units</span>
                       </div>
-                      <div className={`inv-badge ${isExpected ? "inv-badge-low" : "inv-badge-ok"}`}>
-                        {isExpected
-                          ? `Expected back in ${daysUntilReturn}d`
-                          : `Est. returned ${Math.abs(daysUntilReturn)}d ago`}
-                      </div>
+                      <div className={badgeClass}>{badgeText}</div>
                     </div>
 
                     <div className="proc-run-body">
@@ -4250,6 +4415,25 @@ function InventorySyncPanel() {
   const [status, setStatus] = useState<"idle" | "parsing" | "uploading" | "done" | "error">("idle");
   const [result, setResult] = useState<{ imported: number; total: number; products: number } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "done" | "error">("idle");
+  const [syncResult, setSyncResult] = useState<{ imported: number; total: number; syncedAt: string } | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  async function handleAutoSync() {
+    setSyncStatus("syncing");
+    setSyncResult(null);
+    setSyncError(null);
+    try {
+      const res = await fetch("/api/inventory/sync", { method: "POST" });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setSyncResult(data);
+      setSyncStatus("done");
+    } catch (err) {
+      setSyncError(String((err as Error).message || err));
+      setSyncStatus("error");
+    }
+  }
 
   function parseCultiveraInventoryCsv(text: string) {
     // Auto-detect delimiter: tab if more tabs than commas on header line
@@ -4340,32 +4524,56 @@ function InventorySyncPanel() {
     <div className="panel headset-sync-panel">
       <div className="panel-header">
         <h3>Cultivera Inventory</h3>
-        <span className="table-meta">Upload "Export Batches Currently in Stock" CSV</span>
+        <span className="table-meta">Syncs every 4 hours · also runs on-demand</span>
       </div>
       <div className="headset-sync-body">
+        {/* Auto sync */}
         <div className="headset-upload-row">
-          <input
-            type="file"
-            accept=".csv,.tsv,.txt"
-            onChange={(e) => { setFile(e.target.files?.[0] ?? null); setStatus("idle"); setResult(null); }}
-          />
           <button
             className="primary-button"
             type="button"
-            disabled={!file || status === "parsing" || status === "uploading"}
-            onClick={handleUpload}
+            disabled={syncStatus === "syncing"}
+            onClick={handleAutoSync}
           >
-            {status === "parsing" ? "Parsing…" : status === "uploading" ? "Uploading…" : "Import CSV"}
+            {syncStatus === "syncing" ? "Syncing…" : "Sync Now"}
           </button>
+          {syncStatus === "done" && syncResult ? (
+            <span className="headset-result">
+              {syncResult.total.toLocaleString()} batches synced · {formatDate(syncResult.syncedAt)}
+            </span>
+          ) : null}
+          {syncStatus === "error" && syncError ? (
+            <span className="headset-result headset-result-error">{syncError}</span>
+          ) : null}
         </div>
-        {status === "done" && result ? (
-          <div className="headset-result">
-            {result.products} products · {result.imported.toLocaleString()} batch rows imported
+
+        {/* CSV fallback */}
+        <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border, #e5e7eb)" }}>
+          <div className="table-meta" style={{ marginBottom: 8 }}>Manual CSV fallback — use if auto-sync isn&apos;t configured</div>
+          <div className="headset-upload-row">
+            <input
+              type="file"
+              accept=".csv,.tsv,.txt"
+              onChange={(e) => { setFile(e.target.files?.[0] ?? null); setStatus("idle"); setResult(null); }}
+            />
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!file || status === "parsing" || status === "uploading"}
+              onClick={handleUpload}
+            >
+              {status === "parsing" ? "Parsing…" : status === "uploading" ? "Uploading…" : "Import CSV"}
+            </button>
           </div>
-        ) : null}
-        {status === "error" && errorMsg ? (
-          <div className="headset-result headset-result-error">{errorMsg}</div>
-        ) : null}
+          {status === "done" && result ? (
+            <div className="headset-result">
+              {result.products} products · {result.imported.toLocaleString()} batch rows imported
+            </div>
+          ) : null}
+          {status === "error" && errorMsg ? (
+            <div className="headset-result headset-result-error">{errorMsg}</div>
+          ) : null}
+        </div>
       </div>
     </div>
   );
