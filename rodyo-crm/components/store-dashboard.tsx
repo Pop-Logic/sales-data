@@ -3720,7 +3720,7 @@ function useProcessingRuns(orderLines: OrderLine[]): ProcessingRun[] {
       const existing = byOrder.get(line.orderNumber);
       const item = {
         productName: line.productName ?? "",
-        subProductLine: line.subProductLine,
+        subProductLine: line.subProductLine ?? null,
         units: line.units,
         strain: extractStrain(line.productName ?? "")
       };
