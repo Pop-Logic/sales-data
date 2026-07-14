@@ -1,7 +1,7 @@
 import { unstable_cache } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
-import { TERRITORY_BRANDS, priorityFromScore, type ContactLog, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
+import { TERRITORY_BRANDS, priorityFromScore, type ContactLog, type InventoryItem, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
 
 // Cache tag for the dashboard snapshot. Write routes (order sync, contact logs,
 // buyer contacts, sales goals) call revalidateTag with this so a successful
@@ -24,6 +24,7 @@ export type DashboardSnapshot = {
   orderLines: OrderLine[];
   salesGoals: SalesGoal[];
   contactLogs: ContactLog[];
+  inventoryItems: InventoryItem[];
   cultiveraLastSyncedAt?: string | null;
   metrics: {
     totalRetailers: number;
@@ -316,6 +317,7 @@ function demoSnapshot(): DashboardSnapshot {
     orderLines: demoOrderLines,
     salesGoals: [],
     contactLogs: [],
+    inventoryItems: [],
     cultiveraLastSyncedAt: demoOrderLines[0]?.importedAt ?? null,
     metrics: summarize(stores)
   };
@@ -608,6 +610,28 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     });
   });
 
+  const { data: inventorySummaryData } = await supabase
+    .from("cultivera_inventory_summary")
+    .select("product, sub_product_line, category, sub_category, latest_batch_date, batch_count, total_for_sale, total_on_hold, total_allocated, total_in_stock, avg_thca, avg_total_thc, synced_at")
+    .order("sub_product_line", { ascending: true })
+    .order("product", { ascending: true });
+
+  const inventoryItems: InventoryItem[] = (inventorySummaryData || []).map((r) => ({
+    product: String(r.product ?? ""),
+    subProductLine: r.sub_product_line ?? null,
+    category: r.category ?? null,
+    subCategory: r.sub_category ?? null,
+    latestBatchDate: r.latest_batch_date ?? null,
+    batchCount: Number(r.batch_count ?? 0),
+    totalForSale: Number(r.total_for_sale ?? 0),
+    totalOnHold: Number(r.total_on_hold ?? 0),
+    totalAllocated: Number(r.total_allocated ?? 0),
+    totalInStock: Number(r.total_in_stock ?? 0),
+    avgThca: r.avg_thca != null ? Number(r.avg_thca) : null,
+    avgTotalThc: r.avg_total_thc != null ? Number(r.avg_total_thc) : null,
+    syncedAt: r.synced_at ?? null
+  }));
+
   const { data: headsetSummaryData } = await supabase
     .from("headset_store_summary")
     .select("store_id, last_sale, units_30d, sales_30d");
@@ -709,6 +733,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     orderLines,
     salesGoals,
     contactLogs,
+    inventoryItems,
     cultiveraLastSyncedAt,
     metrics: summarize(normalizedStores)
   };

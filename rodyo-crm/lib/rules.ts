@@ -111,6 +111,22 @@ export type OrderLine = {
   importedAt?: string | null;
 };
 
+export type InventoryItem = {
+  product: string;
+  subProductLine: string | null;
+  category: string | null;
+  subCategory: string | null;
+  latestBatchDate: string | null;
+  batchCount: number;
+  totalForSale: number;
+  totalOnHold: number;
+  totalAllocated: number;
+  totalInStock: number;
+  avgThca: number | null;
+  avgTotalThc: number | null;
+  syncedAt: string | null;
+};
+
 export type SalesGoal = {
   id?: string;
   goalMonth: string;

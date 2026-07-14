@@ -2160,3 +2160,62 @@ textarea {
   min-width: 140px;
   max-width: 260px;
 }
+
+/* Inventory view */
+.inv-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.inv-filter-panel {
+  padding: 12px 16px;
+}
+
+.inv-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.inv-sync-date {
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+.inv-table .inv-product-name {
+  font-weight: 500;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inv-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.inv-badge-ok {
+  background: color-mix(in srgb, #22c55e 15%, transparent);
+  color: #22c55e;
+}
+
+.inv-badge-low {
+  background: color-mix(in srgb, #f59e0b 15%, transparent);
+  color: #f59e0b;
+}
+
+.inv-badge-out {
+  background: color-mix(in srgb, #ef4444 15%, transparent);
+  color: #ef4444;
+}
+
+.inv-row-out td {
+  opacity: 0.7;
+}

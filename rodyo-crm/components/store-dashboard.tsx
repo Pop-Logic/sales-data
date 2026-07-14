@@ -22,6 +22,7 @@ import {
   isStoreOverdue,
   overdueColor,
   type ContactLog,
+  type InventoryItem,
   type OrderLine,
   type SalesGoal,
   type StoreRollup
@@ -32,7 +33,7 @@ type StoreDashboardProps = {
   initialView?: string | null;
 };
 
-type ViewMode = "stores" | "map" | "orders" | "skus" | "goals" | "logs" | "sync";
+type ViewMode = "stores" | "map" | "orders" | "skus" | "goals" | "logs" | "sync" | "inventory";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples" | "retail";
 type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "lastLog" | "group" | "rep" | "log";
 type LogSortKey = "date" | "store" | "rep" | "method";
@@ -79,7 +80,7 @@ type ContactLogPatch = {
 type SyncState = "idle" | "syncing" | "success" | "error";
 
 function normalizeViewMode(value?: string | null): ViewMode {
-  return value === "map" || value === "orders" || value === "skus" || value === "goals" || value === "logs" || value === "sync" ? value : "stores";
+  return value === "map" || value === "orders" || value === "skus" || value === "goals" || value === "logs" || value === "sync" || value === "inventory" ? value : "stores";
 }
 
 const defaultStoreFilters: StoreFilters = {
@@ -3700,6 +3701,275 @@ function HeadsetSyncPanel({ stores }: { stores: StoreRollup[] }) {
   );
 }
 
+type InvSortKey = "product" | "subLine" | "forSale" | "allocated" | "inStock" | "batches" | "batchDate" | "daysOfStock" | "thc";
+type InvGroupFilter = "all" | "finished" | "bulk";
+
+function parseProductBrand(subProductLine: string | null): string {
+  if (!subProductLine) return "";
+  if (subProductLine.startsWith("KS")) return "K. Savage";
+  if (subProductLine.startsWith("MF")) return "Mayfield";
+  if (subProductLine.startsWith("LL")) return "Leisure Land";
+  return "";
+}
+
+function isBulk(item: InventoryItem) {
+  return (item.subProductLine ?? "").toLowerCase().startsWith("bulk") ||
+    (item.subProductLine ?? "") === "" && (item.category ?? "") === "";
+}
+
+function InventoryView({
+  inventoryItems,
+  orderLines
+}: {
+  inventoryItems: InventoryItem[];
+  orderLines: OrderLine[];
+}) {
+  const [sortKey, setSortKey] = useState<InvSortKey>("forSale");
+  const [sortDir, setSortDir] = useState<SortDirection>("desc");
+  const [groupFilter, setGroupFilter] = useState<InvGroupFilter>("all");
+  const [search, setSearch] = useState("");
+
+  // Velocity: paid order lines in last 90 days, units per sub_product_line per day
+  const velocityMap = useMemo(() => {
+    const cutoff = Date.now() - 90 * 86_400_000;
+    const totals = new Map<string, number>();
+    for (const line of orderLines) {
+      if (!isPaidOrderLine(line)) continue;
+      if (orderTimestamp(line.submittedAt) < cutoff) continue;
+      if (!line.subProductLine) continue;
+      totals.set(line.subProductLine, (totals.get(line.subProductLine) ?? 0) + line.units);
+    }
+    const result = new Map<string, number>();
+    totals.forEach((units, key) => result.set(key, units / 90));
+    return result;
+  }, [orderLines]);
+
+  const lastSynced = useMemo(() => {
+    let latest: string | null = null;
+    for (const item of inventoryItems) {
+      if (item.syncedAt && (!latest || item.syncedAt > latest)) latest = item.syncedAt;
+    }
+    return latest;
+  }, [inventoryItems]);
+
+  function daysOfStock(item: InventoryItem): number | null {
+    const vel = velocityMap.get(item.subProductLine ?? "");
+    if (!vel || vel <= 0) return null;
+    return Math.round(item.totalForSale / vel);
+  }
+
+  function stockStatus(item: InventoryItem): "out" | "low" | "ok" {
+    if (item.totalForSale <= 0) return "out";
+    const days = daysOfStock(item);
+    if (days !== null && days < 14) return "low";
+    return "ok";
+  }
+
+  function handleSort(key: InvSortKey) {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "product" || key === "subLine" || key === "batchDate" ? "asc" : "desc");
+    }
+  }
+
+  const filtered = useMemo(() => {
+    let items = inventoryItems;
+    if (groupFilter === "finished") items = items.filter((i) => !isBulk(i));
+    if (groupFilter === "bulk") items = items.filter(isBulk);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      items = items.filter((i) =>
+        i.product.toLowerCase().includes(q) ||
+        (i.subProductLine ?? "").toLowerCase().includes(q) ||
+        (i.subCategory ?? "").toLowerCase().includes(q)
+      );
+    }
+    return [...items].sort((a, b) => {
+      let diff = 0;
+      const dA = daysOfStock(a), dB = daysOfStock(b);
+      switch (sortKey) {
+        case "product": diff = a.product.localeCompare(b.product); break;
+        case "subLine": diff = (a.subProductLine ?? "").localeCompare(b.subProductLine ?? ""); break;
+        case "forSale": diff = a.totalForSale - b.totalForSale; break;
+        case "allocated": diff = a.totalAllocated - b.totalAllocated; break;
+        case "inStock": diff = a.totalInStock - b.totalInStock; break;
+        case "batches": diff = a.batchCount - b.batchCount; break;
+        case "batchDate": diff = (a.latestBatchDate ?? "").localeCompare(b.latestBatchDate ?? ""); break;
+        case "daysOfStock": diff = (dA ?? -1) - (dB ?? -1); break;
+        case "thc": diff = (a.avgTotalThc ?? 0) - (b.avgTotalThc ?? 0); break;
+      }
+      return sortDir === "asc" ? diff : -diff;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inventoryItems, groupFilter, search, sortKey, sortDir, velocityMap]);
+
+  const metrics = useMemo(() => ({
+    total: filtered.length,
+    totalForSale: filtered.reduce((s, i) => s + i.totalForSale, 0),
+    out: filtered.filter((i) => stockStatus(i) === "out").length,
+    low: filtered.filter((i) => stockStatus(i) === "low").length,
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [filtered]);
+
+  const arrow = (key: InvSortKey) => sortKey === key ? (sortDir === "asc" ? " ▴" : " ▾") : "";
+  const thBtn = (key: InvSortKey, label: string) => (
+    <button className="sort-header" type="button" onClick={() => handleSort(key)}>
+      <span>{label}{arrow(key)}</span>
+    </button>
+  );
+
+  if (!inventoryItems.length) {
+    return (
+      <section className="inv-view">
+        <div className="panel" style={{ padding: "32px 24px", textAlign: "center" }}>
+          <p style={{ color: "var(--muted)", marginBottom: 12 }}>No inventory data yet.</p>
+          <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
+            Go to Sync → Cultivera Inventory and upload the "Export Batches Currently in Stock" CSV.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="inv-view">
+      <div className="panel inv-filter-panel">
+        <div className="inv-filter-row">
+          <div className="sku-group-tabs">
+            {(["all", "finished", "bulk"] as InvGroupFilter[]).map((g) => (
+              <button
+                key={g}
+                className={`secondary-button${groupFilter === g ? " active-tab" : ""}`}
+                type="button"
+                onClick={() => setGroupFilter(g)}
+              >
+                {g === "all" ? "All" : g === "finished" ? "Finished Goods" : "Bulk / Parent"}
+              </button>
+            ))}
+          </div>
+          <div className="field" style={{ flex: 1, minWidth: 0 }}>
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search product or sub-line…"
+            />
+          </div>
+          {lastSynced ? (
+            <span className="table-meta inv-sync-date">Synced {formatDate(lastSynced)}</span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="metrics orders-metrics">
+        <div className="metric">
+          <div className="metric-label">SKUs</div>
+          <div className="metric-value">{metrics.total}</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Units For Sale</div>
+          <div className="metric-value">{metrics.totalForSale.toLocaleString()}</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Out of Stock</div>
+          <div className="metric-value" style={{ color: metrics.out ? "var(--danger, #ef4444)" : undefined }}>
+            {metrics.out}
+          </div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Low Stock (&lt;14d)</div>
+          <div className="metric-value" style={{ color: metrics.low ? "#f59e0b" : undefined }}>
+            {metrics.low}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="table-scroll">
+          <table className="data-table inv-table">
+            <thead>
+              <tr>
+                <th>{thBtn("product", "Product")}</th>
+                <th>{thBtn("subLine", "Sub-Line")}</th>
+                <th style={{ textAlign: "right" }}>{thBtn("forSale", "For Sale")}</th>
+                <th style={{ textAlign: "right" }}>{thBtn("allocated", "Allocated")}</th>
+                <th style={{ textAlign: "right" }}>{thBtn("inStock", "In Stock")}</th>
+                <th style={{ textAlign: "right" }}>{thBtn("daysOfStock", "Days of Stock")}</th>
+                <th style={{ textAlign: "right" }}>{thBtn("thc", "Total THC%")}</th>
+                <th>{thBtn("batchDate", "Latest Batch")}</th>
+                <th style={{ textAlign: "right" }}>{thBtn("batches", "Batches")}</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((item) => {
+                const status = stockStatus(item);
+                const days = daysOfStock(item);
+                const brand = parseProductBrand(item.subProductLine);
+                return (
+                  <tr key={`${item.product}-${item.subProductLine}`} className={`inv-row inv-row-${status}`}>
+                    <td>
+                      <div className="inv-product-name">{item.product}</div>
+                      {brand ? (
+                        <span
+                          className="sku-brand-badge"
+                          style={{ background: BRAND_DOT_COLORS[brand as BrandFilter] ?? "var(--muted)", marginTop: 2, display: "inline-block" }}
+                        >
+                          {brand}
+                        </span>
+                      ) : null}
+                    </td>
+                    <td style={{ color: "var(--muted)", fontSize: "0.82rem" }}>{item.subProductLine ?? "—"}</td>
+                    <td style={{ textAlign: "right", fontWeight: item.totalForSale > 0 ? 600 : undefined }}>
+                      {item.totalForSale.toLocaleString()}
+                    </td>
+                    <td style={{ textAlign: "right", color: item.totalAllocated > 0 ? "#f59e0b" : "var(--muted)" }}>
+                      {item.totalAllocated > 0 ? item.totalAllocated.toLocaleString() : "—"}
+                    </td>
+                    <td style={{ textAlign: "right" }}>{item.totalInStock.toLocaleString()}</td>
+                    <td style={{ textAlign: "right" }}>
+                      {days !== null ? (
+                        <span style={{ color: days < 7 ? "var(--danger, #ef4444)" : days < 14 ? "#f59e0b" : "inherit" }}>
+                          {days}d
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>no velocity</span>
+                      )}
+                    </td>
+                    <td style={{ textAlign: "right", color: "var(--muted)", fontSize: "0.82rem" }}>
+                      {item.avgTotalThc != null ? `${item.avgTotalThc}%` : "—"}
+                    </td>
+                    <td style={{ fontSize: "0.82rem" }}>{formatShortDate(item.latestBatchDate)}</td>
+                    <td style={{ textAlign: "right", color: "var(--muted)", fontSize: "0.82rem" }}>{item.batchCount}</td>
+                    <td>
+                      {status === "out" ? (
+                        <span className="inv-badge inv-badge-out">Out</span>
+                      ) : status === "low" ? (
+                        <span className="inv-badge inv-badge-low">Low</span>
+                      ) : (
+                        <span className="inv-badge inv-badge-ok">OK</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {!filtered.length ? (
+                <tr>
+                  <td colSpan={10} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
+                    No products match current filters.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function SyncView({
   orderLines,
   salesGoals,
@@ -3813,7 +4083,134 @@ function SyncView({
       </section>
 
       <HeadsetSyncPanel stores={stores} />
+      <InventorySyncPanel />
     </section>
+  );
+}
+
+function InventorySyncPanel() {
+  const [file, setFile] = useState<File | null>(null);
+  const [status, setStatus] = useState<"idle" | "parsing" | "uploading" | "done" | "error">("idle");
+  const [result, setResult] = useState<{ imported: number; total: number; products: number } | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  function parseCultiveraInventoryCsv(text: string) {
+    // Auto-detect delimiter: tab if more tabs than commas on header line
+    const firstLine = text.split(/\r?\n/)[0] ?? "";
+    const delim = (firstLine.match(/\t/g) ?? []).length > (firstLine.match(/,/g) ?? []).length ? "\t" : ",";
+
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 2) return [];
+
+    const rawHeaders = lines[0].split(delim).map((h) => h.trim().replace(/^"|"$/g, ""));
+    const col = (name: string) => rawHeaders.findIndex((h) => h.toLowerCase() === name.toLowerCase());
+
+    const barcodeIdx  = col("Barcode");
+    const productIdx  = col("Product");
+    const plIdx       = col("Product-Line");
+    const splIdx      = col("Sub-Product-Line");
+    const catIdx      = col("Category");
+    const subcatIdx   = col("Sub-Category");
+    const roomIdx     = col("Room");
+    const batchIdx    = col("Batch Date");
+    const thcaIdx     = col("QA THCA");
+    const thcIdx      = col("QA THC");
+    const cbdIdx      = col("QA CBD");
+    const totalIdx    = col("QA Total");
+    const availIdx    = col("Availability");
+    const forSaleIdx  = col("Units For Sale");
+    const onHoldIdx   = col("Units On Hold");
+    const allocIdx    = col("Units Allocated");
+    const inStockIdx  = col("Units in Stocks");
+
+    const parseNum = (v: string) => { const n = parseFloat(v.replace(/[^0-9.-]/g, "")); return isNaN(n) ? null : n; };
+    const get = (cols: string[], i: number) => (i >= 0 ? (cols[i] ?? "").trim().replace(/^"|"$/g, "") : "");
+
+    return lines.slice(1).map((line) => {
+      const cols = line.split(delim);
+      const barcode = get(cols, barcodeIdx);
+      const product = get(cols, productIdx);
+      if (!barcode || !product) return null;
+      const batchRaw = get(cols, batchIdx);
+      const batchDate = batchRaw ? new Date(batchRaw).toISOString() : null;
+      return {
+        barcode,
+        product,
+        productLine: get(cols, plIdx) || null,
+        subProductLine: get(cols, splIdx) || null,
+        category: get(cols, catIdx) || null,
+        subCategory: get(cols, subcatIdx) || null,
+        room: get(cols, roomIdx) || null,
+        batchDate: isNaN(Date.parse(batchRaw)) ? null : batchDate,
+        qaThca: parseNum(get(cols, thcaIdx)),
+        qaThc: parseNum(get(cols, thcIdx)),
+        qaCbd: parseNum(get(cols, cbdIdx)),
+        qaTotal: parseNum(get(cols, totalIdx)),
+        availability: get(cols, availIdx) || null,
+        unitsForSale: parseNum(get(cols, forSaleIdx)) ?? 0,
+        unitsOnHold: parseNum(get(cols, onHoldIdx)) ?? 0,
+        unitsAllocated: parseNum(get(cols, allocIdx)) ?? 0,
+        unitsInStock: parseNum(get(cols, inStockIdx)) ?? 0
+      };
+    }).filter((r): r is NonNullable<typeof r> => r !== null);
+  }
+
+  async function handleUpload() {
+    if (!file) return;
+    setStatus("parsing");
+    setErrorMsg(null);
+    try {
+      const text = await file.text();
+      const rows = parseCultiveraInventoryCsv(text);
+      if (!rows.length) throw new Error("No valid rows found. Make sure you exported from Cultivera batch products.");
+      setStatus("uploading");
+      const res = await fetch("/api/inventory/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setResult(data);
+      setStatus("done");
+    } catch (err) {
+      setErrorMsg(String((err as Error).message || err));
+      setStatus("error");
+    }
+  }
+
+  return (
+    <div className="panel headset-sync-panel">
+      <div className="panel-header">
+        <h3>Cultivera Inventory</h3>
+        <span className="table-meta">Upload "Export Batches Currently in Stock" CSV</span>
+      </div>
+      <div className="headset-sync-body">
+        <div className="headset-upload-row">
+          <input
+            type="file"
+            accept=".csv,.tsv,.txt"
+            onChange={(e) => { setFile(e.target.files?.[0] ?? null); setStatus("idle"); setResult(null); }}
+          />
+          <button
+            className="primary-button"
+            type="button"
+            disabled={!file || status === "parsing" || status === "uploading"}
+            onClick={handleUpload}
+          >
+            {status === "parsing" ? "Parsing…" : status === "uploading" ? "Uploading…" : "Import CSV"}
+          </button>
+        </div>
+        {status === "done" && result ? (
+          <div className="headset-result">
+            {result.products} products · {result.imported.toLocaleString()} batch rows imported
+          </div>
+        ) : null}
+        {status === "error" && errorMsg ? (
+          <div className="headset-result headset-result-error">{errorMsg}</div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -6003,6 +6400,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? "Log Entries"
     : activeView === "sync"
     ? "Sync"
+    : activeView === "inventory"
+    ? "Inventory"
     : "Stores";
   const viewCaption = activeView === "map"
     ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores · ${tripStoreKeys.length.toLocaleString()} stops planned`
@@ -6016,6 +6415,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? `${snapshot.contactLogs.length.toLocaleString()} total log entries`
     : activeView === "sync"
     ? `${uniqueOrderCount(orderLines).toLocaleString()} synced orders · ${orderLines.length.toLocaleString()} line items`
+    : activeView === "inventory"
+    ? `${snapshot.inventoryItems.length.toLocaleString()} SKUs in stock snapshot`
     : snapshot.source === "demo"
     ? "Demo shell. Connect Supabase to load live CRM data."
     : "Live Supabase data";
@@ -6045,7 +6446,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   }, []);
 
   useEffect(() => {
-    const selectionScope = activeView === "orders" || activeView === "skus" || activeView === "goals" || activeView === "logs" || activeView === "sync" ? stores : sortedStores;
+    const selectionScope = activeView === "orders" || activeView === "skus" || activeView === "goals" || activeView === "logs" || activeView === "sync" || activeView === "inventory" ? stores : sortedStores;
     if (!selectionScope.length) {
       setSelectedStoreKey("");
       return;
@@ -6219,6 +6620,9 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
           </a>
           <a className={activeView === "logs" ? "active" : ""} href="/?view=logs">
             Logs
+          </a>
+          <a className={activeView === "inventory" ? "active" : ""} href="/?view=inventory">
+            Inventory
           </a>
           <a className={activeView === "sync" ? "active" : ""} href="/?view=sync">
             Sync
@@ -6543,6 +6947,11 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
           <LogEntriesView
             contactLogs={snapshot.contactLogs}
             stores={stores}
+          />
+        ) : activeView === "inventory" ? (
+          <InventoryView
+            inventoryItems={snapshot.inventoryItems}
+            orderLines={orderLines}
           />
         ) : activeView === "sync" ? (
           <SyncView
