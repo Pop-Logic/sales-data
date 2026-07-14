@@ -3703,6 +3703,40 @@ function HeadsetSyncPanel({ stores }: { stores: StoreRollup[] }) {
 
 type InvSortKey = "product" | "subLine" | "forSale" | "allocated" | "inStock" | "batches" | "batchDate" | "daysOfStock" | "thc";
 type InvGroupFilter = "all" | "finished" | "bulk";
+type InvMode = "stock" | "processing";
+
+type ProcessingRun = {
+  orderNumber: string;
+  sentAt: string;
+  items: { productName: string; subProductLine: string | null; units: number; strain: string }[];
+};
+
+function useProcessingRuns(orderLines: OrderLine[]): ProcessingRun[] {
+  return useMemo(() => {
+    const byOrder = new Map<string, ProcessingRun>();
+    for (const line of orderLines) {
+      if (!line.storeName.toLowerCase().includes("agro couture")) continue;
+      if (line.lineTotal !== 0) continue;
+      const existing = byOrder.get(line.orderNumber);
+      const item = {
+        productName: line.productName ?? "",
+        subProductLine: line.subProductLine,
+        units: line.units,
+        strain: extractStrain(line.productName ?? "")
+      };
+      if (existing) {
+        existing.items.push(item);
+      } else {
+        byOrder.set(line.orderNumber, {
+          orderNumber: line.orderNumber,
+          sentAt: line.submittedAt ?? "",
+          items: [item]
+        });
+      }
+    }
+    return [...byOrder.values()].sort((a, b) => b.sentAt.localeCompare(a.sentAt));
+  }, [orderLines]);
+}
 
 function parseProductBrand(subProductLine: string | null): string {
   if (!subProductLine) return "";
@@ -3724,10 +3758,14 @@ function InventoryView({
   inventoryItems: InventoryItem[];
   orderLines: OrderLine[];
 }) {
+  const [mode, setMode] = useState<InvMode>("stock");
   const [sortKey, setSortKey] = useState<InvSortKey>("forSale");
   const [sortDir, setSortDir] = useState<SortDirection>("desc");
   const [groupFilter, setGroupFilter] = useState<InvGroupFilter>("all");
   const [search, setSearch] = useState("");
+  const [leadTimeDays, setLeadTimeDays] = useState(21);
+
+  const processingRuns = useProcessingRuns(orderLines);
 
   // Velocity: paid order lines in last 90 days, units per sub_product_line per day
   const velocityMap = useMemo(() => {
@@ -3837,135 +3875,254 @@ function InventoryView({
     <section className="inv-view">
       <div className="panel inv-filter-panel">
         <div className="inv-filter-row">
+          {/* Mode toggle */}
           <div className="sku-group-tabs">
-            {(["all", "finished", "bulk"] as InvGroupFilter[]).map((g) => (
-              <button
-                key={g}
-                className={`secondary-button${groupFilter === g ? " active-tab" : ""}`}
-                type="button"
-                onClick={() => setGroupFilter(g)}
-              >
-                {g === "all" ? "All" : g === "finished" ? "Finished Goods" : "Bulk / Parent"}
-              </button>
-            ))}
+            <button
+              className={`secondary-button${mode === "stock" ? " active-tab" : ""}`}
+              type="button"
+              onClick={() => setMode("stock")}
+            >
+              Stock
+            </button>
+            <button
+              className={`secondary-button${mode === "processing" ? " active-tab" : ""}`}
+              type="button"
+              onClick={() => setMode("processing")}
+            >
+              Processing{processingRuns.length ? ` (${processingRuns.length})` : ""}
+            </button>
           </div>
-          <div className="field" style={{ flex: 1, minWidth: 0 }}>
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search product or sub-line…"
-            />
-          </div>
+
+          {mode === "stock" ? (
+            <>
+              <div className="sku-group-tabs">
+                {(["all", "finished", "bulk"] as InvGroupFilter[]).map((g) => (
+                  <button
+                    key={g}
+                    className={`secondary-button${groupFilter === g ? " active-tab" : ""}`}
+                    type="button"
+                    onClick={() => setGroupFilter(g)}
+                  >
+                    {g === "all" ? "All" : g === "finished" ? "Finished" : "Bulk"}
+                  </button>
+                ))}
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: 0 }}>
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search product or sub-line…"
+                />
+              </div>
+            </>
+          ) : (
+            <div className="field inv-lead-time-field">
+              <label>Lead time (days)</label>
+              <input
+                type="number"
+                min={1}
+                max={90}
+                value={leadTimeDays}
+                onChange={(e) => setLeadTimeDays(Number(e.target.value) || 21)}
+                style={{ width: 72 }}
+              />
+            </div>
+          )}
+
           {lastSynced ? (
             <span className="table-meta inv-sync-date">Synced {formatDate(lastSynced)}</span>
           ) : null}
         </div>
       </div>
 
-      <div className="metrics orders-metrics">
-        <div className="metric">
-          <div className="metric-label">SKUs</div>
-          <div className="metric-value">{metrics.total}</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">Units For Sale</div>
-          <div className="metric-value">{metrics.totalForSale.toLocaleString()}</div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">Out of Stock</div>
-          <div className="metric-value" style={{ color: metrics.out ? "var(--danger, #ef4444)" : undefined }}>
-            {metrics.out}
+      {mode === "stock" ? (
+        <>
+          <div className="metrics orders-metrics">
+            <div className="metric">
+              <div className="metric-label">SKUs</div>
+              <div className="metric-value">{metrics.total}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Units For Sale</div>
+              <div className="metric-value">{metrics.totalForSale.toLocaleString()}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Out of Stock</div>
+              <div className="metric-value" style={{ color: metrics.out ? "var(--danger, #ef4444)" : undefined }}>
+                {metrics.out}
+              </div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Low Stock (&lt;14d)</div>
+              <div className="metric-value" style={{ color: metrics.low ? "#f59e0b" : undefined }}>
+                {metrics.low}
+              </div>
+            </div>
           </div>
-        </div>
-        <div className="metric">
-          <div className="metric-label">Low Stock (&lt;14d)</div>
-          <div className="metric-value" style={{ color: metrics.low ? "#f59e0b" : undefined }}>
-            {metrics.low}
-          </div>
-        </div>
-      </div>
 
-      <div className="panel">
-        <div className="table-scroll">
-          <table className="data-table inv-table">
-            <thead>
-              <tr>
-                <th>{thBtn("product", "Product")}</th>
-                <th>{thBtn("subLine", "Sub-Line")}</th>
-                <th style={{ textAlign: "right" }}>{thBtn("forSale", "For Sale")}</th>
-                <th style={{ textAlign: "right" }}>{thBtn("allocated", "Allocated")}</th>
-                <th style={{ textAlign: "right" }}>{thBtn("inStock", "In Stock")}</th>
-                <th style={{ textAlign: "right" }}>{thBtn("daysOfStock", "Days of Stock")}</th>
-                <th style={{ textAlign: "right" }}>{thBtn("thc", "Total THC%")}</th>
-                <th>{thBtn("batchDate", "Latest Batch")}</th>
-                <th style={{ textAlign: "right" }}>{thBtn("batches", "Batches")}</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((item) => {
-                const status = stockStatus(item);
-                const days = daysOfStock(item);
-                const brand = parseProductBrand(item.subProductLine);
-                return (
-                  <tr key={`${item.product}-${item.subProductLine}`} className={`inv-row inv-row-${status}`}>
-                    <td>
-                      <div className="inv-product-name">{item.product}</div>
-                      {brand ? (
-                        <span
-                          className="sku-brand-badge"
-                          style={{ background: BRAND_DOT_COLORS[brand as BrandFilter] ?? "var(--muted)", marginTop: 2, display: "inline-block" }}
-                        >
-                          {brand}
-                        </span>
-                      ) : null}
-                    </td>
-                    <td style={{ color: "var(--muted)", fontSize: "0.82rem" }}>{item.subProductLine ?? "—"}</td>
-                    <td style={{ textAlign: "right", fontWeight: item.totalForSale > 0 ? 600 : undefined }}>
-                      {item.totalForSale.toLocaleString()}
-                    </td>
-                    <td style={{ textAlign: "right", color: item.totalAllocated > 0 ? "#f59e0b" : "var(--muted)" }}>
-                      {item.totalAllocated > 0 ? item.totalAllocated.toLocaleString() : "—"}
-                    </td>
-                    <td style={{ textAlign: "right" }}>{item.totalInStock.toLocaleString()}</td>
-                    <td style={{ textAlign: "right" }}>
-                      {days !== null ? (
-                        <span style={{ color: days < 7 ? "var(--danger, #ef4444)" : days < 14 ? "#f59e0b" : "inherit" }}>
-                          {days}d
-                        </span>
-                      ) : (
-                        <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>no velocity</span>
-                      )}
-                    </td>
-                    <td style={{ textAlign: "right", color: "var(--muted)", fontSize: "0.82rem" }}>
-                      {item.avgTotalThc != null ? `${item.avgTotalThc}%` : "—"}
-                    </td>
-                    <td style={{ fontSize: "0.82rem" }}>{formatShortDate(item.latestBatchDate)}</td>
-                    <td style={{ textAlign: "right", color: "var(--muted)", fontSize: "0.82rem" }}>{item.batchCount}</td>
-                    <td>
-                      {status === "out" ? (
-                        <span className="inv-badge inv-badge-out">Out</span>
-                      ) : status === "low" ? (
-                        <span className="inv-badge inv-badge-low">Low</span>
-                      ) : (
-                        <span className="inv-badge inv-badge-ok">OK</span>
-                      )}
-                    </td>
+          <div className="panel">
+            <div className="table-scroll">
+              <table className="data-table inv-table">
+                <thead>
+                  <tr>
+                    <th>{thBtn("product", "Product")}</th>
+                    <th>{thBtn("subLine", "Sub-Line")}</th>
+                    <th style={{ textAlign: "right" }}>{thBtn("forSale", "For Sale")}</th>
+                    <th style={{ textAlign: "right" }}>{thBtn("allocated", "Allocated")}</th>
+                    <th style={{ textAlign: "right" }}>{thBtn("inStock", "In Stock")}</th>
+                    <th style={{ textAlign: "right" }}>{thBtn("daysOfStock", "Days of Stock")}</th>
+                    <th style={{ textAlign: "right" }}>{thBtn("thc", "Total THC%")}</th>
+                    <th>{thBtn("batchDate", "Latest Batch")}</th>
+                    <th style={{ textAlign: "right" }}>{thBtn("batches", "Batches")}</th>
+                    <th>Status</th>
                   </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((item) => {
+                    const status = stockStatus(item);
+                    const days = daysOfStock(item);
+                    const brand = parseProductBrand(item.subProductLine);
+                    return (
+                      <tr key={`${item.product}-${item.subProductLine}`} className={`inv-row inv-row-${status}`}>
+                        <td>
+                          <div className="inv-product-name">{item.product}</div>
+                          {brand ? (
+                            <span
+                              className="sku-brand-badge"
+                              style={{ background: BRAND_DOT_COLORS[brand as BrandFilter] ?? "var(--muted)", marginTop: 2, display: "inline-block" }}
+                            >
+                              {brand}
+                            </span>
+                          ) : null}
+                        </td>
+                        <td style={{ color: "var(--muted)", fontSize: "0.82rem" }}>{item.subProductLine ?? "—"}</td>
+                        <td style={{ textAlign: "right", fontWeight: item.totalForSale > 0 ? 600 : undefined }}>
+                          {item.totalForSale.toLocaleString()}
+                        </td>
+                        <td style={{ textAlign: "right", color: item.totalAllocated > 0 ? "#f59e0b" : "var(--muted)" }}>
+                          {item.totalAllocated > 0 ? item.totalAllocated.toLocaleString() : "—"}
+                        </td>
+                        <td style={{ textAlign: "right" }}>{item.totalInStock.toLocaleString()}</td>
+                        <td style={{ textAlign: "right" }}>
+                          {days !== null ? (
+                            <span style={{ color: days < 7 ? "var(--danger, #ef4444)" : days < 14 ? "#f59e0b" : "inherit" }}>
+                              {days}d
+                            </span>
+                          ) : (
+                            <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>no velocity</span>
+                          )}
+                        </td>
+                        <td style={{ textAlign: "right", color: "var(--muted)", fontSize: "0.82rem" }}>
+                          {item.avgTotalThc != null ? `${item.avgTotalThc}%` : "—"}
+                        </td>
+                        <td style={{ fontSize: "0.82rem" }}>{formatShortDate(item.latestBatchDate)}</td>
+                        <td style={{ textAlign: "right", color: "var(--muted)", fontSize: "0.82rem" }}>{item.batchCount}</td>
+                        <td>
+                          {status === "out" ? (
+                            <span className="inv-badge inv-badge-out">Out</span>
+                          ) : status === "low" ? (
+                            <span className="inv-badge inv-badge-low">Low</span>
+                          ) : (
+                            <span className="inv-badge inv-badge-ok">OK</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {!filtered.length ? (
+                    <tr>
+                      <td colSpan={10} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
+                        No products match current filters.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      ) : (
+        /* Processing mode */
+        <div className="panel">
+          {processingRuns.length === 0 ? (
+            <div style={{ padding: "32px 24px", textAlign: "center", color: "var(--muted)" }}>
+              No processing transfers found. These are detected from Cultivera orders to Agro Couture with $0 line total.
+            </div>
+          ) : (
+            <div className="proc-runs">
+              {processingRuns.map((run) => {
+                const sentDate = new Date(run.sentAt);
+                const expectedReturn = new Date(sentDate.getTime() + leadTimeDays * 86_400_000);
+                const now = Date.now();
+                const daysAgo = Math.round((now - sentDate.getTime()) / 86_400_000);
+                const daysUntilReturn = Math.round((expectedReturn.getTime() - now) / 86_400_000);
+                const isExpected = daysUntilReturn > 0;
+                const strains = [...new Set(run.items.map((i) => i.strain).filter((s) => s.length > 0))];
+                const totalUnits = run.items.reduce((s, i) => s + i.units, 0);
+
+                // Find related finished-goods inventory by matching strain names
+                const relatedStock = strains.flatMap((strain) =>
+                  inventoryItems.filter(
+                    (inv) => !isBulk(inv) && inv.product.toLowerCase().includes((strain ?? "").toLowerCase())
+                  )
+                );
+
+                return (
+                  <div key={run.orderNumber} className="proc-run">
+                    <div className="proc-run-header">
+                      <div className="proc-run-meta">
+                        <strong>{formatDate(run.sentAt)}</strong>
+                        <span className="table-meta">Order {run.orderNumber}</span>
+                        <span className="table-meta">{daysAgo}d ago · {totalUnits.toLocaleString()} units</span>
+                      </div>
+                      <div className={`inv-badge ${isExpected ? "inv-badge-low" : "inv-badge-ok"}`}>
+                        {isExpected
+                          ? `Expected back in ${daysUntilReturn}d`
+                          : `Est. returned ${Math.abs(daysUntilReturn)}d ago`}
+                      </div>
+                    </div>
+
+                    <div className="proc-run-body">
+                      <div className="proc-run-inputs">
+                        <div className="proc-section-label">Sent to Agro Couture</div>
+                        {run.items.map((item, idx) => (
+                          <div key={idx} className="proc-item">
+                            <span className="proc-item-name">{item.productName || item.subProductLine || "—"}</span>
+                            <span className="proc-item-units">{item.units.toLocaleString()} units</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      {relatedStock.length > 0 ? (
+                        <div className="proc-run-stock">
+                          <div className="proc-section-label">Current finished goods</div>
+                          {relatedStock.map((inv) => {
+                            const days = daysOfStock(inv);
+                            const status = stockStatus(inv);
+                            return (
+                              <div key={`${inv.product}-${inv.subProductLine}`} className="proc-item">
+                                <span className="proc-item-name">{inv.product}</span>
+                                <span className="proc-item-units">
+                                  {inv.totalForSale.toLocaleString()} for sale
+                                  {days !== null ? ` · ${days}d stock` : ""}
+                                </span>
+                                <span className={`inv-badge inv-badge-${status}`} style={{ marginLeft: 6 }}>
+                                  {status === "out" ? "Out" : status === "low" ? "Low" : "OK"}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
                 );
               })}
-              {!filtered.length ? (
-                <tr>
-                  <td colSpan={10} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
-                    No products match current filters.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
+            </div>
+          )}
         </div>
-      </div>
+      )}
     </section>
   );
 }
