@@ -3755,6 +3755,12 @@ function useProcessingRuns(orderLines: OrderLine[]): ProcessingRun[] {
   }, [orderLines]);
 }
 
+// "KS | A Grade Flower" → "A Grade Flower"; bulk lots have no prefix and pass through
+function stripBrandPrefix(subProductLine: string | null): string {
+  if (!subProductLine) return "";
+  return subProductLine.replace(/^[A-Z]{2,3}\s*\|\s*/, "").trim();
+}
+
 function parseProductBrand(subProductLine: string | null): string {
   if (!subProductLine) return "";
   if (subProductLine.startsWith("KS")) return "K. Savage";
@@ -3861,7 +3867,7 @@ function InventoryView({
 
   const allSubLines = useMemo(() => {
     const set = new Set<string>();
-    for (const i of inventoryItems) { if (i.subProductLine) set.add(i.subProductLine); }
+    for (const i of inventoryItems) { const s = stripBrandPrefix(i.subProductLine); if (s) set.add(s); }
     return [...set].sort();
   }, [inventoryItems]);
 
@@ -3894,7 +3900,7 @@ function InventoryView({
     if (groupFilter === "bulk") items = items.filter(isBulk);
     if (brandFilter !== "all") items = items.filter((i) => parseProductBrand(i.subProductLine) === brandFilter);
     if (strainFilter !== "all") items = items.filter((i) => extractStrain(i.product) === strainFilter);
-    if (subLineFilter !== "all") items = items.filter((i) => (i.subProductLine ?? "") === subLineFilter);
+    if (subLineFilter !== "all") items = items.filter((i) => stripBrandPrefix(i.subProductLine) === subLineFilter);
     if (search.trim()) {
       const q = search.toLowerCase();
       items = items.filter((i) =>
@@ -3908,7 +3914,7 @@ function InventoryView({
       const dA = daysOfStock(a), dB = daysOfStock(b);
       switch (sortKey) {
         case "product": diff = a.product.localeCompare(b.product); break;
-        case "subLine": diff = (a.subProductLine ?? "").localeCompare(b.subProductLine ?? ""); break;
+        case "subLine": diff = stripBrandPrefix(a.subProductLine).localeCompare(stripBrandPrefix(b.subProductLine)); break;
         case "strain": diff = extractStrain(a.product).localeCompare(extractStrain(b.product)); break;
         case "forSale": diff = a.totalForSale - b.totalForSale; break;
         case "allocated": diff = a.totalAllocated - b.totalAllocated; break;
@@ -4097,7 +4103,7 @@ function InventoryView({
                             </span>
                           ) : null}
                         </td>
-                        <td style={{ color: "var(--muted)", fontSize: "0.82rem" }}>{item.subProductLine ?? "—"}</td>
+                        <td style={{ color: "var(--muted)", fontSize: "0.82rem" }}>{stripBrandPrefix(item.subProductLine) || "—"}</td>
                         <td style={{ fontSize: "0.82rem" }}>{extractStrain(item.product) || <span style={{ color: "var(--muted)" }}>—</span>}</td>
                         <td style={{ textAlign: "right", fontWeight: item.totalForSale > 0 ? 600 : undefined }}>
                           {item.totalForSale.toLocaleString()}
