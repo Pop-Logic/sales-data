@@ -144,9 +144,18 @@ async function fetchInventoryRows(token: string): Promise<RawRow[]> {
 
   const ct = res.headers.get("content-type") ?? "";
 
-  // JSON response (direct data or async transaction)
+  // JSON response (direct download URL, direct data, or async transaction)
   if (ct.includes("json") || ct.includes("javascript")) {
     const json = await res.json() as unknown;
+    // Confirmed live shape: { "Name": "BatchesInStock.xlsx", "Url": "https://files.cultivera.com/..." }
+    if (json && typeof json === "object" && !Array.isArray(json)) {
+      const dlUrl = findDownloadUrl(json as Record<string, unknown>);
+      if (dlUrl) {
+        const dl = await fetch(dlUrl, { headers: baseHeaders(token) });
+        if (!dl.ok) throw new Error(`Report download failed: HTTP ${dl.status}`);
+        return parseBinaryToRows(await dl.arrayBuffer());
+      }
+    }
     const txId = extractTransactionId(json);
     if (txId) {
       const finalBuf = await pollTransaction(token, txId);
