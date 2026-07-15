@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { revalidateTag } from "next/cache";
 import { DASHBOARD_DATA_TAG } from "@/lib/dashboard-data";
+import { consumeNewBatches } from "@/lib/packaging-consume";
 
 function createSupabaseAdminClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -86,6 +87,21 @@ export async function POST(request: Request) {
   if (deleteError) console.error("Stale row cleanup error:", deleteError.message);
 
   const uniqueProducts = new Set(rows.map((r) => r.subProductLine ?? r.product)).size;
+
+  // Auto-deplete packaging for newly appearing batches (non-fatal).
+  try {
+    await consumeNewBatches(
+      supabase,
+      rows.map((r) => ({
+        barcode: r.barcode,
+        product: r.product,
+        subProductLine: r.subProductLine,
+        units: r.unitsInStock
+      }))
+    );
+  } catch (err) {
+    console.error("Packaging consumption error:", err instanceof Error ? err.message : err);
+  }
 
   revalidateTag(DASHBOARD_DATA_TAG, "max");
   return NextResponse.json({ imported, total: rows.length, products: uniqueProducts });

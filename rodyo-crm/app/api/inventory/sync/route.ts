@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { revalidateTag } from "next/cache";
 import * as XLSX from "xlsx";
 import { DASHBOARD_DATA_TAG } from "@/lib/dashboard-data";
+import { consumeNewBatches } from "@/lib/packaging-consume";
 
 // ---------------------------------------------------------------------------
 // Cultivera API constants
@@ -311,7 +312,24 @@ async function upsertRows(rows: RawRow[], syncedAt: string) {
   // Remove stale batches not present in this sync
   await db.from("cultivera_inventory").delete().lt("synced_at", syncedAt);
 
-  return { imported, total: records.length };
+  // Auto-deplete packaging for newly appearing batches. Non-fatal: inventory
+  // sync must succeed even if packaging tables are missing or misconfigured.
+  let packaging: { newBatches: number; consumeEntries: number } | null = null;
+  try {
+    packaging = await consumeNewBatches(
+      db,
+      records.map((r) => ({
+        barcode: r.barcode,
+        product: r.product,
+        subProductLine: r.sub_product_line,
+        units: r.units_in_stock
+      }))
+    );
+  } catch (err) {
+    console.error("Packaging consumption error:", err instanceof Error ? err.message : err);
+  }
+
+  return { imported, total: records.length, packaging };
 }
 
 // ---------------------------------------------------------------------------

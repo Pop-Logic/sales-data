@@ -18,6 +18,42 @@ type LatestMonthBrandSummary = {
   leisureLandLatestMonthRevenue: number;
 };
 
+export type PackagingItem = {
+  id: string;
+  name: string;
+  vendor: string | null;
+  leadTimeDays: number;
+  reorderQty: number | null;
+  parOverride: number | null;
+  onOrderQty: number | null;
+  onOrderEta: string | null;
+  notes: string | null;
+  active: boolean;
+  onHand: number;
+  lastCountAt: string | null;
+  consumed60d: number;
+  firstConsumeAt: string | null;
+};
+
+export type PackagingBomRow = {
+  id: string;
+  packagingItemId: string;
+  subProductLine: string;
+  unitSize: string | null;
+  strain: string | null;
+  qtyPerUnit: number;
+};
+
+export type PackagingLedgerEntry = {
+  id: string;
+  packagingItemId: string;
+  entryType: "count" | "receive" | "consume" | "adjust";
+  qty: number;
+  sourceBarcode: string | null;
+  note: string | null;
+  createdAt: string;
+};
+
 export type DashboardSnapshot = {
   source: "demo" | "supabase";
   stores: StoreRollup[];
@@ -25,6 +61,9 @@ export type DashboardSnapshot = {
   salesGoals: SalesGoal[];
   contactLogs: ContactLog[];
   inventoryItems: InventoryItem[];
+  packagingItems: PackagingItem[];
+  packagingBoms: PackagingBomRow[];
+  packagingLedger: PackagingLedgerEntry[];
   cultiveraLastSyncedAt?: string | null;
   metrics: {
     totalRetailers: number;
@@ -318,6 +357,9 @@ function demoSnapshot(): DashboardSnapshot {
     salesGoals: [],
     contactLogs: [],
     inventoryItems: [],
+    packagingItems: [],
+    packagingBoms: [],
+    packagingLedger: [],
     cultiveraLastSyncedAt: demoOrderLines[0]?.importedAt ?? null,
     metrics: summarize(stores)
   };
@@ -632,6 +674,67 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     syncedAt: r.synced_at ?? null
   }));
 
+  // Packaging inventory (tables may not exist until the migration is applied —
+  // the || [] fallbacks keep the snapshot resilient)
+  const { data: packagingItemData } = await supabase
+    .from("packaging_items")
+    .select("id, name, vendor, lead_time_days, reorder_qty, par_override, on_order_qty, on_order_eta, notes, active, created_at")
+    .order("vendor", { ascending: true })
+    .order("name", { ascending: true });
+  const { data: packagingOnHandData } = await supabase
+    .from("packaging_on_hand")
+    .select("packaging_item_id, on_hand, last_count_at, consumed_60d, first_consume_at");
+  const onHandById = new Map(
+    (packagingOnHandData || []).map((r) => [String(r.packaging_item_id), r])
+  );
+  const packagingItems: PackagingItem[] = (packagingItemData || []).map((r) => {
+    const oh = onHandById.get(String(r.id));
+    return {
+      id: String(r.id),
+      name: String(r.name ?? ""),
+      vendor: r.vendor ?? null,
+      leadTimeDays: Number(r.lead_time_days ?? 14),
+      reorderQty: r.reorder_qty != null ? Number(r.reorder_qty) : null,
+      parOverride: r.par_override != null ? Number(r.par_override) : null,
+      onOrderQty: r.on_order_qty != null ? Number(r.on_order_qty) : null,
+      onOrderEta: r.on_order_eta ?? null,
+      notes: r.notes ?? null,
+      active: Boolean(r.active ?? true),
+      onHand: Number(oh?.on_hand ?? 0),
+      lastCountAt: oh?.last_count_at ?? null,
+      consumed60d: Number(oh?.consumed_60d ?? 0),
+      firstConsumeAt: oh?.first_consume_at ?? null
+    };
+  });
+
+  const { data: packagingBomData } = await supabase
+    .from("packaging_boms")
+    .select("id, packaging_item_id, sub_product_line, unit_size, strain, qty_per_unit")
+    .order("sub_product_line", { ascending: true });
+  const packagingBoms: PackagingBomRow[] = (packagingBomData || []).map((r) => ({
+    id: String(r.id),
+    packagingItemId: String(r.packaging_item_id),
+    subProductLine: String(r.sub_product_line ?? ""),
+    unitSize: r.unit_size ?? null,
+    strain: r.strain ?? null,
+    qtyPerUnit: Number(r.qty_per_unit ?? 1)
+  }));
+
+  const { data: packagingLedgerData } = await supabase
+    .from("packaging_ledger")
+    .select("id, packaging_item_id, entry_type, qty, source_barcode, note, created_at")
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const packagingLedger: PackagingLedgerEntry[] = (packagingLedgerData || []).map((r) => ({
+    id: String(r.id),
+    packagingItemId: String(r.packaging_item_id),
+    entryType: (r.entry_type ?? "adjust") as PackagingLedgerEntry["entryType"],
+    qty: Number(r.qty ?? 0),
+    sourceBarcode: r.source_barcode ?? null,
+    note: r.note ?? null,
+    createdAt: String(r.created_at ?? "")
+  }));
+
   const { data: headsetSummaryData } = await supabase
     .from("headset_store_summary")
     .select("store_id, last_sale, units_30d, sales_30d");
@@ -734,6 +837,9 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     salesGoals,
     contactLogs,
     inventoryItems,
+    packagingItems,
+    packagingBoms,
+    packagingLedger,
     cultiveraLastSyncedAt,
     metrics: summarize(normalizedStores)
   };

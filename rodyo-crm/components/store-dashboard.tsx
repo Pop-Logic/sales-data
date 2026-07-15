@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -14,7 +14,8 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import type { DashboardSnapshot } from "@/lib/dashboard-data";
+import type { DashboardSnapshot, PackagingItem, PackagingBomRow, PackagingLedgerEntry } from "@/lib/dashboard-data";
+import { extractStrain, extractUnitSize, stripBrandPrefix } from "@/lib/product-parse";
 import {
   TERRITORY_BRANDS,
   TERRITORY_MAP_COLORS,
@@ -875,49 +876,8 @@ function normalizeCategory(subProductLine?: string | null): string {
   return stripped || subProductLine;
 }
 
-function extractUnitSize(productName?: string | null): string {
-  if (!productName) return "Other";
-  const weightMatch = productName.match(/\b(\d+(?:\.\d+)?)\s*(g|mg|oz|ml)\b/i);
-  if (weightMatch) return `${weightMatch[1]}${weightMatch[2].toLowerCase()}`;
-  const packMatch = productName.match(/\b(\d+)\s*[-]?\s*(?:pk|pack)\b/i);
-  if (packMatch) return `${packMatch[1]}pk`;
-  return "Other";
-}
-
-function extractStrain(productName?: string | null): string {
-  if (!productName) return "";
-  let name = productName.trim();
-
-  // Strip "KS | ", "MF | ", "LL | " style brand-code prefix
-  name = name.replace(/^[A-Z]{2,3}\s*\|\s*/i, "");
-
-  // Strip territory brand name prefix (K. Savage, Mayfield, Leisure Land)
-  for (const brand of [...TERRITORY_BRANDS].sort((a, b) => b.length - a.length)) {
-    if (name.toLowerCase().startsWith(brand.toLowerCase())) {
-      name = name.slice(brand.length).replace(/^\s*[-|]\s*/, "").trim();
-      break;
-    }
-  }
-
-  // Cultivera format: "[Product Type] - [Strain] - [Size] -"
-  // Take the last non-empty, non-size segment.
-  const parts = name.split(" - ").map((s) => s.trim()).filter((s) => s.length > 0);
-  if (parts.length >= 2) {
-    while (parts.length > 1 && /^\d+(?:\.\d+)?\s*(?:g|mg|oz|ml|pk|pack)(?:\s*\([^)]*\))?$/i.test(parts[parts.length - 1])) {
-      parts.pop();
-    }
-    return parts[parts.length - 1];
-  }
-
-  // Fallback: strip product-type words
-  name = name.replace(/\b\d+(?:\.\d+)?\s*(?:g|mg|oz|ml)\b/gi, "").trim();
-  name = name.replace(/\b\d+\s*[-]?\s*(?:pk|pack)\b/gi, "").trim();
-  name = name.replace(
-    /\b(?:flower|pre[-\s]?rolls?|prerolls?|cartridge|cart|concentrate|extract|live\s+resin|live\s+rosin|rosin|resin|wax|shatter|crumble|vape|pod|disposable|tincture|topical|capsule|gummy|gummies|infused|edible|hash|kief|distillate|oil|sugar|badder|batter|diamonds|sauce)\b/gi,
-    ""
-  ).replace(/\s+/g, " ").trim();
-  return name;
-}
+// extractUnitSize / extractStrain / stripBrandPrefix live in lib/product-parse.ts,
+// shared with server-side packaging consumption.
 
 function formatSyncDateTime(value?: string | null) {
   if (!value) {
@@ -3720,7 +3680,7 @@ function HeadsetSyncPanel({ stores }: { stores: StoreRollup[] }) {
 
 type InvSortKey = "product" | "subLine" | "strain" | "forSale" | "allocated" | "inStock" | "batches" | "batchDate" | "daysOfStock" | "thc" | "status";
 type InvGroupFilter = "all" | "finished" | "3p" | "bulk";
-type InvMode = "stock" | "processing";
+type InvMode = "stock" | "processing" | "packaging";
 
 type ProcessingRun = {
   orderNumber: string;
@@ -3755,12 +3715,6 @@ function useProcessingRuns(orderLines: OrderLine[]): ProcessingRun[] {
   }, [orderLines]);
 }
 
-// "KS | A Grade Flower" → "A Grade Flower"; bulk lots have no prefix and pass through
-function stripBrandPrefix(subProductLine: string | null): string {
-  if (!subProductLine) return "";
-  return subProductLine.replace(/^[A-Z]{2,3}\s*\|\s*/, "").trim();
-}
-
 function parseProductBrand(subProductLine: string | null): string {
   if (!subProductLine) return "";
   if (subProductLine.startsWith("KS")) return "K. Savage";
@@ -3782,12 +3736,576 @@ function is3pSku(subProductLine: string | null | undefined): boolean {
     s.includes("diamond doobie") || s.includes("skybox");
 }
 
+type PkgStatus = "out" | "reorder" | "soon" | "ok" | "idle";
+
+// Days-of-stock and reorder status from ledger-derived usage. Usage window is
+// days since first-ever consumption, clamped to [7, 60], so a freshly tracked
+// item doesn't report an inflated daily rate.
+function pkgStats(item: PackagingItem): {
+  dailyUse: number;
+  daysLeft: number | null;
+  reorderPoint: number | null;
+  status: PkgStatus;
+} {
+  let dailyUse = 0;
+  if (item.firstConsumeAt && item.consumed60d > 0) {
+    const sinceFirst = (Date.now() - new Date(item.firstConsumeAt).getTime()) / 86_400_000;
+    dailyUse = item.consumed60d / Math.min(60, Math.max(7, sinceFirst));
+  }
+  const daysLeft = dailyUse > 0 ? item.onHand / dailyUse : null;
+  const reorderPoint = item.parOverride ?? (dailyUse > 0 ? dailyUse * (item.leadTimeDays + 14) : null);
+
+  let status: PkgStatus;
+  if (item.onHand <= 0) {
+    status = "out";
+  } else if (reorderPoint != null && item.onHand <= reorderPoint) {
+    const leadPoint = dailyUse > 0 ? dailyUse * item.leadTimeDays : reorderPoint;
+    status = item.onHand <= leadPoint ? "reorder" : "soon";
+  } else if (dailyUse > 0 || item.lastCountAt) {
+    status = "ok";
+  } else {
+    status = "idle";
+  }
+  return { dailyUse, daysLeft, reorderPoint, status };
+}
+
+function PkgStatusBadge({ status, daysLeft, leadTimeDays }: { status: PkgStatus; daysLeft: number | null; leadTimeDays: number }) {
+  if (status === "out") return <span className="inv-badge inv-badge-out">Out</span>;
+  if (status === "reorder") {
+    return (
+      <span className="inv-badge inv-badge-out">
+        Reorder now{daysLeft != null ? ` · ${Math.round(daysLeft)}d left, vendor ${leadTimeDays}d` : ""}
+      </span>
+    );
+  }
+  if (status === "soon") return <span className="inv-badge inv-badge-low">Reorder soon</span>;
+  if (status === "ok") return <span className="inv-badge inv-badge-ok">OK</span>;
+  return <span className="table-meta">No data yet</span>;
+}
+
+function PackagingItemForm({
+  item,
+  onDone
+}: {
+  item?: PackagingItem;
+  onDone: () => void;
+}) {
+  const [name, setName] = useState(item?.name ?? "");
+  const [vendor, setVendor] = useState(item?.vendor ?? "");
+  const [leadTimeDays, setLeadTimeDays] = useState(String(item?.leadTimeDays ?? 14));
+  const [reorderQty, setReorderQty] = useState(item?.reorderQty != null ? String(item.reorderQty) : "");
+  const [parOverride, setParOverride] = useState(item?.parOverride != null ? String(item.parOverride) : "");
+  const [notes, setNotes] = useState(item?.notes ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/packaging/item", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: item?.id,
+          name,
+          vendor: vendor || null,
+          leadTimeDays: Number(leadTimeDays) || 14,
+          reorderQty: reorderQty !== "" ? Number(reorderQty) : null,
+          parOverride: parOverride !== "" ? Number(parOverride) : null,
+          onOrderQty: item?.onOrderQty ?? null,
+          onOrderEta: item?.onOrderEta ?? null,
+          notes: notes || null,
+          active: item?.active ?? true
+        })
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Save failed.");
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="pkg-form" onSubmit={save}>
+      <div className="pkg-form-row">
+        <div className="field"><label>Item name</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. 3.5g glass jar" required />
+        </div>
+        <div className="field"><label>Vendor</label>
+          <input value={vendor} onChange={(e) => setVendor(e.target.value)} placeholder="Vendor name" />
+        </div>
+        <div className="field"><label>Lead time (days)</label>
+          <input type="number" min={1} max={365} value={leadTimeDays} onChange={(e) => setLeadTimeDays(e.target.value)} style={{ width: 90 }} />
+        </div>
+        <div className="field"><label>Reorder qty</label>
+          <input type="number" min={0} value={reorderQty} onChange={(e) => setReorderQty(e.target.value)} placeholder="optional" style={{ width: 110 }} />
+        </div>
+        <div className="field"><label>Par override</label>
+          <input type="number" min={0} value={parOverride} onChange={(e) => setParOverride(e.target.value)} placeholder="auto" style={{ width: 100 }} />
+        </div>
+      </div>
+      <div className="pkg-form-row">
+        <div className="field" style={{ flex: 1 }}><label>Notes</label>
+          <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Vendor SKU, case size, etc." />
+        </div>
+        <button className="primary-button" type="submit" disabled={saving}>{saving ? "Saving…" : item ? "Save Item" : "Add Item"}</button>
+        <button className="secondary-button" type="button" onClick={onDone}>Cancel</button>
+      </div>
+      {error ? <p className="form-error">{error}</p> : null}
+    </form>
+  );
+}
+
+function PackagingLedgerForm({ itemId, onDone }: { itemId: string; onDone: () => void }) {
+  const [entryType, setEntryType] = useState<"count" | "receive" | "adjust">("count");
+  const [qty, setQty] = useState("");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/packaging/ledger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packagingItemId: itemId, entryType, qty: Number(qty), note: note || null })
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Save failed.");
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="pkg-form-row" onSubmit={save}>
+      <div className="field"><label>Entry</label>
+        <select value={entryType} onChange={(e) => setEntryType(e.target.value as "count" | "receive" | "adjust")}>
+          <option value="count">Physical count</option>
+          <option value="receive">Received shipment</option>
+          <option value="adjust">Adjustment (±)</option>
+        </select>
+      </div>
+      <div className="field"><label>{entryType === "count" ? "Counted qty" : entryType === "receive" ? "Qty received" : "± Qty"}</label>
+        <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} required style={{ width: 110 }} />
+      </div>
+      <div className="field" style={{ flex: 1 }}><label>Note</label>
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="optional" />
+      </div>
+      <button className="primary-button" type="submit" disabled={saving || qty === ""}>{saving ? "Saving…" : "Save"}</button>
+      {error ? <p className="form-error">{error}</p> : null}
+    </form>
+  );
+}
+
+function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () => void }) {
+  const [qty, setQty] = useState(item.reorderQty != null ? String(item.reorderQty) : "");
+  const [eta, setEta] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(markOrdered: boolean, event?: FormEvent) {
+    event?.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/packaging/item", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: item.id,
+          name: item.name,
+          vendor: item.vendor,
+          leadTimeDays: item.leadTimeDays,
+          reorderQty: item.reorderQty,
+          parOverride: item.parOverride,
+          notes: item.notes,
+          active: item.active,
+          onOrderQty: markOrdered ? Number(qty) || null : null,
+          onOrderEta: markOrdered ? eta || null : null
+        })
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Save failed.");
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="pkg-form-row" onSubmit={(e) => save(true, e)}>
+      <div className="field"><label>Qty ordered</label>
+        <input type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)} required style={{ width: 110 }} />
+      </div>
+      <div className="field"><label>Expected arrival</label>
+        <input type="date" value={eta} onChange={(e) => setEta(e.target.value)} />
+      </div>
+      <button className="primary-button" type="submit" disabled={saving}>{saving ? "Saving…" : "Mark Ordered"}</button>
+      {item.onOrderQty != null ? (
+        <button className="secondary-button" type="button" disabled={saving} onClick={() => save(false)}>Clear</button>
+      ) : null}
+      {error ? <p className="form-error">{error}</p> : null}
+    </form>
+  );
+}
+
+function PackagingBomForm({
+  itemId,
+  inventoryItems,
+  onDone
+}: {
+  itemId: string;
+  inventoryItems: InventoryItem[];
+  onDone: () => void;
+}) {
+  const [subLine, setSubLine] = useState("");
+  const [unitSize, setUnitSize] = useState("");
+  const [strain, setStrain] = useState("");
+  const [qtyPerUnit, setQtyPerUnit] = useState("1");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const subLineOptions = useMemo(
+    () => [...new Set(inventoryItems.map((i) => i.subProductLine).filter((s): s is string => Boolean(s)))].sort(),
+    [inventoryItems]
+  );
+  const sizeOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const i of inventoryItems) {
+      if (subLine && i.subProductLine !== subLine) continue;
+      const s = extractUnitSize(i.product);
+      if (s !== "Other") set.add(s);
+    }
+    return [...set].sort();
+  }, [inventoryItems, subLine]);
+  const strainOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const i of inventoryItems) {
+      if (subLine && i.subProductLine !== subLine) continue;
+      const s = extractStrain(i.product);
+      if (s) set.add(s);
+    }
+    return [...set].sort();
+  }, [inventoryItems, subLine]);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/packaging/bom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          packagingItemId: itemId,
+          subProductLine: subLine,
+          unitSize: unitSize || null,
+          strain: strain || null,
+          qtyPerUnit: Number(qtyPerUnit) || 1
+        })
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Save failed.");
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="pkg-form-row" onSubmit={save}>
+      <div className="field"><label>Product family</label>
+        <select value={subLine} onChange={(e) => { setSubLine(e.target.value); setUnitSize(""); setStrain(""); }} required>
+          <option value="">Select sub-line…</option>
+          {subLineOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div className="field"><label>Size</label>
+        <select value={unitSize} onChange={(e) => setUnitSize(e.target.value)}>
+          <option value="">Any size</option>
+          {sizeOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div className="field"><label>Strain</label>
+        <select value={strain} onChange={(e) => setStrain(e.target.value)}>
+          <option value="">All strains</option>
+          {strainOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div className="field"><label>Qty / unit</label>
+        <input type="number" min={0.01} step="any" value={qtyPerUnit} onChange={(e) => setQtyPerUnit(e.target.value)} style={{ width: 90 }} />
+      </div>
+      <button className="primary-button" type="submit" disabled={saving || !subLine}>{saving ? "Saving…" : "Add Mapping"}</button>
+      {error ? <p className="form-error">{error}</p> : null}
+    </form>
+  );
+}
+
+function PackagingView({
+  packagingItems,
+  packagingBoms,
+  packagingLedger,
+  inventoryItems
+}: {
+  packagingItems: PackagingItem[];
+  packagingBoms: PackagingBomRow[];
+  packagingLedger: PackagingLedgerEntry[];
+  inventoryItems: InventoryItem[];
+}) {
+  const router = useRouter();
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [showAddItem, setShowAddItem] = useState(false);
+  const [editingItemId, setEditingItemId] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    setShowAddItem(false);
+    setEditingItemId(null);
+    router.refresh();
+  }, [router]);
+
+  function toggleExpanded(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  const activeItems = packagingItems.filter((i) => i.active);
+  const statsById = new Map(activeItems.map((i) => [i.id, pkgStats(i)]));
+  const needsReorder = activeItems.filter((i) => {
+    const s = statsById.get(i.id)!;
+    return (s.status === "out" || s.status === "reorder") && i.onOrderQty == null;
+  });
+  const onOrder = activeItems.filter((i) => i.onOrderQty != null);
+
+  // Group by vendor for rendering
+  const vendors = useMemo(() => {
+    const map = new Map<string, PackagingItem[]>();
+    for (const item of activeItems) {
+      const key = item.vendor || "No vendor";
+      const list = map.get(key);
+      if (list) list.push(item); else map.set(key, [item]);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [activeItems]);
+
+  async function deleteBomRow(id: string) {
+    const response = await fetch(`/api/packaging/bom?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (response.ok) router.refresh();
+  }
+
+  return (
+    <>
+      <div className="metrics orders-metrics">
+        <div className="metric">
+          <div className="metric-label">Packaging Items</div>
+          <div className="metric-value">{activeItems.length}</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Needs Reorder</div>
+          <div className="metric-value" style={needsReorder.length ? { color: "var(--danger, #ef4444)" } : undefined}>
+            {needsReorder.length}
+          </div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">On Order</div>
+          <div className="metric-value">{onOrder.length}</div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="pkg-toolbar">
+          <span className="table-meta">
+            Stock depletes automatically as new batches appear in Cultivera. Enter a count to set the baseline.
+          </span>
+          <button className="secondary-button" type="button" onClick={() => setShowAddItem((v) => !v)}>
+            {showAddItem ? "Close" : "+ Add Packaging Item"}
+          </button>
+        </div>
+        {showAddItem ? <PackagingItemForm onDone={refresh} /> : null}
+
+        {activeItems.length === 0 && !showAddItem ? (
+          <div style={{ padding: "32px 24px", textAlign: "center", color: "var(--muted)" }}>
+            No packaging items yet. Add jars, lids, tubes, labels, and vape hardware, map them to product
+            families, then enter a starting count for each.
+          </div>
+        ) : null}
+
+        {activeItems.length > 0 ? (
+          <div className="table-scroll">
+            <table className="data-table inv-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 24 }}></th>
+                  <th>Item</th>
+                  <th style={{ textAlign: "right" }}>On Hand</th>
+                  <th style={{ textAlign: "right" }}>Daily Use</th>
+                  <th style={{ textAlign: "right" }}>Days Left</th>
+                  <th style={{ textAlign: "right" }}>Lead Time</th>
+                  <th>On Order</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vendors.map(([vendor, items]) => (
+                  <Fragment key={vendor}>
+                    <tr className="pkg-vendor-row">
+                      <td colSpan={8}>{vendor}</td>
+                    </tr>
+                    {items.map((item) => {
+                      const stats = statsById.get(item.id)!;
+                      const isOpen = expanded.has(item.id);
+                      const itemBoms = packagingBoms.filter((b) => b.packagingItemId === item.id);
+                      const itemLedger = packagingLedger.filter((l) => l.packagingItemId === item.id).slice(0, 10);
+                      return (
+                        <Fragment key={item.id}>
+                          <tr className="inv-row" style={{ cursor: "pointer" }} onClick={() => toggleExpanded(item.id)}>
+                            <td style={{ color: "var(--muted)" }}>{isOpen ? "▾" : "▸"}</td>
+                            <td>
+                              <div className="inv-product-name">{item.name}</div>
+                              {itemBoms.length === 0 ? (
+                                <span className="table-meta" style={{ color: "#f59e0b" }}>No products mapped — won&apos;t deplete</span>
+                              ) : null}
+                            </td>
+                            <td style={{ textAlign: "right", fontWeight: 600 }}>{item.onHand.toLocaleString()}</td>
+                            <td style={{ textAlign: "right", color: "var(--muted)" }}>
+                              {stats.dailyUse > 0 ? stats.dailyUse.toFixed(1) : "—"}
+                            </td>
+                            <td style={{ textAlign: "right" }}>
+                              {stats.daysLeft != null ? (
+                                <span style={{ color: stats.daysLeft < item.leadTimeDays ? "var(--danger, #ef4444)" : stats.daysLeft < item.leadTimeDays + 14 ? "#f59e0b" : "inherit" }}>
+                                  {Math.round(stats.daysLeft)}d
+                                </span>
+                              ) : (
+                                <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>no usage</span>
+                              )}
+                            </td>
+                            <td style={{ textAlign: "right", color: "var(--muted)" }}>{item.leadTimeDays}d</td>
+                            <td>
+                              {item.onOrderQty != null ? (
+                                <span className="inv-badge inv-badge-low">
+                                  {item.onOrderQty.toLocaleString()}{item.onOrderEta ? ` · ETA ${formatShortDate(item.onOrderEta)}` : ""}
+                                </span>
+                              ) : (
+                                <span style={{ color: "var(--muted)" }}>—</span>
+                              )}
+                            </td>
+                            <td><PkgStatusBadge status={stats.status} daysLeft={stats.daysLeft} leadTimeDays={item.leadTimeDays} /></td>
+                          </tr>
+                          {isOpen ? (
+                            <tr className="pkg-expand-row">
+                              <td colSpan={8}>
+                                <div className="pkg-detail">
+                                  {editingItemId === item.id ? (
+                                    <PackagingItemForm item={item} onDone={refresh} />
+                                  ) : (
+                                    <div className="pkg-detail-actions">
+                                      <button className="secondary-button" type="button" onClick={() => setEditingItemId(item.id)}>Edit Item</button>
+                                      {item.notes ? <span className="table-meta">{item.notes}</span> : null}
+                                      {item.lastCountAt ? (
+                                        <span className="table-meta">Last counted {formatShortDate(item.lastCountAt)}</span>
+                                      ) : (
+                                        <span className="table-meta" style={{ color: "#f59e0b" }}>Never counted — enter a starting count</span>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  <div className="pkg-detail-section">
+                                    <div className="proc-section-label">Log Entry</div>
+                                    <PackagingLedgerForm itemId={item.id} onDone={refresh} />
+                                  </div>
+
+                                  <div className="pkg-detail-section">
+                                    <div className="proc-section-label">Reorder</div>
+                                    <PackagingOrderForm item={item} onDone={refresh} />
+                                  </div>
+
+                                  <div className="pkg-detail-section">
+                                    <div className="proc-section-label">Used By ({itemBoms.length})</div>
+                                    {itemBoms.map((bom) => (
+                                      <div key={bom.id} className="proc-item">
+                                        <span className="proc-item-name">
+                                          {bom.subProductLine}
+                                          {bom.unitSize ? ` · ${bom.unitSize}` : " · any size"}
+                                          {bom.strain ? ` · ${bom.strain}` : " · all strains"}
+                                        </span>
+                                        <span className="proc-item-units">×{bom.qtyPerUnit}</span>
+                                        <button
+                                          className="secondary-button"
+                                          type="button"
+                                          style={{ padding: "0 8px", fontSize: "0.75rem" }}
+                                          onClick={() => deleteBomRow(bom.id)}
+                                        >
+                                          Remove
+                                        </button>
+                                      </div>
+                                    ))}
+                                    <PackagingBomForm itemId={item.id} inventoryItems={inventoryItems} onDone={refresh} />
+                                  </div>
+
+                                  {itemLedger.length ? (
+                                    <div className="pkg-detail-section">
+                                      <div className="proc-section-label">Recent Activity</div>
+                                      {itemLedger.map((entry) => (
+                                        <div key={entry.id} className="proc-item">
+                                          <span className="proc-item-name">
+                                            {formatShortDate(entry.createdAt)} · {entry.entryType === "count" ? "Counted" : entry.entryType === "receive" ? "Received" : entry.entryType === "consume" ? "Used" : "Adjusted"}
+                                            {entry.note ? ` — ${entry.note}` : ""}
+                                          </span>
+                                          <span className="proc-item-units" style={{ fontWeight: 600 }}>
+                                            {entry.entryType === "count" ? `= ${entry.qty.toLocaleString()}` : entry.entryType === "consume" ? `-${entry.qty.toLocaleString()}` : entry.entryType === "receive" ? `+${entry.qty.toLocaleString()}` : `${entry.qty >= 0 ? "+" : ""}${entry.qty.toLocaleString()}`}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </div>
+    </>
+  );
+}
+
 function InventoryView({
   inventoryItems,
-  orderLines
+  orderLines,
+  packagingItems,
+  packagingBoms,
+  packagingLedger
 }: {
   inventoryItems: InventoryItem[];
   orderLines: OrderLine[];
+  packagingItems: PackagingItem[];
+  packagingBoms: PackagingBomRow[];
+  packagingLedger: PackagingLedgerEntry[];
 }) {
   const [mode, setMode] = useState<InvMode>("stock");
   const [sortKey, setSortKey] = useState<InvSortKey>("forSale");
@@ -3978,6 +4496,13 @@ function InventoryView({
             >
               Processing{processingRuns.length ? ` (${processingRuns.length})` : ""}
             </button>
+            <button
+              className={`secondary-button${mode === "packaging" ? " active-tab" : ""}`}
+              type="button"
+              onClick={() => setMode("packaging")}
+            >
+              Packaging
+            </button>
           </div>
 
           {mode === "stock" ? (
@@ -4021,7 +4546,7 @@ function InventoryView({
                 </select>
               </div>
             </>
-          ) : (
+          ) : mode === "processing" ? (
             <div className="field inv-lead-time-field">
               <label>Lead time (days)</label>
               <input
@@ -4033,7 +4558,7 @@ function InventoryView({
                 style={{ width: 72 }}
               />
             </div>
-          )}
+          ) : null}
 
           {lastSynced ? (
             <span className="table-meta inv-sync-date">Synced {formatDate(lastSynced)}</span>
@@ -4165,6 +4690,13 @@ function InventoryView({
             </div>
           </div>
         </>
+      ) : mode === "packaging" ? (
+        <PackagingView
+          packagingItems={packagingItems}
+          packagingBoms={packagingBoms}
+          packagingLedger={packagingLedger}
+          inventoryItems={inventoryItems}
+        />
       ) : (
         /* Processing mode */
         <div className="panel">
@@ -7323,6 +7855,9 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
           <InventoryView
             inventoryItems={snapshot.inventoryItems}
             orderLines={orderLines}
+            packagingItems={snapshot.packagingItems}
+            packagingBoms={snapshot.packagingBoms}
+            packagingLedger={snapshot.packagingLedger}
           />
         ) : activeView === "sync" ? (
           <SyncView
