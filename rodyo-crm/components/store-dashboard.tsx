@@ -3737,6 +3737,14 @@ function is3pSku(subProductLine: string | null | undefined): boolean {
 }
 
 type PkgStatus = "out" | "reorder" | "soon" | "ok" | "idle";
+type PkgSortKey = "name" | "brand" | "type" | "vendor" | "onHand" | "dailyUse" | "daysLeft" | "leadTime" | "onOrder" | "status";
+
+const PKG_BRAND_LABELS: Record<string, string> = {
+  ALL: "All brands",
+  KS: "K. Savage",
+  MF: "Mayfield",
+  LL: "Leisure Land"
+};
 
 // Days-of-stock and reorder status from ledger-derived usage. Usage window is
 // days since first-ever consumption, clamped to [7, 60], so a freshly tracked
@@ -3785,12 +3793,18 @@ function PkgStatusBadge({ status, daysLeft, leadTimeDays }: { status: PkgStatus;
 
 function PackagingItemForm({
   item,
+  asCopy = false,
+  copyBoms = [],
   onDone
 }: {
   item?: PackagingItem;
+  asCopy?: boolean;
+  copyBoms?: PackagingBomRow[];
   onDone: () => void;
 }) {
-  const [name, setName] = useState(item?.name ?? "");
+  const [name, setName] = useState(item ? (asCopy ? `${item.name} (copy)` : item.name) : "");
+  const [brand, setBrand] = useState(item?.brand ?? "");
+  const [itemType, setItemType] = useState(item?.itemType ?? "");
   const [vendor, setVendor] = useState(item?.vendor ?? "");
   const [leadTimeDays, setLeadTimeDays] = useState(String(item?.leadTimeDays ?? 14));
   const [reorderQty, setReorderQty] = useState(item?.reorderQty != null ? String(item.reorderQty) : "");
@@ -3808,20 +3822,37 @@ function PackagingItemForm({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: item?.id,
+          id: asCopy ? undefined : item?.id,
           name,
+          brand: brand || null,
+          itemType: itemType || null,
           vendor: vendor || null,
           leadTimeDays: Number(leadTimeDays) || 14,
           reorderQty: reorderQty !== "" ? Number(reorderQty) : null,
           parOverride: parOverride !== "" ? Number(parOverride) : null,
-          onOrderQty: item?.onOrderQty ?? null,
-          onOrderEta: item?.onOrderEta ?? null,
+          onOrderQty: asCopy ? null : item?.onOrderQty ?? null,
+          onOrderEta: asCopy ? null : item?.onOrderEta ?? null,
           notes: notes || null,
           active: item?.active ?? true
         })
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Save failed.");
+      if (asCopy && body.id) {
+        for (const bom of copyBoms) {
+          await fetch("/api/packaging/bom", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              packagingItemId: body.id,
+              subProductLine: bom.subProductLine,
+              unitSize: bom.unitSize,
+              strain: bom.strain,
+              qtyPerUnit: bom.qtyPerUnit
+            })
+          });
+        }
+      }
       onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed.");
@@ -3835,6 +3866,18 @@ function PackagingItemForm({
       <div className="pkg-form-row">
         <div className="field"><label>Item name</label>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. 3.5g glass jar" required />
+        </div>
+        <div className="field"><label>Brand</label>
+          <select value={brand} onChange={(e) => setBrand(e.target.value)}>
+            <option value="">—</option>
+            <option value="ALL">All brands</option>
+            <option value="KS">K. Savage</option>
+            <option value="MF">Mayfield</option>
+            <option value="LL">Leisure Land</option>
+          </select>
+        </div>
+        <div className="field"><label>Type</label>
+          <input value={itemType} onChange={(e) => setItemType(e.target.value)} placeholder="JAR, LABEL, BAG…" list="pkg-type-options" style={{ width: 110 }} />
         </div>
         <div className="field"><label>Vendor</label>
           <input value={vendor} onChange={(e) => setVendor(e.target.value)} placeholder="Vendor name" />
@@ -3853,9 +3896,14 @@ function PackagingItemForm({
         <div className="field" style={{ flex: 1 }}><label>Notes</label>
           <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Vendor SKU, case size, etc." />
         </div>
-        <button className="primary-button" type="submit" disabled={saving}>{saving ? "Saving…" : item ? "Save Item" : "Add Item"}</button>
+        <button className="primary-button" type="submit" disabled={saving}>
+          {saving ? "Saving…" : asCopy ? "Create Duplicate" : item ? "Save Item" : "Add Item"}
+        </button>
         <button className="secondary-button" type="button" onClick={onDone}>Cancel</button>
       </div>
+      {asCopy && copyBoms.length ? (
+        <p className="table-meta">Duplicates {copyBoms.length} product mapping{copyBoms.length === 1 ? "" : "s"} — adjust strain/size on the new item after saving.</p>
+      ) : null}
       {error ? <p className="form-error">{error}</p> : null}
     </form>
   );
@@ -4072,10 +4120,19 @@ function PackagingView({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAddItem, setShowAddItem] = useState(false);
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
+  const [duplicatingItemId, setDuplicatingItemId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [brandFilter, setBrandFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [vendorFilter, setVendorFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sortKey, setSortKey] = useState<PkgSortKey>("vendor");
+  const [sortDir, setSortDir] = useState<SortDirection>("asc");
 
   const refresh = useCallback(() => {
     setShowAddItem(false);
     setEditingItemId(null);
+    setDuplicatingItemId(null);
     router.refresh();
   }, [router]);
 
@@ -4088,23 +4145,86 @@ function PackagingView({
   }
 
   const activeItems = packagingItems.filter((i) => i.active);
-  const statsById = new Map(activeItems.map((i) => [i.id, pkgStats(i)]));
+  const statsById = useMemo(
+    () => new Map(activeItems.map((i) => [i.id, pkgStats(i)])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [packagingItems]
+  );
   const needsReorder = activeItems.filter((i) => {
     const s = statsById.get(i.id)!;
     return (s.status === "out" || s.status === "reorder") && i.onOrderQty == null;
   });
   const onOrder = activeItems.filter((i) => i.onOrderQty != null);
 
-  // Group by vendor for rendering
-  const vendors = useMemo(() => {
-    const map = new Map<string, PackagingItem[]>();
-    for (const item of activeItems) {
-      const key = item.vendor || "No vendor";
-      const list = map.get(key);
-      if (list) list.push(item); else map.set(key, [item]);
+  const brandOptions = useMemo(
+    () => [...new Set(activeItems.map((i) => i.brand).filter((b): b is string => Boolean(b)))].sort(),
+    [activeItems]
+  );
+  const typeOptions = useMemo(
+    () => [...new Set(activeItems.map((i) => i.itemType).filter((t): t is string => Boolean(t)))].sort(),
+    [activeItems]
+  );
+  const vendorOptions = useMemo(
+    () => [...new Set(activeItems.map((i) => i.vendor).filter((v): v is string => Boolean(v)))].sort(),
+    [activeItems]
+  );
+
+  const STATUS_RANK: Record<PkgStatus, number> = { out: 0, reorder: 1, soon: 2, ok: 3, idle: 4 };
+
+  const filtered = useMemo(() => {
+    let items = activeItems;
+    if (brandFilter !== "all") items = items.filter((i) => (i.brand ?? "") === brandFilter);
+    if (typeFilter !== "all") items = items.filter((i) => (i.itemType ?? "") === typeFilter);
+    if (vendorFilter !== "all") items = items.filter((i) => (i.vendor ?? "") === vendorFilter);
+    if (statusFilter !== "all") items = items.filter((i) => statsById.get(i.id)!.status === statusFilter);
+    const q = search.trim().toLowerCase();
+    if (q) {
+      items = items.filter((i) =>
+        i.name.toLowerCase().includes(q) ||
+        (i.vendor ?? "").toLowerCase().includes(q) ||
+        (i.notes ?? "").toLowerCase().includes(q)
+      );
     }
-    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [activeItems]);
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...items].sort((a, b) => {
+      const sa = statsById.get(a.id)!;
+      const sb = statsById.get(b.id)!;
+      let diff = 0;
+      switch (sortKey) {
+        case "name": diff = a.name.localeCompare(b.name); break;
+        case "brand": diff = (a.brand ?? "").localeCompare(b.brand ?? ""); break;
+        case "type": diff = (a.itemType ?? "").localeCompare(b.itemType ?? ""); break;
+        case "vendor": diff = (a.vendor ?? "￿").localeCompare(b.vendor ?? "￿"); break;
+        case "onHand": diff = a.onHand - b.onHand; break;
+        case "dailyUse": diff = sa.dailyUse - sb.dailyUse; break;
+        case "daysLeft": diff = (sa.daysLeft ?? Infinity) - (sb.daysLeft ?? Infinity); break;
+        case "leadTime": diff = a.leadTimeDays - b.leadTimeDays; break;
+        case "onOrder": diff = (a.onOrderQty ?? 0) - (b.onOrderQty ?? 0); break;
+        case "status": diff = STATUS_RANK[sa.status] - STATUS_RANK[sb.status]; break;
+      }
+      if (diff === 0) diff = a.name.localeCompare(b.name);
+      return diff * dir;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeItems, statsById, brandFilter, typeFilter, vendorFilter, statusFilter, search, sortKey, sortDir]);
+
+  function setSort(key: PkgSortKey) {
+    if (sortKey === key) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(key);
+      setSortDir(key === "name" || key === "brand" || key === "type" || key === "vendor" || key === "status" ? "asc" : "desc");
+    }
+  }
+
+  function thBtn(key: PkgSortKey, label: string) {
+    return (
+      <button className="sort-header" type="button" onClick={() => setSort(key)}>
+        {label}
+        {sortKey === key ? <span className="sort-indicator">{sortDir === "asc" ? "▲" : "▼"}</span> : null}
+      </button>
+    );
+  }
 
   async function deleteBomRow(id: string) {
     const response = await fetch(`/api/packaging/bom?id=${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -4132,13 +4252,49 @@ function PackagingView({
 
       <div className="panel">
         <div className="pkg-toolbar">
-          <span className="table-meta">
-            Stock depletes automatically as new batches appear in Cultivera. Enter a count to set the baseline.
-          </span>
+          <div className="field" style={{ flex: 1, minWidth: 160 }}>
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search item, vendor, SKUs…"
+            />
+          </div>
+          <div className="field">
+            <select value={brandFilter} onChange={(e) => setBrandFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
+              <option value="all">All Brands</option>
+              {brandOptions.map((b) => <option key={b} value={b}>{PKG_BRAND_LABELS[b] ?? b}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
+              <option value="all">All Types</option>
+              {typeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <select value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
+              <option value="all">All Vendors</option>
+              {vendorOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
+              <option value="all">All Statuses</option>
+              <option value="out">Out</option>
+              <option value="reorder">Reorder now</option>
+              <option value="soon">Reorder soon</option>
+              <option value="ok">OK</option>
+              <option value="idle">No data</option>
+            </select>
+          </div>
           <button className="secondary-button" type="button" onClick={() => setShowAddItem((v) => !v)}>
             {showAddItem ? "Close" : "+ Add Packaging Item"}
           </button>
         </div>
+        <datalist id="pkg-type-options">
+          {typeOptions.map((t) => <option key={t} value={t} />)}
+        </datalist>
         {showAddItem ? <PackagingItemForm onDone={refresh} /> : null}
 
         {activeItems.length === 0 && !showAddItem ? (
@@ -4154,22 +4310,20 @@ function PackagingView({
               <thead>
                 <tr>
                   <th style={{ width: 24 }}></th>
-                  <th>Item</th>
-                  <th style={{ textAlign: "right" }}>On Hand</th>
-                  <th style={{ textAlign: "right" }}>Daily Use</th>
-                  <th style={{ textAlign: "right" }}>Days Left</th>
-                  <th style={{ textAlign: "right" }}>Lead Time</th>
-                  <th>On Order</th>
-                  <th>Status</th>
+                  <th>{thBtn("name", "Item")}</th>
+                  <th>{thBtn("brand", "Brand")}</th>
+                  <th>{thBtn("type", "Type")}</th>
+                  <th>{thBtn("vendor", "Vendor")}</th>
+                  <th style={{ textAlign: "right" }}>{thBtn("onHand", "On Hand")}</th>
+                  <th style={{ textAlign: "right" }}>{thBtn("dailyUse", "Daily Use")}</th>
+                  <th style={{ textAlign: "right" }}>{thBtn("daysLeft", "Days Left")}</th>
+                  <th style={{ textAlign: "right" }}>{thBtn("leadTime", "Lead Time")}</th>
+                  <th>{thBtn("onOrder", "On Order")}</th>
+                  <th>{thBtn("status", "Status")}</th>
                 </tr>
               </thead>
               <tbody>
-                {vendors.map(([vendor, items]) => (
-                  <Fragment key={vendor}>
-                    <tr className="pkg-vendor-row">
-                      <td colSpan={8}>{vendor}</td>
-                    </tr>
-                    {items.map((item) => {
+                {filtered.map((item) => {
                       const stats = statsById.get(item.id)!;
                       const isOpen = expanded.has(item.id);
                       const itemBoms = packagingBoms.filter((b) => b.packagingItemId === item.id);
@@ -4184,6 +4338,9 @@ function PackagingView({
                                 <span className="table-meta" style={{ color: "#f59e0b" }}>No products mapped — won&apos;t deplete</span>
                               ) : null}
                             </td>
+                            <td style={{ fontSize: "0.82rem" }}>{item.brand ? (PKG_BRAND_LABELS[item.brand] ?? item.brand) : <span style={{ color: "var(--muted)" }}>—</span>}</td>
+                            <td style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{item.itemType ?? "—"}</td>
+                            <td style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{item.vendor ?? "—"}</td>
                             <td style={{ textAlign: "right", fontWeight: 600 }}>{item.onHand.toLocaleString()}</td>
                             <td style={{ textAlign: "right", color: "var(--muted)" }}>
                               {stats.dailyUse > 0 ? stats.dailyUse.toFixed(1) : "—"}
@@ -4211,13 +4368,16 @@ function PackagingView({
                           </tr>
                           {isOpen ? (
                             <tr className="pkg-expand-row">
-                              <td colSpan={8}>
+                              <td colSpan={11}>
                                 <div className="pkg-detail">
                                   {editingItemId === item.id ? (
                                     <PackagingItemForm item={item} onDone={refresh} />
+                                  ) : duplicatingItemId === item.id ? (
+                                    <PackagingItemForm item={item} asCopy copyBoms={itemBoms} onDone={refresh} />
                                   ) : (
                                     <div className="pkg-detail-actions">
                                       <button className="secondary-button" type="button" onClick={() => setEditingItemId(item.id)}>Edit Item</button>
+                                      <button className="secondary-button" type="button" onClick={() => setDuplicatingItemId(item.id)}>Duplicate</button>
                                       {item.notes ? <span className="table-meta">{item.notes}</span> : null}
                                       {item.lastCountAt ? (
                                         <span className="table-meta">Last counted {formatShortDate(item.lastCountAt)}</span>
@@ -4283,8 +4443,13 @@ function PackagingView({
                         </Fragment>
                       );
                     })}
-                  </Fragment>
-                ))}
+                {!filtered.length ? (
+                  <tr>
+                    <td colSpan={11} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
+                      No packaging items match current filters.
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>

@@ -21,6 +21,8 @@ type LatestMonthBrandSummary = {
 export type PackagingItem = {
   id: string;
   name: string;
+  brand: string | null;
+  itemType: string | null;
   vendor: string | null;
   leadTimeDays: number;
   reorderQty: number | null;
@@ -678,7 +680,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
   // the || [] fallbacks keep the snapshot resilient)
   const { data: packagingItemData } = await supabase
     .from("packaging_items")
-    .select("id, name, vendor, lead_time_days, reorder_qty, par_override, on_order_qty, on_order_eta, notes, active, created_at")
+    .select("id, name, brand, item_type, vendor, lead_time_days, reorder_qty, par_override, on_order_qty, on_order_eta, notes, active, created_at")
     .order("vendor", { ascending: true })
     .order("name", { ascending: true });
   const { data: packagingOnHandData } = await supabase
@@ -692,6 +694,8 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     return {
       id: String(r.id),
       name: String(r.name ?? ""),
+      brand: r.brand ?? null,
+      itemType: r.item_type ?? null,
       vendor: r.vendor ?? null,
       leadTimeDays: Number(r.lead_time_days ?? 14),
       reorderQty: r.reorder_qty != null ? Number(r.reorder_qty) : null,

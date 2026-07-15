@@ -13,6 +13,8 @@ function createSupabaseAdminClient() {
 type ItemPayload = {
   id?: string;
   name?: string;
+  brand?: string | null;
+  itemType?: string | null;
   vendor?: string | null;
   leadTimeDays?: number;
   reorderQty?: number | null;
@@ -36,6 +38,8 @@ export async function POST(request: Request) {
 
   const record = {
     name,
+    brand: payload.brand ? String(payload.brand).trim().toUpperCase() || null : null,
+    item_type: payload.itemType ? String(payload.itemType).trim().toUpperCase() || null : null,
     vendor: payload.vendor ? String(payload.vendor).trim() || null : null,
     lead_time_days: Math.max(1, Math.round(Number(payload.leadTimeDays ?? 14)) || 14),
     reorder_qty: payload.reorderQty != null ? Number(payload.reorderQty) : null,
