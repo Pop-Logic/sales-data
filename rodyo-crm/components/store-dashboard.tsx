@@ -4460,6 +4460,107 @@ function PackagingView({
   );
 }
 
+function ValueBreakdownPanel({
+  metric,
+  items,
+  valuation
+}: {
+  metric: "wholesale" | "retail";
+  items: InventoryItem[];
+  valuation: (item: InventoryItem) => InventoryValuation;
+}) {
+  const groups = useMemo(() => {
+    type SkuRow = { size: string; units: number; value: number; estimated: boolean };
+    const map = new Map<string, { total: number; units: number; skus: Map<string, SkuRow> }>();
+    let unvalued = 0;
+    let grand = 0;
+    for (const item of items) {
+      const v = valuation(item);
+      const value = metric === "wholesale" ? v.wholesale : v.retail;
+      if (value == null) {
+        if (item.totalForSale > 0) unvalued += 1;
+        continue;
+      }
+      const groupKey = item.subProductLine ?? "Other";
+      const isBulk = groupKey.toLowerCase().startsWith("bulk");
+      const size = isBulk ? "bulk (g)" : extractUnitSize(item.product);
+      const group = map.get(groupKey) ?? { total: 0, units: 0, skus: new Map<string, SkuRow>() };
+      group.total += value;
+      group.units += item.totalForSale;
+      const sku = group.skus.get(size) ?? { size, units: 0, value: 0, estimated: false };
+      sku.units += item.totalForSale;
+      sku.value += value;
+      sku.estimated = sku.estimated || v.estimated;
+      group.skus.set(size, sku);
+      map.set(groupKey, group);
+      grand += value;
+    }
+    const sorted = [...map.entries()]
+      .map(([subLine, g]) => ({
+        subLine,
+        total: g.total,
+        units: g.units,
+        skus: [...g.skus.values()].sort((a, b) => b.value - a.value)
+      }))
+      .sort((a, b) => b.total - a.total);
+    return { sorted, grand, unvalued };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, metric]);
+
+  const fmt = (n: number, estimated = false) => `${estimated ? "~" : ""}$${Math.round(n).toLocaleString()}`;
+
+  return (
+    <div className="panel value-breakdown">
+      <div className="value-breakdown-title">
+        {metric === "wholesale" ? "Wholesale Value" : "Unrealized Revenue"} by product line
+        <span className="table-meta" style={{ marginLeft: 8 }}>
+          {fmt(groups.grand)} across current filters
+        </span>
+      </div>
+      <div className="value-breakdown-groups">
+        {groups.sorted.map((group) => {
+          const brand = parseProductBrand(group.subLine);
+          const pct = groups.grand > 0 ? (group.total / groups.grand) * 100 : 0;
+          return (
+            <div key={group.subLine} className="value-breakdown-group">
+              <div className="value-breakdown-header">
+                <span className="value-breakdown-name">
+                  {stripBrandPrefix(group.subLine) || group.subLine}
+                  {brand ? (
+                    <span
+                      className="sku-brand-badge"
+                      style={{ background: BRAND_DOT_COLORS[brand as BrandFilter] ?? "var(--muted)", marginLeft: 6 }}
+                    >
+                      {brand}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="table-meta">{pct.toFixed(0)}%</span>
+                <strong>{fmt(group.total)}</strong>
+              </div>
+              <div className="value-breakdown-bar">
+                <div className="value-breakdown-fill" style={{ width: `${Math.max(2, pct)}%` }} />
+              </div>
+              {group.skus.map((sku) => (
+                <div key={sku.size} className="proc-item">
+                  <span className="proc-item-name">{sku.size}</span>
+                  <span className="proc-item-units">{sku.units.toLocaleString()} {sku.size === "bulk (g)" ? "g" : "units"}</span>
+                  <span style={{ fontWeight: 600, fontSize: "0.85rem" }}>{fmt(sku.value, sku.estimated)}</span>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      {groups.unvalued > 0 ? (
+        <p className="table-meta" style={{ padding: "0 18px 12px" }}>
+          {groups.unvalued} in-stock product{groups.unvalued === 1 ? "" : "s"} with no SKU economics excluded (e.g. trim, fresh frozen).
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function InventoryView({
   inventoryItems,
   orderLines,
@@ -4484,6 +4585,7 @@ function InventoryView({
   const [strainFilter, setStrainFilter] = useState("all");
   const [subLineFilter, setSubLineFilter] = useState("all");
   const [leadTimeDays, setLeadTimeDays] = useState(21);
+  const [valueBreakdown, setValueBreakdown] = useState<"wholesale" | "retail" | null>(null);
 
   const processingRuns = useProcessingRuns(orderLines);
 
@@ -4759,7 +4861,7 @@ function InventoryView({
 
       {mode === "stock" ? (
         <>
-          <div className="metrics orders-metrics">
+          <div className="metrics orders-metrics inv-metrics">
             <div className="metric">
               <div className="metric-label">SKUs</div>
               <div className="metric-value">{metrics.total}</div>
@@ -4782,17 +4884,37 @@ function InventoryView({
             </div>
             {hasEconomics ? (
               <>
-                <div className="metric">
-                  <div className="metric-label">Wholesale Value</div>
+                <div
+                  className={`metric metric-clickable${valueBreakdown === "wholesale" ? " metric-active" : ""}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setValueBreakdown(valueBreakdown === "wholesale" ? null : "wholesale")}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setValueBreakdown(valueBreakdown === "wholesale" ? null : "wholesale"); } }}
+                >
+                  <div className="metric-label">Wholesale Value {valueBreakdown === "wholesale" ? "▾" : "▸"}</div>
                   <div className="metric-value">${Math.round(metrics.wholesaleValue).toLocaleString()}</div>
                 </div>
-                <div className="metric">
-                  <div className="metric-label">Unrealized Revenue</div>
+                <div
+                  className={`metric metric-clickable${valueBreakdown === "retail" ? " metric-active" : ""}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setValueBreakdown(valueBreakdown === "retail" ? null : "retail")}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setValueBreakdown(valueBreakdown === "retail" ? null : "retail"); } }}
+                >
+                  <div className="metric-label">Unrealized Revenue {valueBreakdown === "retail" ? "▾" : "▸"}</div>
                   <div className="metric-value">${Math.round(metrics.retailValue).toLocaleString()}</div>
                 </div>
               </>
             ) : null}
           </div>
+
+          {valueBreakdown ? (
+            <ValueBreakdownPanel
+              metric={valueBreakdown}
+              items={filtered}
+              valuation={valuation}
+            />
+          ) : null}
 
           <div className="panel">
             <div className="table-scroll">
