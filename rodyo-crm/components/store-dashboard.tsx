@@ -39,7 +39,17 @@ type ViewMode = "stores" | "map" | "orders" | "skus" | "goals" | "logs" | "sync"
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples" | "retail";
 type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "lastLog" | "group" | "rep" | "log";
 type LogSortKey = "date" | "store" | "rep" | "method";
-type SkuSortKey = "product" | "category" | "brand" | "units" | "revenue" | "stores" | "coverage" | "avgUnits" | "lastOrdered";
+type SkuSortKey = "product" | "category" | "size" | "brand" | "units" | "revenue" | "stores" | "coverage" | "avgUnits" | "lastOrdered";
+
+// Sort sizes by weight in grams; packs and unrecognized sizes sort last
+function sizeSortValue(size: string): number {
+  const m = size.match(/^(\d+(?:\.\d+)?)(g|mg|oz|ml)$/);
+  if (!m) return Infinity;
+  const n = Number(m[1]);
+  if (m[2] === "mg") return n / 1000;
+  if (m[2] === "oz") return n * 28;
+  return n;
+}
 type CatSortKey = "category" | "skuCount" | "units" | "revenue" | "stores" | "coverage";
 type SkuGroupMode = "sku" | "category";
 type SortDirection = "asc" | "desc";
@@ -5937,6 +5947,7 @@ function SkuAnalyticsView({
     key: string;
     product: string;
     category: string;
+    size: string;
     brand: string;
     units: number;
     revenue: number;
@@ -5975,6 +5986,7 @@ function SkuAnalyticsView({
         key,
         product: data.product,
         category: data.category,
+        size: extractUnitSize(data.product),
         brand: data.brand,
         units: data.units,
         revenue: data.revenue,
@@ -6033,6 +6045,7 @@ function SkuAnalyticsView({
       switch (skuSortKey) {
         case "product": diff = a.product.localeCompare(b.product); break;
         case "category": diff = a.category.localeCompare(b.category); break;
+        case "size": diff = sizeSortValue(a.size) - sizeSortValue(b.size) || a.size.localeCompare(b.size); break;
         case "brand": diff = a.brand.localeCompare(b.brand); break;
         case "units": diff = a.units - b.units; break;
         case "revenue": diff = a.revenue - b.revenue; break;
@@ -6219,7 +6232,7 @@ function SkuAnalyticsView({
       setSkuSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSkuSortKey(key);
-      setSkuSortDir(key === "product" || key === "category" || key === "brand" ? "asc" : "desc");
+      setSkuSortDir(key === "product" || key === "category" || key === "size" || key === "brand" ? "asc" : "desc");
     }
   }
 
@@ -6235,6 +6248,7 @@ function SkuAnalyticsView({
   const skuTableColumns: { key: SkuSortKey; label: string }[] = [
     { key: "product", label: "Product" },
     { key: "category", label: "Category" },
+    { key: "size", label: "Size" },
     { key: "brand", label: "Brand" },
     { key: "units", label: "Units" },
     { key: "revenue", label: "Revenue" },
@@ -6467,6 +6481,7 @@ function SkuAnalyticsView({
                       </div>
                     </td>
                     <td style={{ color: "var(--muted)", fontSize: "0.82rem" }}>{row.category}</td>
+                    <td style={{ fontSize: "0.82rem" }}>{row.size === "Other" ? <span style={{ color: "var(--muted)" }}>—</span> : row.size}</td>
                     <td>
                       <span
                         className="sku-brand-badge"
@@ -6492,7 +6507,7 @@ function SkuAnalyticsView({
                 ))}
                 {!sortedSkuRows.length ? (
                   <tr>
-                    <td colSpan={9} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
+                    <td colSpan={10} style={{ color: "var(--muted)", textAlign: "center", padding: "24px" }}>
                       No SKUs match the current filters.
                     </td>
                   </tr>
