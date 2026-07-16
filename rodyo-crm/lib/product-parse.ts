@@ -12,7 +12,8 @@ export function stripBrandPrefix(subProductLine: string | null): string {
 
 export function extractUnitSize(productName?: string | null): string {
   if (!productName) return "Other";
-  const weightMatch = productName.match(/\b(\d+(?:\.\d+)?)\s*(g|mg|oz|ml)\b/i);
+  // s? tolerates Cultivera typos like "28gs"
+  const weightMatch = productName.match(/\b(\d+(?:\.\d+)?)\s*(g|mg|oz|ml)s?\b/i);
   if (weightMatch) return `${weightMatch[1]}${weightMatch[2].toLowerCase()}`;
   const packMatch = productName.match(/\b(\d+)\s*[-]?\s*(?:pk|pack)\b/i);
   if (packMatch) return `${packMatch[1]}pk`;
@@ -35,13 +36,23 @@ export function extractStrain(productName?: string | null): string {
   }
 
   // Cultivera format: "[Product Type] - [Strain] - [Size] -"
-  // Take the last non-empty, non-size segment.
+  // Take the last non-empty, non-size segment. Data quirks handled:
+  // "28gs" (plural size), 'Angela "Littles"' (quoted grade qualifier),
+  // "Carbon Fiber- 14g" (glued dash keeps the size in the strain segment).
+  const SIZE_SEGMENT = /^\d+(?:\.\d+)?\s*(?:g|mg|oz|ml|pk|pack)s?(?:\s*\([^)]*\))?$/i;
+  const cleanSegment = (segment: string) =>
+    segment
+      .replace(/\s*-\s*\d+(?:\.\d+)?\s*(?:g|mg|oz|ml|pk|pack)s?(?:\s*\([^)]*\))?\s*$/i, "")
+      .replace(/\s*"[^"]*"\s*$/, "")
+      .trim();
   const parts = name.split(" - ").map((s) => s.trim()).filter((s) => s.length > 0);
   if (parts.length >= 2) {
-    while (parts.length > 1 && /^\d+(?:\.\d+)?\s*(?:g|mg|oz|ml|pk|pack)(?:\s*\([^)]*\))?$/i.test(parts[parts.length - 1])) {
+    while (parts.length > 1) {
+      const cleaned = cleanSegment(parts[parts.length - 1]);
+      if (cleaned && !SIZE_SEGMENT.test(cleaned)) return cleaned;
       parts.pop();
     }
-    return parts[parts.length - 1];
+    return cleanSegment(parts[0]) || parts[0];
   }
 
   // Fallback: strip product-type words
