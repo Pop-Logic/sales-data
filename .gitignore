@@ -9,3 +9,5 @@ Data/*.db
 venv/
 .venv/
 .vercel
+.security-scratch/
+tmp-security/
