@@ -2,6 +2,7 @@ import { unstable_cache } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
 import { TERRITORY_BRANDS, priorityFromScore, type ContactLog, type InventoryItem, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
+import { fetchSkuEconomics, type SkuEconomics } from "@/lib/sku-economics";
 
 // Cache tag for the dashboard snapshot. Write routes (order sync, contact logs,
 // buyer contacts, sales goals) call revalidateTag with this so a successful
@@ -66,6 +67,7 @@ export type DashboardSnapshot = {
   packagingItems: PackagingItem[];
   packagingBoms: PackagingBomRow[];
   packagingLedger: PackagingLedgerEntry[];
+  skuEconomics: SkuEconomics[];
   cultiveraLastSyncedAt?: string | null;
   metrics: {
     totalRetailers: number;
@@ -362,6 +364,7 @@ function demoSnapshot(): DashboardSnapshot {
     packagingItems: [],
     packagingBoms: [],
     packagingLedger: [],
+    skuEconomics: [],
     cultiveraLastSyncedAt: demoOrderLines[0]?.importedAt ?? null,
     metrics: summarize(stores)
   };
@@ -739,6 +742,15 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     createdAt: String(r.created_at ?? "")
   }));
 
+  // SKU economics from the BALACLAVA DISTRO DATA sheet (non-fatal — inventory
+  // valuation columns simply hide when the sheet is unreachable)
+  let skuEconomics: SkuEconomics[] = [];
+  try {
+    skuEconomics = await fetchSkuEconomics();
+  } catch (err) {
+    console.error("SKU economics fetch error:", err instanceof Error ? err.message : err);
+  }
+
   const { data: headsetSummaryData } = await supabase
     .from("headset_store_summary")
     .select("store_id, last_sale, units_30d, sales_30d");
@@ -844,6 +856,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     packagingItems,
     packagingBoms,
     packagingLedger,
+    skuEconomics,
     cultiveraLastSyncedAt,
     metrics: summarize(normalizedStores)
   };

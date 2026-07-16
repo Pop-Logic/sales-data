@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import type { DashboardSnapshot, PackagingItem, PackagingBomRow, PackagingLedgerEntry } from "@/lib/dashboard-data";
 import { extractStrain, extractUnitSize, stripBrandPrefix } from "@/lib/product-parse";
+import { valueInventory, type InventoryValuation, type SkuEconomics } from "@/lib/sku-economics";
 import {
   TERRITORY_BRANDS,
   TERRITORY_MAP_COLORS,
@@ -3678,7 +3679,7 @@ function HeadsetSyncPanel({ stores }: { stores: StoreRollup[] }) {
   );
 }
 
-type InvSortKey = "product" | "subLine" | "strain" | "forSale" | "allocated" | "inStock" | "batches" | "batchDate" | "daysOfStock" | "thc" | "status";
+type InvSortKey = "product" | "subLine" | "strain" | "forSale" | "allocated" | "inStock" | "wholesale" | "retail" | "batches" | "batchDate" | "daysOfStock" | "thc" | "status";
 type InvGroupFilter = "all" | "finished" | "3p" | "bulk";
 type InvMode = "stock" | "processing" | "packaging";
 
@@ -4464,13 +4465,15 @@ function InventoryView({
   orderLines,
   packagingItems,
   packagingBoms,
-  packagingLedger
+  packagingLedger,
+  skuEconomics
 }: {
   inventoryItems: InventoryItem[];
   orderLines: OrderLine[];
   packagingItems: PackagingItem[];
   packagingBoms: PackagingBomRow[];
   packagingLedger: PackagingLedgerEntry[];
+  skuEconomics: SkuEconomics[];
 }) {
   const [mode, setMode] = useState<InvMode>("stock");
   const [sortKey, setSortKey] = useState<InvSortKey>("forSale");
@@ -4554,6 +4557,25 @@ function InventoryView({
     return [...set].sort();
   }, [inventoryItems]);
 
+  // Wholesale (material cost) / retail (unrealized revenue) valuation of
+  // for-sale units, priced from the BALACLAVA DISTRO DATA SKU INPUT sheet
+  const valuationByProduct = useMemo(() => {
+    const map = new Map<string, InventoryValuation>();
+    if (!skuEconomics.length) return map;
+    for (const i of inventoryItems) {
+      map.set(
+        `${i.product}|${i.subProductLine}`,
+        valueInventory(i.product, i.subProductLine, i.totalForSale, skuEconomics)
+      );
+    }
+    return map;
+  }, [inventoryItems, skuEconomics]);
+  const hasEconomics = skuEconomics.length > 0;
+  const NO_VALUATION: InventoryValuation = { wholesale: null, retail: null, estimated: false };
+  function valuation(item: InventoryItem): InventoryValuation {
+    return valuationByProduct.get(`${item.product}|${item.subProductLine}`) ?? NO_VALUATION;
+  }
+
   function daysOfStock(item: InventoryItem): number | null {
     const vel = velocityMap.get(item.subProductLine ?? "");
     if (!vel || vel <= 0) return null;
@@ -4602,6 +4624,8 @@ function InventoryView({
         case "forSale": diff = a.totalForSale - b.totalForSale; break;
         case "allocated": diff = a.totalAllocated - b.totalAllocated; break;
         case "inStock": diff = a.totalInStock - b.totalInStock; break;
+        case "wholesale": diff = (valuation(a).wholesale ?? -1) - (valuation(b).wholesale ?? -1); break;
+        case "retail": diff = (valuation(a).retail ?? -1) - (valuation(b).retail ?? -1); break;
         case "batches": diff = a.batchCount - b.batchCount; break;
         case "batchDate": diff = (a.latestBatchDate ?? "").localeCompare(b.latestBatchDate ?? ""); break;
         case "daysOfStock": diff = (dA ?? -1) - (dB ?? -1); break;
@@ -4618,6 +4642,8 @@ function InventoryView({
     totalForSale: filtered.reduce((s, i) => s + i.totalForSale, 0),
     out: filtered.filter((i) => stockStatus(i) === "out").length,
     low: filtered.filter((i) => stockStatus(i) === "low").length,
+    wholesaleValue: filtered.reduce((s, i) => s + (valuation(i).wholesale ?? 0), 0),
+    retailValue: filtered.reduce((s, i) => s + (valuation(i).retail ?? 0), 0),
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [filtered]);
 
@@ -4754,6 +4780,18 @@ function InventoryView({
                 {metrics.low}
               </div>
             </div>
+            {hasEconomics ? (
+              <>
+                <div className="metric">
+                  <div className="metric-label">Wholesale Value</div>
+                  <div className="metric-value">${Math.round(metrics.wholesaleValue).toLocaleString()}</div>
+                </div>
+                <div className="metric">
+                  <div className="metric-label">Unrealized Revenue</div>
+                  <div className="metric-value">${Math.round(metrics.retailValue).toLocaleString()}</div>
+                </div>
+              </>
+            ) : null}
           </div>
 
           <div className="panel">
@@ -4767,6 +4805,12 @@ function InventoryView({
                     <th style={{ textAlign: "right" }}>{thBtn("forSale", "For Sale")}</th>
                     <th style={{ textAlign: "right" }}>{thBtn("allocated", "Allocated")}</th>
                     <th style={{ textAlign: "right" }}>{thBtn("inStock", "In Stock")}</th>
+                    {hasEconomics ? (
+                      <>
+                        <th style={{ textAlign: "right" }}>{thBtn("wholesale", "Wholesale $")}</th>
+                        <th style={{ textAlign: "right" }}>{thBtn("retail", "Retail $")}</th>
+                      </>
+                    ) : null}
                     <th style={{ textAlign: "right" }}>{thBtn("daysOfStock", "Days of Stock")}</th>
                     <th style={{ textAlign: "right" }}>{thBtn("thc", "Total THC%")}</th>
                     <th>{thBtn("batchDate", "Latest Batch")}</th>
@@ -4802,6 +4846,17 @@ function InventoryView({
                           {item.totalAllocated > 0 ? item.totalAllocated.toLocaleString() : "—"}
                         </td>
                         <td style={{ textAlign: "right" }}>{item.totalInStock.toLocaleString()}</td>
+                        {hasEconomics ? (() => {
+                          const v = valuation(item);
+                          const fmt = (n: number | null) =>
+                            n == null ? <span style={{ color: "var(--muted)" }}>—</span> : `${v.estimated ? "~" : ""}$${Math.round(n).toLocaleString()}`;
+                          return (
+                            <>
+                              <td style={{ textAlign: "right", color: "var(--muted)", fontSize: "0.82rem" }}>{fmt(v.wholesale)}</td>
+                              <td style={{ textAlign: "right", fontSize: "0.82rem" }}>{fmt(v.retail)}</td>
+                            </>
+                          );
+                        })() : null}
                         <td style={{ textAlign: "right" }}>
                           {days !== null ? (
                             <span style={{ color: days < 7 ? "var(--danger, #ef4444)" : days < 14 ? "#f59e0b" : "inherit" }}>
@@ -4845,7 +4900,7 @@ function InventoryView({
                   })}
                   {!filtered.length ? (
                     <tr>
-                      <td colSpan={groupFilter === "3p" ? 12 : 11} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
+                      <td colSpan={(groupFilter === "3p" ? 12 : 11) + (hasEconomics ? 2 : 0)} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
                         No products match current filters.
                       </td>
                     </tr>
@@ -8023,6 +8078,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
             packagingItems={snapshot.packagingItems}
             packagingBoms={snapshot.packagingBoms}
             packagingLedger={snapshot.packagingLedger}
+            skuEconomics={snapshot.skuEconomics}
           />
         ) : activeView === "sync" ? (
           <SyncView
