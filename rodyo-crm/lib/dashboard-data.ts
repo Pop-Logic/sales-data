@@ -681,14 +681,16 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
 
   // Packaging inventory (tables may not exist until the migration is applied —
   // the || [] fallbacks keep the snapshot resilient)
-  const { data: packagingItemData } = await supabase
+  const { data: packagingItemData, error: packagingItemError } = await supabase
     .from("packaging_items")
     .select("id, name, brand, item_type, vendor, lead_time_days, reorder_qty, par_override, on_order_qty, on_order_eta, notes, active, created_at")
     .order("vendor", { ascending: true })
     .order("name", { ascending: true });
-  const { data: packagingOnHandData } = await supabase
+  if (packagingItemError) console.error("packaging_items query error:", packagingItemError.message);
+  const { data: packagingOnHandData, error: packagingOnHandError } = await supabase
     .from("packaging_on_hand")
     .select("packaging_item_id, on_hand, last_count_at, consumed_60d, first_consume_at");
+  if (packagingOnHandError) console.error("packaging_on_hand query error:", packagingOnHandError.message);
   const onHandById = new Map(
     (packagingOnHandData || []).map((r) => [String(r.packaging_item_id), r])
   );
