@@ -3747,6 +3747,69 @@ function is3pSku(subProductLine: string | null | undefined): boolean {
     s.includes("diamond doobie") || s.includes("skybox");
 }
 
+// Drag-to-resize table columns. Attach tableRef to the <table>, spread the
+// pointer handler on <thead>, and render the returned colgroup. Widths are
+// captured from the DOM on first drag (so the initial auto layout is kept),
+// stored per column-count (filters can add/remove columns), and persisted.
+function useResizableColumns(storageKey: string, columnCount: number) {
+  const tableRef = useRef<HTMLTableElement | null>(null);
+  const [widthsByCount, setWidthsByCount] = useState<Record<number, number[]>>({});
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) setWidthsByCount(JSON.parse(raw));
+    } catch { /* ignore corrupt storage */ }
+  }, [storageKey]);
+
+  const widths = widthsByCount[columnCount] ?? null;
+
+  function onHeaderPointerDown(e: React.PointerEvent) {
+    const th = (e.target as HTMLElement).closest("th");
+    const table = tableRef.current;
+    if (!th || !table) return;
+    if (th.getBoundingClientRect().right - e.clientX > 8) return; // not on the edge handle
+    e.preventDefault();
+    e.stopPropagation();
+
+    const ths = [...table.querySelectorAll("thead th")] as HTMLElement[];
+    const index = ths.indexOf(th as HTMLElement);
+    if (index < 0) return;
+    const start = widths && widths.length === ths.length ? [...widths] : ths.map((el) => el.offsetWidth);
+    const startX = e.clientX;
+    const startWidth = start[index];
+    const count = ths.length;
+    const apply = (w: number[]) => setWidthsByCount((prev) => ({ ...prev, [count]: w }));
+    apply(start);
+
+    const onMove = (ev: PointerEvent) => {
+      const next = [...start];
+      next[index] = Math.max(56, startWidth + (ev.clientX - startX));
+      apply(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      // Swallow the click that follows the drag so the sort button doesn't fire
+      window.addEventListener("click", (ce) => { ce.stopPropagation(); ce.preventDefault(); }, { capture: true, once: true });
+      setWidthsByCount((prev) => {
+        try { localStorage.setItem(storageKey, JSON.stringify(prev)); } catch { /* ignore */ }
+        return prev;
+      });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  const colgroup = widths ? (
+    <colgroup>
+      {widths.map((w, i) => <col key={i} style={{ width: w }} />)}
+    </colgroup>
+  ) : null;
+
+  return { tableRef, widths, colgroup, onHeaderPointerDown };
+}
+
 type PkgStatus = "out" | "reorder" | "soon" | "ok" | "idle";
 type PkgSortKey = "name" | "brand" | "type" | "vendor" | "onHand" | "dailyUse" | "daysLeft" | "leadTime" | "onOrder" | "status";
 
@@ -4140,6 +4203,8 @@ function PackagingView({
   const [sortKey, setSortKey] = useState<PkgSortKey>("vendor");
   const [sortDir, setSortDir] = useState<SortDirection>("asc");
 
+  const pkgResize = useResizableColumns("rodyo-pkg-cols", 11);
+
   const refresh = useCallback(() => {
     setShowAddItem(false);
     setEditingItemId(null);
@@ -4317,8 +4382,13 @@ function PackagingView({
 
         {activeItems.length > 0 ? (
           <div className="table-scroll">
-            <table className="data-table inv-table">
-              <thead>
+            <table
+              className={`data-table inv-table resizable-cols${pkgResize.widths ? " cols-fixed" : ""}`}
+              ref={pkgResize.tableRef}
+              style={pkgResize.widths ? { tableLayout: "fixed" } : undefined}
+            >
+              {pkgResize.colgroup}
+              <thead onPointerDown={pkgResize.onHeaderPointerDown}>
                 <tr>
                   <th style={{ width: 24 }}></th>
                   <th>{thBtn("name", "Item")}</th>
@@ -4596,6 +4666,9 @@ function InventoryView({
   const [subLineFilter, setSubLineFilter] = useState("all");
   const [leadTimeDays, setLeadTimeDays] = useState(21);
   const [valueBreakdown, setValueBreakdown] = useState<"wholesale" | "retail" | null>(null);
+
+  const stockColCount = 11 + (groupFilter === "3p" ? 1 : 0) + (skuEconomics.length > 0 ? 2 : 0);
+  const stockResize = useResizableColumns("rodyo-inv-stock-cols", stockColCount);
 
   const processingRuns = useProcessingRuns(orderLines);
 
@@ -4928,8 +5001,13 @@ function InventoryView({
 
           <div className="panel">
             <div className="table-scroll">
-              <table className="data-table inv-table">
-                <thead>
+              <table
+                className={`data-table inv-table resizable-cols${stockResize.widths ? " cols-fixed" : ""}`}
+                ref={stockResize.tableRef}
+                style={stockResize.widths ? { tableLayout: "fixed" } : undefined}
+              >
+                {stockResize.colgroup}
+                <thead onPointerDown={stockResize.onHeaderPointerDown}>
                   <tr>
                     <th>{thBtn("product", "Product")}</th>
                     <th>{thBtn("subLine", "Sub-Line")}</th>

@@ -2380,6 +2380,36 @@ textarea {
   margin: 4px 0 0;
 }
 
+/* Resizable table columns */
+.resizable-cols th {
+  position: relative;
+}
+
+.resizable-cols th::after {
+  content: "";
+  position: absolute;
+  top: 18%;
+  right: 0;
+  width: 3px;
+  height: 64%;
+  border-radius: 2px;
+  background: var(--line, rgba(0,0,0,.12));
+  cursor: col-resize;
+}
+
+.resizable-cols th:hover::after {
+  background: var(--blue, #378add);
+}
+
+/* Once custom widths are set, cell width governs truncation */
+.cols-fixed td {
+  overflow: hidden;
+}
+
+.cols-fixed .inv-product-name {
+  max-width: none;
+}
+
 /* Inventory value breakdown */
 .inv-metrics {
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
