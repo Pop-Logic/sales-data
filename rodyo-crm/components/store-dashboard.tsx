@@ -4153,8 +4153,11 @@ function PackagingLedgerForm({ itemId, onDone }: { itemId: string; onDone: () =>
 }
 
 function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () => void }) {
-  const [qty, setQty] = useState(item.reorderQty != null ? String(item.reorderQty) : "");
-  const [dateOrdered, setDateOrdered] = useState(localDateInputValue());
+  const hasActiveOrder = item.onOrderQty != null;
+  const [qty, setQty] = useState(
+    item.onOrderQty != null ? String(item.onOrderQty) : item.reorderQty != null ? String(item.reorderQty) : ""
+  );
+  const [dateOrdered, setDateOrdered] = useState(item.onOrderEta || localDateInputValue());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -4206,8 +4209,10 @@ function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () 
           ETA {formatShortDate(projectedEta)} ({item.leadTimeDays}d lead time)
         </span>
       ) : null}
-      <button className="primary-button" type="submit" disabled={saving}>{saving ? "Saving…" : "Mark Ordered"}</button>
-      {item.onOrderQty != null ? (
+      <button className="primary-button" type="submit" disabled={saving}>
+        {saving ? "Saving…" : hasActiveOrder ? "Update Order" : "Mark Ordered"}
+      </button>
+      {hasActiveOrder ? (
         <button className="secondary-button" type="button" disabled={saving} onClick={() => save(false)}>Clear</button>
       ) : null}
       {error ? <p className="form-error">{error}</p> : null}
