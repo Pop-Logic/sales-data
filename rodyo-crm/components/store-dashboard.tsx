@@ -1395,6 +1395,15 @@ function localDateInputValue(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+// Adds days to a "YYYY-MM-DD" date using UTC arithmetic so the result isn't
+// shifted by the browser's local timezone.
+function addDaysIso(dateIso: string, days: number): string | null {
+  const date = new Date(`${dateIso}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 function localDateFromInput(value?: string | null) {
   const date = value ? new Date(`${value}T00:00:00`) : new Date();
   return Number.isNaN(date.getTime()) ? new Date() : date;
@@ -4145,9 +4154,11 @@ function PackagingLedgerForm({ itemId, onDone }: { itemId: string; onDone: () =>
 
 function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () => void }) {
   const [qty, setQty] = useState(item.reorderQty != null ? String(item.reorderQty) : "");
-  const [eta, setEta] = useState("");
+  const [dateOrdered, setDateOrdered] = useState(localDateInputValue());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const projectedEta = dateOrdered ? addDaysIso(dateOrdered, item.leadTimeDays) : null;
 
   async function save(markOrdered: boolean, event?: FormEvent) {
     event?.preventDefault();
@@ -4167,7 +4178,9 @@ function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () 
           notes: item.notes,
           active: item.active,
           onOrderQty: markOrdered ? Number(qty) || null : null,
-          onOrderEta: markOrdered ? eta || null : null
+          // Stored in the on_order_eta column, but represents the order date —
+          // the actual ETA is derived from this + the item's lead time.
+          onOrderEta: markOrdered ? dateOrdered || null : null
         })
       });
       const body = await response.json();
@@ -4185,9 +4198,14 @@ function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () 
       <div className="field"><label>Qty ordered</label>
         <input type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)} required style={{ width: 110 }} />
       </div>
-      <div className="field"><label>Expected arrival</label>
-        <input type="date" value={eta} onChange={(e) => setEta(e.target.value)} />
+      <div className="field"><label>Date Ordered</label>
+        <input type="date" value={dateOrdered} onChange={(e) => setDateOrdered(e.target.value)} />
       </div>
+      {projectedEta ? (
+        <span className="table-meta" style={{ paddingBottom: 10 }}>
+          ETA {formatShortDate(projectedEta)} ({item.leadTimeDays}d lead time)
+        </span>
+      ) : null}
       <button className="primary-button" type="submit" disabled={saving}>{saving ? "Saving…" : "Mark Ordered"}</button>
       {item.onOrderQty != null ? (
         <button className="secondary-button" type="button" disabled={saving} onClick={() => save(false)}>Clear</button>
@@ -4549,11 +4567,17 @@ function PackagingView({
                             </td>
                             <td style={{ textAlign: "right", color: "var(--muted)" }}>{item.leadTimeDays}d</td>
                             <td>
-                              {item.onOrderQty != null ? (
-                                <span className="inv-badge inv-badge-low">
-                                  {item.onOrderQty.toLocaleString()}{item.onOrderEta ? ` · ETA ${formatShortDate(item.onOrderEta)}` : ""}
-                                </span>
-                              ) : (
+                              {item.onOrderQty != null ? (() => {
+                                const eta = item.onOrderEta ? addDaysIso(item.onOrderEta, item.leadTimeDays) : null;
+                                return (
+                                  <span
+                                    className="inv-badge inv-badge-low"
+                                    title={item.onOrderEta ? `Ordered ${formatShortDate(item.onOrderEta)}` : undefined}
+                                  >
+                                    {item.onOrderQty.toLocaleString()}{eta ? ` · ETA ${formatShortDate(eta)}` : ""}
+                                  </span>
+                                );
+                              })() : (
                                 <span style={{ color: "var(--muted)" }}>—</span>
                               )}
                             </td>
