@@ -139,6 +139,13 @@ const DEFAULT_ROUTE_START = {
   latitude: 47.2529,
   longitude: -122.4443
 };
+// Warehouse — default final destination for planned trips
+const HOME_BASE = {
+  label: "Home Base",
+  address: "3303 S 35th St, Tacoma, WA 98409",
+  latitude: 47.2312928,
+  longitude: -122.479819
+};
 const GOOGLE_MAPS_ROUTE_STOP_LIMIT = 10;
 const ROUTE_LINE_SOURCE_ID = "trip-route-line-source";
 const ROUTE_LINE_CASING_LAYER_ID = "trip-route-line-casing";
@@ -249,7 +256,11 @@ function optimizeTripStores(stores: StoreRollup[], startLocation: Coordinates = 
   return ordered;
 }
 
-function estimatedTripMiles(stores: StoreRollup[], startLocation: Coordinates = DEFAULT_ROUTE_START) {
+function estimatedTripMiles(
+  stores: StoreRollup[],
+  startLocation: Coordinates = DEFAULT_ROUTE_START,
+  endLocation?: Coordinates | null
+) {
   let totalMiles = 0;
   let currentLocation: Coordinates = startLocation;
   stores.forEach((store) => {
@@ -257,6 +268,9 @@ function estimatedTripMiles(stores: StoreRollup[], startLocation: Coordinates = 
     totalMiles += milesBetween(currentLocation, nextLocation);
     currentLocation = nextLocation;
   });
+  if (endLocation && stores.length) {
+    totalMiles += milesBetween(currentLocation, endLocation);
+  }
   return totalMiles;
 }
 
@@ -286,26 +300,33 @@ function storeRouteQuery(store: StoreRollup) {
   return namedLocation || mapsCoordinate(store);
 }
 
-function googleMapsRouteUrl(stores: StoreRollup[], startLocation: RouteStart = DEFAULT_ROUTE_START) {
-  const routeStores = stores.slice(0, GOOGLE_MAPS_ROUTE_STOP_LIMIT);
+function googleMapsRouteUrl(
+  stores: StoreRollup[],
+  startLocation: RouteStart = DEFAULT_ROUTE_START,
+  finalDestination?: { address: string } | null
+) {
+  // With a fixed final destination every store is a waypoint (Google caps
+  // directions at 9 waypoints + destination); otherwise the last store ends
+  // the route.
+  const routeStores = stores.slice(0, finalDestination ? GOOGLE_MAPS_ROUTE_STOP_LIMIT - 1 : GOOGLE_MAPS_ROUTE_STOP_LIMIT);
   if (!routeStores.length) {
     return "";
   }
 
-  const destination = routeStores[routeStores.length - 1];
-  const waypointStores = routeStores.slice(0, -1);
+  const destination = finalDestination ? null : routeStores[routeStores.length - 1];
+  const waypointStores = finalDestination ? routeStores : routeStores.slice(0, -1);
   const params = new URLSearchParams({
     api: "1",
     origin: coordinateParam(startLocation),
-    destination: storeRouteQuery(destination),
+    destination: destination ? storeRouteQuery(destination) : finalDestination!.address,
     travelmode: "driving"
   });
-  if (destination.googlePlaceId) {
+  if (destination?.googlePlaceId) {
     params.set("destination_place_id", destination.googlePlaceId);
   }
   if (waypointStores.length) {
     params.set("waypoints", waypointStores.map(storeRouteQuery).join("|"));
-    if (waypointStores.every((store) => store.googlePlaceId)) {
+    if (!finalDestination && waypointStores.every((store) => store.googlePlaceId)) {
       params.set("waypoint_place_ids", waypointStores.map((store) => String(store.googlePlaceId)).join("|"));
     }
   }
@@ -316,13 +337,16 @@ function routeLineData(
   stores: StoreRollup[],
   startLocation: Coordinates = DEFAULT_ROUTE_START,
   roadCoordinates?: [number, number][] | null,
-  isLoadingRoadRoute = false
+  isLoadingRoadRoute = false,
+  endLocation?: Coordinates | null
 ) {
+  const stopCoordinates = stores
+    .filter(hasStoreCoordinates)
+    .map((store) => [Number(store.longitude), Number(store.latitude)]);
   const straightCoordinates = [
     [startLocation.longitude, startLocation.latitude],
-    ...stores
-      .filter(hasStoreCoordinates)
-      .map((store) => [Number(store.longitude), Number(store.latitude)])
+    ...stopCoordinates,
+    ...(endLocation && stopCoordinates.length ? [[endLocation.longitude, endLocation.latitude]] : [])
   ];
   const coordinates = isLoadingRoadRoute
     ? []
@@ -2032,12 +2056,14 @@ function StoreMap({
   stores,
   routeStart = DEFAULT_ROUTE_START,
   routeStores = [],
+  routeEnd = null,
   selectedStore,
   onSelect
 }: {
   stores: StoreRollup[];
   routeStart?: RouteStart;
   routeStores?: StoreRollup[];
+  routeEnd?: (Coordinates & { label: string }) | null;
   selectedStore?: StoreRollup;
   onSelect: (storeKeyValue: string) => void;
 }) {
@@ -2066,7 +2092,8 @@ function StoreMap({
       routeStores,
       routeStart,
       roadRouteCoordinates,
-      routeStopCoordinates.length > 0 && roadRouteCoordinates === undefined
+      routeStopCoordinates.length > 0 && roadRouteCoordinates === undefined,
+      routeEnd
     ),
     [
       roadRouteCoordinates,
@@ -2074,7 +2101,9 @@ function StoreMap({
       routeStart.latitude,
       routeStart.longitude,
       routeStoreSignature,
-      routeStopCoordinates.length
+      routeStopCoordinates.length,
+      routeEnd?.latitude,
+      routeEnd?.longitude
     ]
   );
 
@@ -2151,7 +2180,9 @@ function StoreMap({
       try {
         setRoadRouteCoordinates(await fetchRoadRouteCoordinates(
           routeStart,
-          routeStopCoordinates,
+          routeEnd
+            ? [...routeStopCoordinates, { latitude: routeEnd.latitude, longitude: routeEnd.longitude }]
+            : routeStopCoordinates,
           controller.signal
         ));
       } catch (error) {
@@ -2164,7 +2195,7 @@ function StoreMap({
     fetchRoadRoute();
 
     return () => controller.abort();
-  }, [routeCoordinateSignature, routeStart.latitude, routeStart.longitude]);
+  }, [routeCoordinateSignature, routeStart.latitude, routeStart.longitude, routeEnd?.latitude, routeEnd?.longitude]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -2328,7 +2359,7 @@ function StoreMap({
 
     addRouteMarker("start", "S", `Start: ${routeStart.label || "Custom start"}`, routeStart, "start");
     routeStops.forEach((store, index) => {
-      const isEnd = index === routeStops.length - 1;
+      const isEnd = !routeEnd && index === routeStops.length - 1;
       addRouteMarker(
         storeKey(store),
         isEnd ? "E" : String(index + 1),
@@ -2338,13 +2369,19 @@ function StoreMap({
         storeKey(store)
       );
     });
+    if (routeEnd) {
+      addRouteMarker("route-end", "H", `End: ${routeEnd.label}`, routeEnd, "end");
+    }
   }, [
     isMapReady,
     onSelect,
     routeStart.label,
     routeStart.latitude,
     routeStart.longitude,
-    routeStoreSignature
+    routeStoreSignature,
+    routeEnd?.label,
+    routeEnd?.latitude,
+    routeEnd?.longitude
   ]);
 
   useEffect(() => {
@@ -2592,6 +2629,7 @@ function TripPlanner({
   onStoreNameSaved: (storeId: string, storeName: string) => void;
 }) {
   const [routeStart, setRouteStart] = useState<RouteStart>(DEFAULT_ROUTE_START);
+  const [returnToHomeBase, setReturnToHomeBase] = useState(true);
   const [maxOffRouteMiles, setMaxOffRouteMiles] = useState(5);
   const [maxSuggestedStops, setMaxSuggestedStops] = useState(6);
   const [destinationRouteCoordinates, setDestinationRouteCoordinates] = useState<[number, number][] | null>(null);
@@ -2655,9 +2693,13 @@ function TripPlanner({
     orderedTripStores,
     routeStart
   ]);
-  const estimatedMiles = estimatedTripMiles(orderedTripStores, routeStart);
-  const routeUrl = googleMapsRouteUrl(orderedTripStores, routeStart);
-  const launchStopCount = Math.min(orderedTripStores.length, GOOGLE_MAPS_ROUTE_STOP_LIMIT);
+  const routeEnd = returnToHomeBase ? HOME_BASE : null;
+  const estimatedMiles = estimatedTripMiles(orderedTripStores, routeStart, routeEnd);
+  const routeUrl = googleMapsRouteUrl(orderedTripStores, routeStart, routeEnd);
+  const launchStopCount = Math.min(
+    orderedTripStores.length,
+    routeEnd ? GOOGLE_MAPS_ROUTE_STOP_LIMIT - 1 : GOOGLE_MAPS_ROUTE_STOP_LIMIT
+  );
   const tripBalaclava = orderedTripStores.reduce((total, store) => total + latestBalaclavaRevenue(store), 0);
   const tripMarket = orderedTripStores.reduce((total, store) => total + store.marketSalesLastMonth, 0);
   const selectedStoreKey = selectedStore ? storeKey(selectedStore) : "";
@@ -2721,7 +2763,9 @@ function TripPlanner({
       try {
         setDestinationRouteCoordinates(await fetchRoadRouteCoordinates(
           routeStart,
-          [storeCoordinates(destination)],
+          returnToHomeBase
+            ? [storeCoordinates(destination), { latitude: HOME_BASE.latitude, longitude: HOME_BASE.longitude }]
+            : [storeCoordinates(destination)],
           controller.signal
         ));
       } catch (error) {
@@ -2734,7 +2778,7 @@ function TripPlanner({
     fetchDestinationRoute();
 
     return () => controller.abort();
-  }, [destinationStore, routeStart.latitude, routeStart.longitude]);
+  }, [destinationStore, routeStart.latitude, routeStart.longitude, returnToHomeBase]);
 
   useEffect(() => {
     if (farthestRouteStoreKey && routeDestinationKey !== farthestRouteStoreKey) {
@@ -2756,6 +2800,7 @@ function TripPlanner({
             stores={mappedStores}
             routeStart={routeStart}
             routeStores={orderedTripStores}
+            routeEnd={routeEnd}
             selectedStore={selectedStore}
             onSelect={onSelectStore}
           />
@@ -2844,6 +2889,16 @@ function TripPlanner({
                   />
                 </div>
               </div>
+              <label className="check-option" style={{ marginTop: 2 }}>
+                <input
+                  type="checkbox"
+                  checked={returnToHomeBase}
+                  onChange={(e) => setReturnToHomeBase(e.target.checked)}
+                />
+                <span className="check-option-label">
+                  End at Home Base <span className="table-meta">({HOME_BASE.address})</span>
+                </span>
+              </label>
               <div className="route-setting-grid">
                 <div className="field">
                   <label>Off-route miles</label>
@@ -2906,7 +2961,7 @@ function TripPlanner({
                 <Trash2 size={15} /> Clear
               </button>
             </div>
-            {orderedTripStores.length > GOOGLE_MAPS_ROUTE_STOP_LIMIT ? (
+            {orderedTripStores.length > launchStopCount ? (
               <div className="trip-note">
                 Maps launch includes the first {launchStopCount.toLocaleString()} of{" "}
                 {orderedTripStores.length.toLocaleString()} planned stops.
@@ -2949,6 +3004,17 @@ function TripPlanner({
                   </li>
                 );
               })}
+              {returnToHomeBase && orderedTripStores.length ? (
+                <li className="trip-stop-row trip-home-row">
+                  <span className="trip-stop-index">H</span>
+                  <span className="trip-store-button" style={{ cursor: "default" }}>
+                    <strong>{HOME_BASE.label}</strong>
+                    <span className="trip-store-meta">
+                      <span className="trip-store-subtext">Final stop · {HOME_BASE.address}</span>
+                    </span>
+                  </span>
+                </li>
+              ) : null}
               {!orderedTripStores.length ? (
                 <li className="trip-empty">No stops selected.</li>
               ) : null}
