@@ -2380,6 +2380,14 @@ textarea {
   margin: 4px 0 0;
 }
 
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
 /* Resizable table columns */
 .resizable-cols th {
   position: relative;

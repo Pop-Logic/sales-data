@@ -10,6 +10,7 @@ import {
   Map as MapIcon,
   Pencil,
   Plus,
+  RefreshCw,
   SlidersHorizontal,
   Trash2,
   X
@@ -1340,6 +1341,51 @@ function useOrderSync() {
   }, [router]);
 
   return { syncState, syncMessage, syncOrders };
+}
+
+// Global "Sync All" — runs every automated source (Cultivera orders +
+// Cultivera inventory). Headset is CSV-upload only and has no auto-sync
+// endpoint, so it's intentionally not part of this.
+function useSyncAll() {
+  const router = useRouter();
+  const [syncAllState, setSyncAllState] = useState<SyncState>("idle");
+  const [syncAllMessage, setSyncAllMessage] = useState("");
+
+  const syncAll = useCallback(async () => {
+    setSyncAllState("syncing");
+    setSyncAllMessage("Syncing orders and inventory...");
+    const failures: string[] = [];
+    const parts: string[] = [];
+
+    try {
+      const res = await fetch("/api/sync-orders", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Orders sync failed.");
+      parts.push(`${Number(data.orderRows || 0).toLocaleString()} orders`);
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : "Orders sync failed.");
+    }
+
+    try {
+      const res = await fetch("/api/inventory/sync", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data?.error || "Inventory sync failed.");
+      parts.push(`${Number(data.total || 0).toLocaleString()} batches`);
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : "Inventory sync failed.");
+    }
+
+    if (failures.length) {
+      setSyncAllState("error");
+      setSyncAllMessage(failures.join(" · "));
+    } else {
+      setSyncAllState("success");
+      setSyncAllMessage(`Synced ${parts.join(" · ")}.`);
+    }
+    router.refresh();
+  }, [router]);
+
+  return { syncAllState, syncAllMessage, syncAll };
 }
 
 function localDateInputValue(date = new Date()) {
@@ -4908,10 +4954,11 @@ function InventoryView({
   if (!inventoryItems.length) {
     return (
       <section className="inv-view">
+        <InventorySyncPanel />
         <div className="panel" style={{ padding: "32px 24px", textAlign: "center" }}>
           <p style={{ color: "var(--muted)", marginBottom: 12 }}>No inventory data yet.</p>
           <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>
-            Go to Sync → Cultivera Inventory and upload the "Export Batches Currently in Stock" CSV.
+            Sync now above, or upload the "Export Batches Currently in Stock" CSV.
           </p>
         </div>
       </section>
@@ -4920,6 +4967,7 @@ function InventoryView({
 
   return (
     <section className="inv-view">
+      <InventorySyncPanel />
       <div className="panel inv-filter-panel">
         <div className="inv-filter-row">
           {/* Mode toggle */}
@@ -5439,7 +5487,11 @@ function SyncView({
       </section>
 
       <HeadsetSyncPanel stores={stores} />
-      <InventorySyncPanel />
+      <div className="panel" style={{ padding: "14px 18px" }}>
+        <span className="table-meta">
+          Cultivera Inventory sync moved to the top of the Inventory page.
+        </span>
+      </div>
     </section>
   );
 }
@@ -7750,6 +7802,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   const [selectedStoreKey, setSelectedStoreKey] = useState(() => (
     snapshot.stores[0] ? storeKey(snapshot.stores[0]) : ""
   ));
+  const { syncAllState, syncAllMessage, syncAll } = useSyncAll();
   const existingGroups = useMemo(() =>
     [...new Set(stores.map((s) => s.groupName).filter((g): g is string => Boolean(g)))].sort(),
     [stores]
@@ -8041,9 +8094,27 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
               <h2>{viewTitle}</h2>
               <div className="caption">{viewCaption}</div>
             </div>
-            <button className="primary-button" type="button" onClick={() => handleViewChange("map")}>
-              <MapIcon size={16} /> Launch Map
-            </button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {syncAllMessage ? (
+                <span
+                  className="table-meta"
+                  style={{ color: syncAllState === "error" ? "var(--danger, #ef4444)" : undefined, maxWidth: 320 }}
+                >
+                  {syncAllMessage}
+                </span>
+              ) : null}
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={syncAllState === "syncing"}
+                onClick={syncAll}
+              >
+                <RefreshCw size={15} className={syncAllState === "syncing" ? "spin" : undefined} /> {syncAllState === "syncing" ? "Syncing…" : "Sync All"}
+              </button>
+              <button className="primary-button" type="button" onClick={() => handleViewChange("map")}>
+                <MapIcon size={16} /> Launch Map
+              </button>
+            </div>
           </div>
 
           {activeView === "stores" || activeView === "map" ? (
