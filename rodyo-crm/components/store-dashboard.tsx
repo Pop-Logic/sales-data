@@ -4370,22 +4370,35 @@ function PackagingView({
   const activeItems = packagingItems.filter((i) => i.active);
 
   // Fallback usage signal: units per day implied by paid sales of each BOM's
-  // matched product over the last 90 days, run through qty_per_unit. Covers
-  // the gap where Cultivera hasn't shown a new batch since tracking began
-  // but the product is demonstrably still selling.
+  // matched product, run through qty_per_unit. Covers the gap where
+  // Cultivera hasn't shown a new batch since tracking began but the product
+  // is demonstrably still selling.
+  //
+  // Rate is units-sold ÷ days-since-the-earliest-sale-in-window, not ÷90 —
+  // a fixed 90-day divisor silently drags the rate toward zero for anything
+  // that isn't selling continuously across the whole window (e.g. 20 units
+  // sold within a 40-day span reads as ~0.2/day at ÷90 instead of the real
+  // ~0.5/day). Clamped to [7, 90] so a single very recent sale doesn't spike.
   const salesVelocityByItem = useMemo(() => {
     const cutoff = Date.now() - 90 * 86_400_000;
-    const soldUnitsByProduct = new Map<string, number>(); // sub_product_line|size|strain -> units
+    const byProduct = new Map<string, { units: number; earliestTs: number }>(); // sub_product_line|size|strain
     for (const line of orderLines) {
       if (!isPaidOrderLine(line)) continue;
-      if (orderTimestamp(line.submittedAt) < cutoff) continue;
+      const ts = orderTimestamp(line.submittedAt);
+      if (ts < cutoff) continue;
       if (!line.subProductLine) continue;
       const size = extractUnitSize(line.productName ?? "").toLowerCase();
       const strain = extractStrain(line.productName ?? "").toLowerCase();
       for (const sizeKey of [size, ""]) {
         for (const strainKey of [strain, ""]) {
           const key = `${line.subProductLine}|${sizeKey}|${strainKey}`;
-          soldUnitsByProduct.set(key, (soldUnitsByProduct.get(key) ?? 0) + line.units);
+          const existing = byProduct.get(key);
+          if (existing) {
+            existing.units += line.units;
+            existing.earliestTs = Math.min(existing.earliestTs, ts);
+          } else {
+            byProduct.set(key, { units: line.units, earliestTs: ts });
+          }
         }
       }
     }
@@ -4395,8 +4408,10 @@ function PackagingView({
       let unitsPerDay = 0;
       for (const bom of itemBoms) {
         const key = `${bom.subProductLine}|${(bom.unitSize ?? "").toLowerCase()}|${(bom.strain ?? "").toLowerCase()}`;
-        const sold = soldUnitsByProduct.get(key) ?? 0;
-        unitsPerDay += (sold / 90) * bom.qtyPerUnit;
+        const data = byProduct.get(key);
+        if (!data) continue;
+        const daysSpan = Math.min(90, Math.max(7, (Date.now() - data.earliestTs) / 86_400_000));
+        unitsPerDay += (data.units / daysSpan) * bom.qtyPerUnit;
       }
       if (unitsPerDay > 0) map.set(item.id, unitsPerDay);
     }
