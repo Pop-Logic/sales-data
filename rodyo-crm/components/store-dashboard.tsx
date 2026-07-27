@@ -3944,17 +3944,25 @@ const PKG_BRAND_LABELS: Record<string, string> = {
 // Days-of-stock and reorder status from ledger-derived usage. Usage window is
 // days since first-ever consumption, clamped to [7, 60], so a freshly tracked
 // item doesn't report an inflated daily rate.
-function pkgStats(item: PackagingItem): {
+// salesDailyUse: fallback estimate derived from paid order history (see
+// salesVelocityByItem in PackagingView) for when Cultivera hasn't shown a new
+// batch since tracking began — auto-consumption is real events only and can
+// go quiet for weeks on a product that's still selling normally.
+function pkgStats(item: PackagingItem, salesDailyUse = 0): {
   dailyUse: number;
   daysLeft: number | null;
   reorderPoint: number | null;
   status: PkgStatus;
+  estimated: boolean;
 } {
   let dailyUse = 0;
   if (item.firstConsumeAt && item.consumed60d > 0) {
     const sinceFirst = (Date.now() - new Date(item.firstConsumeAt).getTime()) / 86_400_000;
     dailyUse = item.consumed60d / Math.min(60, Math.max(7, sinceFirst));
   }
+  const estimated = dailyUse <= 0 && salesDailyUse > 0;
+  if (estimated) dailyUse = salesDailyUse;
+
   const daysLeft = dailyUse > 0 ? item.onHand / dailyUse : null;
   const reorderPoint = item.parOverride ?? (dailyUse > 0 ? dailyUse * (item.leadTimeDays + 14) : null);
 
@@ -3969,7 +3977,7 @@ function pkgStats(item: PackagingItem): {
   } else {
     status = "idle";
   }
-  return { dailyUse, daysLeft, reorderPoint, status };
+  return { dailyUse, daysLeft, reorderPoint, status, estimated };
 }
 
 function PkgStatusBadge({ status, daysLeft, leadTimeDays }: { status: PkgStatus; daysLeft: number | null; leadTimeDays: number }) {
@@ -4320,12 +4328,14 @@ function PackagingView({
   packagingItems,
   packagingBoms,
   packagingLedger,
-  inventoryItems
+  inventoryItems,
+  orderLines
 }: {
   packagingItems: PackagingItem[];
   packagingBoms: PackagingBomRow[];
   packagingLedger: PackagingLedgerEntry[];
   inventoryItems: InventoryItem[];
+  orderLines: OrderLine[];
 }) {
   const router = useRouter();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -4358,10 +4368,46 @@ function PackagingView({
   }
 
   const activeItems = packagingItems.filter((i) => i.active);
-  const statsById = useMemo(
-    () => new Map(activeItems.map((i) => [i.id, pkgStats(i)])),
+
+  // Fallback usage signal: units per day implied by paid sales of each BOM's
+  // matched product over the last 90 days, run through qty_per_unit. Covers
+  // the gap where Cultivera hasn't shown a new batch since tracking began
+  // but the product is demonstrably still selling.
+  const salesVelocityByItem = useMemo(() => {
+    const cutoff = Date.now() - 90 * 86_400_000;
+    const soldUnitsByProduct = new Map<string, number>(); // sub_product_line|size|strain -> units
+    for (const line of orderLines) {
+      if (!isPaidOrderLine(line)) continue;
+      if (orderTimestamp(line.submittedAt) < cutoff) continue;
+      if (!line.subProductLine) continue;
+      const size = extractUnitSize(line.productName ?? "").toLowerCase();
+      const strain = extractStrain(line.productName ?? "").toLowerCase();
+      for (const sizeKey of [size, ""]) {
+        for (const strainKey of [strain, ""]) {
+          const key = `${line.subProductLine}|${sizeKey}|${strainKey}`;
+          soldUnitsByProduct.set(key, (soldUnitsByProduct.get(key) ?? 0) + line.units);
+        }
+      }
+    }
+    const map = new Map<string, number>();
+    for (const item of activeItems) {
+      const itemBoms = packagingBoms.filter((b) => b.packagingItemId === item.id);
+      let unitsPerDay = 0;
+      for (const bom of itemBoms) {
+        const key = `${bom.subProductLine}|${(bom.unitSize ?? "").toLowerCase()}|${(bom.strain ?? "").toLowerCase()}`;
+        const sold = soldUnitsByProduct.get(key) ?? 0;
+        unitsPerDay += (sold / 90) * bom.qtyPerUnit;
+      }
+      if (unitsPerDay > 0) map.set(item.id, unitsPerDay);
+    }
+    return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [packagingItems]
+  }, [orderLines, packagingBoms, activeItems.length]);
+
+  const statsById = useMemo(
+    () => new Map(activeItems.map((i) => [i.id, pkgStats(i, salesVelocityByItem.get(i.id) ?? 0)])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [packagingItems, salesVelocityByItem]
   );
   const needsReorder = activeItems.filter((i) => {
     const s = statsById.get(i.id)!;
@@ -4560,13 +4606,16 @@ function PackagingView({
                             <td style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{item.itemType ?? "—"}</td>
                             <td style={{ fontSize: "0.82rem", color: "var(--muted)" }}>{item.vendor ?? "—"}</td>
                             <td style={{ textAlign: "right", fontWeight: 600 }}>{item.onHand.toLocaleString()}</td>
-                            <td style={{ textAlign: "right", color: "var(--muted)" }}>
-                              {stats.dailyUse > 0 ? stats.dailyUse.toFixed(1) : "—"}
+                            <td
+                              style={{ textAlign: "right", color: "var(--muted)" }}
+                              title={stats.estimated ? "Estimated from sales — no packaging events recorded yet" : undefined}
+                            >
+                              {stats.dailyUse > 0 ? `${stats.estimated ? "~" : ""}${stats.dailyUse.toFixed(1)}` : "—"}
                             </td>
-                            <td style={{ textAlign: "right" }}>
+                            <td style={{ textAlign: "right" }} title={stats.estimated ? "Estimated from sales — no packaging events recorded yet" : undefined}>
                               {stats.daysLeft != null ? (
                                 <span style={{ color: stats.daysLeft < item.leadTimeDays ? "var(--danger, #ef4444)" : stats.daysLeft < item.leadTimeDays + 14 ? "#f59e0b" : "inherit" }}>
-                                  {Math.round(stats.daysLeft)}d
+                                  {stats.estimated ? "~" : ""}{Math.round(stats.daysLeft)}d
                                 </span>
                               ) : (
                                 <span style={{ color: "var(--muted)", fontSize: "0.8rem" }}>no usage</span>
@@ -5271,6 +5320,7 @@ function InventoryView({
           packagingBoms={packagingBoms}
           packagingLedger={packagingLedger}
           inventoryItems={inventoryItems}
+          orderLines={orderLines}
         />
       ) : (
         /* Processing mode */
