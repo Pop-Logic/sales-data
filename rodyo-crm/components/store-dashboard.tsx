@@ -4174,6 +4174,8 @@ function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () 
         body: JSON.stringify({
           id: item.id,
           name: item.name,
+          brand: item.brand,
+          itemType: item.itemType,
           vendor: item.vendor,
           leadTimeDays: item.leadTimeDays,
           reorderQty: item.reorderQty,
