@@ -38,7 +38,7 @@ type StoreDashboardProps = {
   initialView?: string | null;
 };
 
-type ViewMode = "stores" | "map" | "orders" | "skus" | "goals" | "logs" | "sync" | "inventory";
+type ViewMode = "stores" | "map" | "orders" | "groups" | "skus" | "goals" | "logs" | "sync" | "inventory";
 type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples" | "retail";
 type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "lastLog" | "group" | "rep" | "log";
 type LogSortKey = "date" | "store" | "rep" | "method";
@@ -95,7 +95,7 @@ type ContactLogPatch = {
 type SyncState = "idle" | "syncing" | "success" | "error";
 
 function normalizeViewMode(value?: string | null): ViewMode {
-  return value === "map" || value === "orders" || value === "skus" || value === "goals" || value === "logs" || value === "sync" || value === "inventory" ? value : "stores";
+  return value === "map" || value === "orders" || value === "groups" || value === "skus" || value === "goals" || value === "logs" || value === "sync" || value === "inventory" ? value : "stores";
 }
 
 const defaultStoreFilters: StoreFilters = {
@@ -3814,6 +3814,338 @@ function OrdersView({
               </table>
             </div>
           ))}
+        </div>
+      </section>
+    </section>
+  );
+}
+
+const UNGROUPED_LABEL = "Ungrouped";
+
+type StoreGroupMemberSummary = {
+  key: string;
+  storeName: string;
+  license: string;
+  revenue: number;
+  units: number;
+  orderKeys: Set<string>;
+  lastOrderAt: string | null;
+};
+
+type StoreGroupSummary = {
+  groupName: string;
+  storeCount: number;
+  revenue: number;
+  units: number;
+  orderKeys: Set<string>;
+  lastOrderAt: string | null;
+  brands: Record<BrandFilter, number>;
+  members: StoreGroupMemberSummary[];
+};
+
+// Rolls paid order lines up to the store.groupName level (e.g. "Zips",
+// "Kush 21" chains) instead of individual stores. storeCount reflects the
+// full roster for that group regardless of the current filters; members
+// only include stores with at least one paid line inside the filtered range.
+function buildStoreGroupSummaries(stores: StoreRollup[], paidLines: OrderLine[]): StoreGroupSummary[] {
+  const groupByStoreKey = new Map<string, string>();
+  const storeCountByGroup = new Map<string, number>();
+  stores.forEach((store) => {
+    const groupName = store.groupName?.trim() || UNGROUPED_LABEL;
+    storeIdentityKeys(store).forEach((key) => groupByStoreKey.set(key, groupName));
+    storeCountByGroup.set(groupName, (storeCountByGroup.get(groupName) || 0) + 1);
+  });
+
+  const groups = new Map<string, StoreGroupSummary>();
+  const membersByGroup = new Map<string, Map<string, StoreGroupMemberSummary>>();
+
+  paidLines.forEach((line) => {
+    const lineStoreKey = orderLineStoreKey(line);
+    const groupName = orderLineStoreKeys(line)
+      .map((key) => groupByStoreKey.get(key))
+      .find((name): name is string => Boolean(name)) || UNGROUPED_LABEL;
+
+    const group = groups.get(groupName) || {
+      groupName,
+      storeCount: storeCountByGroup.get(groupName) || 0,
+      revenue: 0,
+      units: 0,
+      orderKeys: new Set<string>(),
+      lastOrderAt: null,
+      brands: { "K. Savage": 0, Mayfield: 0, "Leisure Land": 0 },
+      members: []
+    };
+    group.revenue += line.lineTotal;
+    group.units += line.units;
+    group.orderKeys.add(orderLineKey(line));
+    if (orderTimestamp(line.submittedAt) >= orderTimestamp(group.lastOrderAt)) {
+      group.lastOrderAt = line.submittedAt || group.lastOrderAt;
+    }
+    const brand = orderBrandValue(line);
+    if (TERRITORY_BRANDS.includes(brand as BrandFilter)) {
+      group.brands[brand as BrandFilter] += line.lineTotal;
+    }
+    groups.set(groupName, group);
+
+    const groupMembers = membersByGroup.get(groupName) || new Map<string, StoreGroupMemberSummary>();
+    const member = groupMembers.get(lineStoreKey) || {
+      key: lineStoreKey,
+      storeName: line.storeName,
+      license: line.license || line.licenseKey || "",
+      revenue: 0,
+      units: 0,
+      orderKeys: new Set<string>(),
+      lastOrderAt: null
+    };
+    member.revenue += line.lineTotal;
+    member.units += line.units;
+    member.orderKeys.add(orderLineKey(line));
+    if (orderTimestamp(line.submittedAt) >= orderTimestamp(member.lastOrderAt)) {
+      member.lastOrderAt = line.submittedAt || member.lastOrderAt;
+    }
+    groupMembers.set(lineStoreKey, member);
+    membersByGroup.set(groupName, groupMembers);
+  });
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      members: [...(membersByGroup.get(group.groupName)?.values() || [])]
+        .sort((left, right) => right.revenue - left.revenue)
+    }))
+    .sort((left, right) => right.revenue - left.revenue);
+}
+
+function GroupsView({
+  orderLines,
+  stores,
+  selectedStore,
+  onSelectStore
+}: {
+  orderLines: OrderLine[];
+  stores: StoreRollup[];
+  selectedStore?: StoreRollup;
+  onSelectStore: (key: string) => void;
+}) {
+  const [groupQuery, setGroupQuery] = useState("");
+  const [brandFilter, setBrandFilter] = useState("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [selectedGroupName, setSelectedGroupName] = useState<string | null>(null);
+
+  const bounds = useMemo(() => orderDateBounds(orderLines), [orderLines]);
+  const effectiveDateFrom = dateFrom || bounds.defaultFrom;
+  const effectiveDateTo = dateTo || bounds.defaultTo;
+
+  useEffect(() => {
+    setDateFrom("");
+    setDateTo("");
+  }, [bounds.defaultFrom, bounds.defaultTo]);
+
+  const selectedStoreKeys = useMemo(() => (
+    selectedStore ? new Set(storeIdentityKeys(selectedStore)) : new Set<string>()
+  ), [selectedStore]);
+  const storesByKey = useMemo(() => {
+    const byKey = new Map<string, StoreRollup>();
+    stores.forEach((store) => {
+      storeIdentityKeys(store).forEach((key) => byKey.set(key, store));
+    });
+    return byKey;
+  }, [stores]);
+
+  const baseOrderLines = useMemo(() => (
+    orderLines.filter((line) => orderBrandValue(line).toLowerCase() !== "bulk")
+  ), [orderLines]);
+  const brandOptions = useMemo(() => {
+    const dataBrands = [...new Set(baseOrderLines.map(orderBrandValue))]
+      .filter((brand) => !TERRITORY_BRANDS.includes(brand as BrandFilter))
+      .sort((left, right) => left.localeCompare(right));
+    return [...TERRITORY_BRANDS, ...dataBrands];
+  }, [baseOrderLines]);
+
+  const paidLines = useMemo(() => (
+    baseOrderLines.filter((line) => {
+      if (!isPaidOrderLine(line)) {
+        return false;
+      }
+      if (brandFilter !== "all" && orderBrandValue(line) !== brandFilter) {
+        return false;
+      }
+      return lineIsInsideDateRange(line, effectiveDateFrom, effectiveDateTo);
+    })
+  ), [baseOrderLines, brandFilter, effectiveDateFrom, effectiveDateTo]);
+
+  const groupSummaries = useMemo(() => buildStoreGroupSummaries(stores, paidLines), [stores, paidLines]);
+
+  const normalizedGroupQuery = groupQuery.trim().toLowerCase();
+  const filteredGroups = useMemo(() => (
+    normalizedGroupQuery
+      ? groupSummaries.filter((group) => group.groupName.toLowerCase().includes(normalizedGroupQuery))
+      : groupSummaries
+  ), [groupSummaries, normalizedGroupQuery]);
+
+  const activeGroupName = (selectedGroupName && filteredGroups.some((group) => group.groupName === selectedGroupName))
+    ? selectedGroupName
+    : filteredGroups[0]?.groupName || null;
+  const activeGroup = filteredGroups.find((group) => group.groupName === activeGroupName) || null;
+
+  const groupMetrics = useMemo(() => {
+    const revenue = paidLines.reduce((total, line) => total + line.lineTotal, 0);
+    const units = paidLines.reduce((total, line) => total + line.units, 0);
+    return {
+      revenue,
+      units,
+      orders: uniqueOrderCount(paidLines),
+      groups: groupSummaries.length,
+      latest: latestOrderDate(paidLines)
+    };
+  }, [paidLines, groupSummaries]);
+
+  return (
+    <section className="orders-view">
+      <div className="panel orders-filter-panel">
+        <div className="orders-action-row">
+          <div>
+            <span className="caption">Order rollups by store group</span>
+          </div>
+        </div>
+        <div className="orders-filter-grid">
+          <div className="field">
+            <label>Group</label>
+            <input
+              type="search"
+              value={groupQuery}
+              onChange={(event) => setGroupQuery(event.target.value)}
+              placeholder="Group name"
+            />
+          </div>
+          <div className="field">
+            <label>Brand</label>
+            <select value={brandFilter} onChange={(event) => setBrandFilter(event.target.value)}>
+              <option value="all">All brands</option>
+              {brandOptions.map((brand) => (
+                <option key={brand} value={brand}>{brand}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label>From</label>
+            <input
+              max={bounds.max}
+              min={bounds.min}
+              type="date"
+              value={effectiveDateFrom}
+              onChange={(event) => setDateFrom(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label>To</label>
+            <input
+              max={bounds.max}
+              min={bounds.min}
+              type="date"
+              value={effectiveDateTo}
+              onChange={(event) => setDateTo(event.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      <section className="metrics orders-metrics">
+        <DetailStat label="Revenue" value={formatUsd(groupMetrics.revenue)} />
+        <DetailStat label="Orders" value={groupMetrics.orders.toLocaleString()} />
+        <DetailStat label="Units" value={Math.round(groupMetrics.units).toLocaleString()} />
+        <DetailStat label="Groups" value={groupMetrics.groups.toLocaleString()} />
+        <DetailStat label="Latest Order" value={formatDate(groupMetrics.latest)} />
+      </section>
+
+      <section className="orders-grid">
+        <div className="panel">
+          <div className="panel-header">
+            <h3>Group Activity</h3>
+            <span className="table-meta">{filteredGroups.length.toLocaleString()} groups</span>
+          </div>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Group</th>
+                  <th>Stores</th>
+                  <th>Orders</th>
+                  <th>Last Order</th>
+                  <th>Revenue</th>
+                  <th>Units</th>
+                  {TERRITORY_BRANDS.map((brand) => <th key={brand}>{brand}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredGroups.map((group) => (
+                  <tr
+                    className={group.groupName === activeGroupName ? "is-selected" : ""}
+                    key={group.groupName}
+                    onClick={() => setSelectedGroupName(group.groupName)}
+                  >
+                    <td>{group.groupName}</td>
+                    <td>{group.storeCount.toLocaleString()}</td>
+                    <td>{group.orderKeys.size.toLocaleString()}</td>
+                    <td>{formatDate(group.lastOrderAt)}</td>
+                    <td>{formatUsd(group.revenue)}</td>
+                    <td>{Math.round(group.units).toLocaleString()}</td>
+                    {TERRITORY_BRANDS.map((brand) => <td key={brand}>{formatUsd(group.brands[brand])}</td>)}
+                  </tr>
+                ))}
+                {!filteredGroups.length ? (
+                  <tr><td colSpan={9}>No group activity in this selection.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <h3>{activeGroup ? `${activeGroup.groupName} Stores` : "Select a group"}</h3>
+            <span className="table-meta">{(activeGroup?.members.length || 0).toLocaleString()} stores</span>
+          </div>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Store</th>
+                  <th>Orders</th>
+                  <th>Last Order</th>
+                  <th>Revenue</th>
+                  <th>Units</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(activeGroup?.members || []).map((member) => (
+                  <tr
+                    className={selectedStoreKeys.has(member.key) ? "is-selected" : ""}
+                    key={member.key}
+                    onClick={() => {
+                      const store = storesByKey.get(member.key);
+                      if (store) {
+                        onSelectStore(storeKey(store));
+                      }
+                    }}
+                  >
+                    <td>
+                      <div className="store-name">{member.storeName}</div>
+                      <div className="store-subtext">{member.license || "-"}</div>
+                    </td>
+                    <td>{member.orderKeys.size.toLocaleString()}</td>
+                    <td>{formatDate(member.lastOrderAt)}</td>
+                    <td>{formatUsd(member.revenue)}</td>
+                    <td>{Math.round(member.units).toLocaleString()}</td>
+                  </tr>
+                ))}
+                {!activeGroup?.members.length ? (
+                  <tr><td colSpan={5}>No store activity in this group.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
         </div>
       </section>
     </section>
@@ -8276,6 +8608,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? "Map"
     : activeView === "orders"
     ? "Orders"
+    : activeView === "groups"
+    ? "Store Groups"
     : activeView === "skus"
     ? "SKU Analytics"
     : activeView === "goals"
@@ -8291,6 +8625,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores · ${tripStoreKeys.length.toLocaleString()} stops planned`
     : activeView === "orders"
     ? `${orderLines.length.toLocaleString()} order lines · ${uniqueOrderCount(orderLines).toLocaleString()} orders`
+    : activeView === "groups"
+    ? `${existingGroups.length.toLocaleString()} named groups · order rollups by store group`
     : activeView === "skus"
     ? `${orderLines.filter(isPaidOrderLine).length.toLocaleString()} paid lines · sell-through by store coverage`
     : activeView === "goals"
@@ -8330,7 +8666,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   }, []);
 
   useEffect(() => {
-    const selectionScope = activeView === "orders" || activeView === "skus" || activeView === "goals" || activeView === "logs" || activeView === "sync" || activeView === "inventory" ? stores : sortedStores;
+    const selectionScope = activeView === "orders" || activeView === "groups" || activeView === "skus" || activeView === "goals" || activeView === "logs" || activeView === "sync" || activeView === "inventory" ? stores : sortedStores;
     if (!selectionScope.length) {
       setSelectedStoreKey("");
       return;
@@ -8495,6 +8831,9 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
           </a>
           <a className={activeView === "orders" ? "active" : ""} href="/?view=orders">
             Orders
+          </a>
+          <a className={activeView === "groups" ? "active" : ""} href="/?view=groups">
+            Store Groups
           </a>
           <a className={activeView === "skus" ? "active" : ""} href="/?view=skus">
             SKUs
@@ -8838,6 +9177,13 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
           <OrdersView
             orderLines={orderLines}
             cultiveraLastSyncedAt={cultiveraLastSyncedAt}
+            stores={stores}
+            selectedStore={selectedStore}
+            onSelectStore={handleStoreSelect}
+          />
+        ) : activeView === "groups" ? (
+          <GroupsView
+            orderLines={orderLines}
             stores={stores}
             selectedStore={selectedStore}
             onSelectStore={handleStoreSelect}
