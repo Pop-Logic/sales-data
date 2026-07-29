@@ -541,6 +541,129 @@ textarea {
   padding: 0 10px 10px;
 }
 
+.order-history {
+  display: grid;
+  gap: 8px;
+}
+
+.order-history-list {
+  display: grid;
+  gap: 6px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.order-history-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.order-history-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1fr) minmax(0, 0.8fr) auto auto;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+}
+
+.order-history-summary:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.order-history-date {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.order-history-number {
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-history-detail {
+  padding: 0 10px 10px;
+}
+
+.velocity-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.velocity-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.velocity-range-group {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.velocity-range-btn {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.velocity-range-btn.active {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--blue);
+}
+
+.velocity-chart {
+  display: grid;
+  gap: 4px;
+}
+
+.velocity-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.velocity-axis-label {
+  fill: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.velocity-axis-labels {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.7rem;
+  padding-left: 44px;
+}
+
+.velocity-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
 .map-popup {
   display: grid;
   gap: 3px;

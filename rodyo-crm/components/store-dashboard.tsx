@@ -1041,6 +1041,110 @@ function lineIsInsideDateRange(line: OrderLine, fromDate: string, toDate: string
   return lineDate >= start && lineDate <= end;
 }
 
+type StoreOrderSummary = {
+  key: string;
+  orderNumber: string;
+  submittedAt: string | null;
+  status: string;
+  brand: string;
+  units: number;
+  revenue: number;
+  lines: OrderLine[];
+};
+
+function groupOrderLinesByOrder(lines: OrderLine[]): StoreOrderSummary[] {
+  const byOrder = new Map<string, StoreOrderSummary>();
+  lines.forEach((line) => {
+    const brand = orderBrandValue(line);
+    const key = orderLineKey(line);
+    const current = byOrder.get(key);
+    if (current) {
+      current.units += line.units;
+      current.revenue += line.lineTotal;
+      current.lines.push(line);
+      if (orderTimestamp(line.submittedAt) > orderTimestamp(current.submittedAt)) {
+        current.submittedAt = line.submittedAt || current.submittedAt;
+      }
+      if (current.brand !== brand) {
+        current.brand = "Multiple";
+      }
+    } else {
+      byOrder.set(key, {
+        key,
+        orderNumber: line.orderNumber,
+        submittedAt: line.submittedAt || null,
+        status: orderStatusValue(line),
+        brand,
+        units: line.units,
+        revenue: line.lineTotal,
+        lines: [line]
+      });
+    }
+  });
+  return [...byOrder.values()].sort(
+    (left, right) => orderTimestamp(right.submittedAt) - orderTimestamp(left.submittedAt)
+  );
+}
+
+type StoreVelocityPoint = {
+  key: string;
+  label: string;
+  revenue: number;
+  units: number;
+};
+
+type VelocityRangeId = "90" | "180" | "365" | "all";
+
+const VELOCITY_RANGE_OPTIONS: { id: VelocityRangeId; label: string; days: number | null }[] = [
+  { id: "90", label: "90D", days: 90 },
+  { id: "180", label: "180D", days: 180 },
+  { id: "365", label: "1Y", days: 365 },
+  { id: "all", label: "All", days: null }
+];
+
+// Monday-of-week key, computed in UTC to match the rest of the date bucketing
+// (monthKeyFromDateValue et al.) so week and month buckets never drift a day apart.
+function weekKeyFromDateValue(value?: string | null) {
+  const dateValue = dateInputValue(value);
+  if (!dateValue) {
+    return "";
+  }
+  const date = new Date(`${dateValue}T00:00:00Z`);
+  const daysSinceMonday = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - daysSinceMonday);
+  return dateInputValue(date.toISOString());
+}
+
+// Weekly buckets for the shorter ranges (90D/180D), monthly once the range
+// stretches past that so the chart doesn't end up with 52+ bars.
+function buildStoreVelocitySeries(lines: OrderLine[], rangeDays: number | null): StoreVelocityPoint[] {
+  const cutoff = rangeDays ? Date.now() - rangeDays * 86_400_000 : 0;
+  const scoped = lines.filter((line) => isPaidOrderLine(line) && orderTimestamp(line.submittedAt) >= cutoff);
+  if (!scoped.length) {
+    return [];
+  }
+  const byWeek = rangeDays !== null && rangeDays <= 180;
+  const buckets = new Map<string, { revenue: number; units: number }>();
+  scoped.forEach((line) => {
+    const key = byWeek ? weekKeyFromDateValue(line.submittedAt) : monthKeyFromDateValue(line.submittedAt);
+    if (!key) {
+      return;
+    }
+    const current = buckets.get(key) || { revenue: 0, units: 0 };
+    current.revenue += line.lineTotal;
+    current.units += line.units;
+    buckets.set(key, current);
+  });
+  return [...buckets.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => ({
+      key,
+      label: byWeek ? shortDateLabel(key) : formatMonth(`${key}-01`),
+      revenue: value.revenue,
+      units: value.units
+    }));
+}
+
 type GoalWeek = {
   id: string;
   label: string;
@@ -7418,6 +7522,165 @@ function StoreNameEditor({
   );
 }
 
+function StoreVelocityChart({ points }: { points: StoreVelocityPoint[] }) {
+  const width = 340;
+  const height = 140;
+  const padding = { top: 10, right: 8, bottom: 20, left: 44 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const maxRevenue = Math.max(1, ...points.map((point) => point.revenue));
+  const barGap = 3;
+  const barWidth = Math.max(3, chartWidth / Math.max(1, points.length) - barGap);
+  const yForValue = (value: number) => padding.top + chartHeight - (value / maxRevenue) * chartHeight;
+  const ticks = [0, maxRevenue / 2, maxRevenue];
+
+  return (
+    <div className="velocity-chart">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Order velocity chart">
+        {ticks.map((tick) => (
+          <g key={tick}>
+            <line
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={yForValue(tick)}
+              y2={yForValue(tick)}
+              className="goal-grid-line"
+            />
+            <text x={padding.left - 8} y={yForValue(tick) + 4} textAnchor="end" className="velocity-axis-label">
+              {formatUsd(tick)}
+            </text>
+          </g>
+        ))}
+        {points.map((point, index) => {
+          const x = padding.left + index * (barWidth + barGap);
+          const barHeight = chartHeight - (yForValue(point.revenue) - padding.top);
+          return (
+            <rect
+              className="goal-daily-bar"
+              key={point.key}
+              x={x}
+              y={yForValue(point.revenue)}
+              width={barWidth}
+              height={Math.max(0, barHeight)}
+              rx={2}
+            >
+              <title>{`${point.label}: ${formatUsd(point.revenue)} · ${Math.round(point.units).toLocaleString()} units`}</title>
+            </rect>
+          );
+        })}
+      </svg>
+      {points.length ? (
+        <div className="velocity-axis-labels">
+          <span>{points[0].label}</span>
+          <span>{points[points.length - 1].label}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function StoreVelocityPanel({ orderLines }: { orderLines: OrderLine[] }) {
+  const [range, setRange] = useState<VelocityRangeId>("90");
+  const rangeDays = VELOCITY_RANGE_OPTIONS.find((option) => option.id === range)?.days ?? 90;
+  const byWeek = rangeDays !== null && rangeDays <= 180;
+  const points = useMemo(() => buildStoreVelocitySeries(orderLines, rangeDays), [orderLines, rangeDays]);
+  const totalRevenue = points.reduce((total, point) => total + point.revenue, 0);
+  const totalUnits = points.reduce((total, point) => total + point.units, 0);
+  const avgPerPeriod = points.length ? totalRevenue / points.length : 0;
+
+  return (
+    <div className="velocity-panel">
+      <div className="velocity-panel-header">
+        <span className="caption">Order Velocity</span>
+        <div className="velocity-range-group" role="tablist" aria-label="Velocity date range">
+          {VELOCITY_RANGE_OPTIONS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="tab"
+              aria-selected={range === option.id}
+              className={`velocity-range-btn${range === option.id ? " active" : ""}`}
+              onClick={() => setRange(option.id)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {points.length ? (
+        <>
+          <StoreVelocityChart points={points} />
+          <div className="velocity-summary">
+            <span>{formatUsd(totalRevenue)} total</span>
+            <span>{Math.round(totalUnits).toLocaleString()} units</span>
+            <span>{formatUsd(avgPerPeriod)} / {byWeek ? "wk" : "mo"} avg</span>
+          </div>
+        </>
+      ) : (
+        <p className="detail-note">No paid orders in this range.</p>
+      )}
+    </div>
+  );
+}
+
+function StoreOrderHistory({ orderLines }: { orderLines: OrderLine[] }) {
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const orders = useMemo(() => groupOrderLinesByOrder(orderLines.filter(isPaidOrderLine)), [orderLines]);
+
+  if (!orders.length) {
+    return <p className="detail-note">No paid orders on file for this store.</p>;
+  }
+
+  return (
+    <div className="order-history">
+      <div className="contact-log-history-title">Order history · {orders.length.toLocaleString()}</div>
+      <div className="order-history-list">
+        {orders.map((order) => {
+          const isOpen = expandedKey === order.key;
+          return (
+            <div className="order-history-item" key={order.key}>
+              <button
+                type="button"
+                className="order-history-summary"
+                aria-expanded={isOpen}
+                onClick={() => setExpandedKey(isOpen ? null : order.key)}
+              >
+                <span className="order-history-date">{formatShortDate(order.submittedAt)}</span>
+                <span className="order-history-number">{order.orderNumber}</span>
+                <span>{order.brand}</span>
+                <span>{formatUsd(order.revenue)}</span>
+                <span aria-hidden="true" className="contact-log-caret">{isOpen ? "▾" : "▸"}</span>
+              </button>
+              {isOpen ? (
+                <div className="order-history-detail">
+                  <table className="mini-table">
+                    <thead>
+                      <tr>
+                        <th>Product</th>
+                        <th>Units</th>
+                        <th>Sales</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {order.lines.map((line) => (
+                        <tr key={line.orderItemId}>
+                          <td>{line.productName || "-"}</td>
+                          <td>{line.units.toLocaleString()}</td>
+                          <td>{formatUsd(line.lineTotal)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function StoreDetailDrawer({
   selectedStore,
   activeTab,
@@ -7776,9 +8039,6 @@ function StoreDetailContent({
 }) {
   if (activeTab === "orders") {
     const paidLines = orderLines.filter(isPaidOrderLine);
-    const recentLines = [...paidLines]
-      .sort((left, right) => orderTimestamp(right.submittedAt) - orderTimestamp(left.submittedAt))
-      .slice(0, 8);
 
     return (
       <div className="detail-stack">
@@ -7797,30 +8057,8 @@ function StoreDetailContent({
           <DetailRow label="Mayfield active" value={formatUsd(store.mayfieldActiveRevenue)} />
           <DetailRow label="Leisure Land active" value={formatUsd(store.leisureLandActiveRevenue)} />
         </div>
-        {recentLines.length ? (
-          <table className="mini-table">
-            <thead>
-              <tr>
-                <th>Order</th>
-                <th>Brand</th>
-                <th>Product</th>
-                <th>Units</th>
-                <th>Sales</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentLines.map((line) => (
-                <tr key={line.orderItemId}>
-                  <td>{line.orderNumber}</td>
-                  <td>{line.brand}</td>
-                  <td>{line.productName || "-"}</td>
-                  <td>{line.units.toLocaleString()}</td>
-                  <td>{formatUsd(line.lineTotal)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : null}
+        <StoreVelocityPanel orderLines={orderLines} />
+        <StoreOrderHistory orderLines={orderLines} />
       </div>
     );
   }
