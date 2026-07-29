@@ -661,14 +661,31 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
 
   // Pre-Cultivera store history (K. Savage brand, from the "Balaclava Retail
   // Sales Data" Google Sheet) — only months before the sync cutover, so this
-  // never overlaps with orderLines above.
-  const { data: monthlyRevenueData } = await supabase
-    .from("monthly_revenue")
-    .select("store_id, revenue_month, revenue")
-    .lt("revenue_month", MONTHLY_REVENUE_CUTOFF)
-    .gt("revenue", 0);
+  // never overlaps with orderLines above. This table alone (2800+ matching
+  // rows across 528 stores x ~28 months) exceeds PostgREST's default 1000-row
+  // response cap, so it has to be paginated — a plain .select() here silently
+  // truncates to the first 1000 rows with no error, dropping whichever stores
+  // happen to sort last.
+  const monthlyRevenueRows: { store_id: string | null; revenue_month: string; revenue: number }[] = [];
+  const MONTHLY_REVENUE_PAGE_SIZE = 1000;
+  for (let offset = 0; ; offset += MONTHLY_REVENUE_PAGE_SIZE) {
+    const { data: page } = await supabase
+      .from("monthly_revenue")
+      .select("store_id, revenue_month, revenue")
+      .lt("revenue_month", MONTHLY_REVENUE_CUTOFF)
+      .gt("revenue", 0)
+      .order("id", { ascending: true })
+      .range(offset, offset + MONTHLY_REVENUE_PAGE_SIZE - 1);
+    if (!page || !page.length) {
+      break;
+    }
+    monthlyRevenueRows.push(...page);
+    if (page.length < MONTHLY_REVENUE_PAGE_SIZE) {
+      break;
+    }
+  }
 
-  const monthlyRevenue: MonthlyRevenuePoint[] = (monthlyRevenueData || [])
+  const monthlyRevenue: MonthlyRevenuePoint[] = monthlyRevenueRows
     .filter((row) => storeKeys.has(String(row.store_id || "")))
     .map((row) => ({
       storeId: String(row.store_id),

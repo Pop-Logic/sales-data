@@ -23,6 +23,7 @@ import {
   TERRITORY_BRANDS,
   TERRITORY_MAP_COLORS,
   formatUsd,
+  formatUsdCompact,
   isStoreOverdue,
   overdueColor,
   type ContactLog,
@@ -7967,19 +7968,49 @@ function StoreNameEditor({
 }
 
 function StoreVelocityChart({ points }: { points: StoreVelocityPoint[] }) {
-  const width = 340;
-  const height = 140;
-  const padding = { top: 10, right: 8, bottom: 20, left: 44 };
+  // The chart runs in two very different widths (a ~300px drawer panel and a
+  // full-width Store Groups panel). A fixed viewBox would get stretched by
+  // the `width: 100%` CSS and scale every stroke/font up with it — that's
+  // what caused the oversized, overflowing axis labels. Measuring the real
+  // container width and matching the viewBox to it keeps 1 SVG unit = 1px
+  // regardless of where this renders.
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(340);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) {
+      return;
+    }
+    const observer = new ResizeObserver((entries) => {
+      const measured = entries[0]?.contentRect.width;
+      if (measured) {
+        setWidth(Math.max(260, Math.round(measured)));
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const height = 180;
+  const padding = { top: 12, right: 12, bottom: 28, left: 60 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   const maxRevenue = Math.max(1, ...points.map((point) => point.revenue));
-  const barGap = 3;
+  const barGap = 4;
   const barWidth = Math.max(3, chartWidth / Math.max(1, points.length) - barGap);
   const yForValue = (value: number) => padding.top + chartHeight - (value / maxRevenue) * chartHeight;
   const ticks = [0, maxRevenue / 2, maxRevenue];
+  // Thin x-axis labels so they don't collide once bars get narrow (e.g. "All"
+  // on a long-running group with 28+ monthly bars) — roughly one per 46px.
+  const labelStep = Math.max(1, Math.ceil(46 / Math.max(1, barWidth + barGap)));
+  const hovered = hoveredIndex !== null ? points[hoveredIndex] : undefined;
+  const hoveredX = hoveredIndex !== null ? padding.left + hoveredIndex * (barWidth + barGap) + barWidth / 2 : 0;
+  const hoveredY = hovered ? yForValue(hovered.revenue) : 0;
 
   return (
-    <div className="velocity-chart">
+    <div className="velocity-chart" ref={containerRef}>
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Order velocity chart">
         {ticks.map((tick) => (
           <g key={tick}>
@@ -7991,7 +8022,7 @@ function StoreVelocityChart({ points }: { points: StoreVelocityPoint[] }) {
               className="goal-grid-line"
             />
             <text x={padding.left - 8} y={yForValue(tick) + 4} textAnchor="end" className="velocity-axis-label">
-              {formatUsd(tick)}
+              {formatUsdCompact(tick)}
             </text>
           </g>
         ))}
@@ -7999,28 +8030,44 @@ function StoreVelocityChart({ points }: { points: StoreVelocityPoint[] }) {
           const x = padding.left + index * (barWidth + barGap);
           const barHeight = chartHeight - (yForValue(point.revenue) - padding.top);
           return (
-            <rect
-              className="goal-daily-bar"
-              key={point.key}
-              x={x}
-              y={yForValue(point.revenue)}
-              width={barWidth}
-              height={Math.max(0, barHeight)}
-              rx={2}
-            >
-              <title>
-                {point.hasUnits
-                  ? `${point.label}: ${formatUsd(point.revenue)} · ${Math.round(point.units).toLocaleString()} units`
-                  : `${point.label}: ${formatUsd(point.revenue)} (pre-Cultivera, $ only)`}
-              </title>
-            </rect>
+            <g key={point.key}>
+              <rect
+                className={`goal-daily-bar${hoveredIndex === index ? " velocity-bar-hovered" : ""}`}
+                x={x}
+                y={yForValue(point.revenue)}
+                width={barWidth}
+                height={Math.max(0, barHeight)}
+                rx={2}
+              />
+              {index % labelStep === 0 ? (
+                <text x={x + barWidth / 2} y={height - 8} textAnchor="middle" className="velocity-axis-label">
+                  {point.label}
+                </text>
+              ) : null}
+              <rect
+                className="velocity-hover-target"
+                x={x - barGap / 2}
+                y={padding.top}
+                width={barWidth + barGap}
+                height={chartHeight}
+                fill="transparent"
+                onMouseEnter={() => setHoveredIndex(index)}
+                onMouseLeave={() => setHoveredIndex((current) => (current === index ? null : current))}
+              />
+            </g>
           );
         })}
       </svg>
-      {points.length ? (
-        <div className="velocity-axis-labels">
-          <span>{points[0].label}</span>
-          <span>{points[points.length - 1].label}</span>
+      {hovered ? (
+        <div
+          className="velocity-tooltip"
+          style={{ left: hoveredX, top: hoveredY }}
+        >
+          <div className="velocity-tooltip-label">{hovered.label}</div>
+          <div className="velocity-tooltip-value">{formatUsd(hovered.revenue)}</div>
+          <div className="velocity-tooltip-meta">
+            {hovered.hasUnits ? `${Math.round(hovered.units).toLocaleString()} units` : "pre-Cultivera, $ only"}
+          </div>
         </div>
       ) : null}
     </div>

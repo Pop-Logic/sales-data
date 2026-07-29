@@ -631,6 +631,7 @@ textarea {
 }
 
 .velocity-chart {
+  position: relative;
   display: grid;
   gap: 4px;
 }
@@ -647,12 +648,44 @@ textarea {
   font-weight: 700;
 }
 
-.velocity-axis-labels {
-  display: flex;
-  justify-content: space-between;
+.velocity-hover-target {
+  cursor: pointer;
+}
+
+.velocity-bar-hovered {
+  fill: rgba(55, 138, 221, 0.62);
+}
+
+.velocity-tooltip {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 10px));
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  z-index: 2;
+}
+
+.velocity-tooltip-label {
   color: var(--muted);
-  font-size: 0.7rem;
-  padding-left: 44px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.velocity-tooltip-value {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.velocity-tooltip-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .velocity-summary {

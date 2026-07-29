@@ -220,3 +220,14 @@ export function formatUsd(value: number) {
     maximumFractionDigits: 0
   }).format(value || 0);
 }
+
+// "$783K" / "$1.2M" — for tight spaces (chart axis ticks) where formatUsd's
+// full "$782,757" would overflow.
+export function formatUsdCompact(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: 1
+  }).format(value || 0);
+}
