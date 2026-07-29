@@ -1,7 +1,7 @@
 import { unstable_cache } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
-import { TERRITORY_BRANDS, priorityFromScore, type ContactLog, type InventoryItem, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
+import { MONTHLY_REVENUE_CUTOFF, TERRITORY_BRANDS, priorityFromScore, type ContactLog, type InventoryItem, type MonthlyRevenuePoint, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
 import { fetchSkuEconomics, type SkuEconomics } from "@/lib/sku-economics";
 
 // Cache tag for the dashboard snapshot. Write routes (order sync, contact logs,
@@ -61,6 +61,7 @@ export type DashboardSnapshot = {
   source: "demo" | "supabase";
   stores: StoreRollup[];
   orderLines: OrderLine[];
+  monthlyRevenue: MonthlyRevenuePoint[];
   salesGoals: SalesGoal[];
   contactLogs: ContactLog[];
   inventoryItems: InventoryItem[];
@@ -358,6 +359,7 @@ function demoSnapshot(): DashboardSnapshot {
     source: "demo",
     stores,
     orderLines: demoOrderLines,
+    monthlyRevenue: [],
     salesGoals: [],
     contactLogs: [],
     inventoryItems: [],
@@ -657,6 +659,23 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     });
   });
 
+  // Pre-Cultivera store history (K. Savage brand, from the "Balaclava Retail
+  // Sales Data" Google Sheet) — only months before the sync cutover, so this
+  // never overlaps with orderLines above.
+  const { data: monthlyRevenueData } = await supabase
+    .from("monthly_revenue")
+    .select("store_id, revenue_month, revenue")
+    .lt("revenue_month", MONTHLY_REVENUE_CUTOFF)
+    .gt("revenue", 0);
+
+  const monthlyRevenue: MonthlyRevenuePoint[] = (monthlyRevenueData || [])
+    .filter((row) => storeKeys.has(String(row.store_id || "")))
+    .map((row) => ({
+      storeId: String(row.store_id),
+      month: String(row.revenue_month),
+      revenue: Number(row.revenue ?? 0)
+    }));
+
   const { data: inventorySummaryData } = await supabase
     .from("cultivera_inventory_summary")
     .select("product, sub_product_line, category, sub_category, latest_batch_date, batch_count, total_for_sale, total_on_hold, total_allocated, total_in_stock, avg_thca, avg_total_thc, synced_at")
@@ -852,6 +871,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     source: "supabase",
     stores: normalizedStores,
     orderLines,
+    monthlyRevenue,
     salesGoals,
     contactLogs,
     inventoryItems,

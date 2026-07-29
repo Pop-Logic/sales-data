@@ -664,6 +664,11 @@ textarea {
   font-weight: 650;
 }
 
+.velocity-historical-note {
+  font-size: 0.72rem;
+  font-style: italic;
+}
+
 .map-popup {
   display: grid;
   gap: 3px;

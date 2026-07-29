@@ -111,6 +111,18 @@ export type OrderLine = {
   importedAt?: string | null;
 };
 
+// Cultivera order sync only covers submitted_at >= this date; store sales
+// data further back only exists in the "Balaclava Retail Sales Data" Google
+// Sheet (K. Savage brand only), backfilled into monthly_revenue. Velocity
+// views blend the two sources at this boundary rather than double-counting.
+export const MONTHLY_REVENUE_CUTOFF = "2026-05-01";
+
+export type MonthlyRevenuePoint = {
+  storeId: string;
+  month: string; // "YYYY-MM-DD", always the 1st of the month
+  revenue: number;
+};
+
 export type InventoryItem = {
   product: string;
   subProductLine: string | null;

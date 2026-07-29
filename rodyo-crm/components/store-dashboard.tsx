@@ -19,6 +19,7 @@ import type { DashboardSnapshot, PackagingItem, PackagingBomRow, PackagingLedger
 import { extractStrain, extractUnitSize, stripBrandPrefix } from "@/lib/product-parse";
 import { valueInventory, type InventoryValuation, type SkuEconomics } from "@/lib/sku-economics";
 import {
+  MONTHLY_REVENUE_CUTOFF,
   TERRITORY_BRANDS,
   TERRITORY_MAP_COLORS,
   formatUsd,
@@ -26,6 +27,7 @@ import {
   overdueColor,
   type ContactLog,
   type InventoryItem,
+  type MonthlyRevenuePoint,
   type OrderLine,
   type SalesGoal,
   type StoreRollup
@@ -1091,6 +1093,9 @@ type StoreVelocityPoint = {
   label: string;
   revenue: number;
   units: number;
+  // False for months sourced only from the pre-Cultivera sheet backfill,
+  // which never had a units breakdown — only a dollar total.
+  hasUnits: boolean;
 };
 
 type VelocityRangeId = "90" | "180" | "365" | "all";
@@ -1115,33 +1120,80 @@ function weekKeyFromDateValue(value?: string | null) {
   return dateInputValue(date.toISOString());
 }
 
-// Weekly buckets for the shorter ranges (90D/180D), monthly once the range
-// stretches past that so the chart doesn't end up with 52+ bars.
-function buildStoreVelocitySeries(lines: OrderLine[], rangeDays: number | null): StoreVelocityPoint[] {
-  const cutoff = rangeDays ? Date.now() - rangeDays * 86_400_000 : 0;
-  const scoped = lines.filter((line) => isPaidOrderLine(line) && orderTimestamp(line.submittedAt) >= cutoff);
-  if (!scoped.length) {
-    return [];
+// 90D stays weekly and order-line-only (Cultivera comfortably covers it).
+// 180D/1Y/All reach back before the Cultivera sync cutover, so they bucket
+// monthly and blend in the pre-cutover sheet backfill (monthlyRevenuePoints)
+// alongside order lines — weekly resolution isn't available before the cutover.
+function buildStoreVelocitySeries(
+  lines: OrderLine[],
+  monthlyRevenuePoints: MonthlyRevenuePoint[],
+  rangeDays: number | null
+): StoreVelocityPoint[] {
+  const rangeCutoffTimestamp = rangeDays ? Date.now() - rangeDays * 86_400_000 : 0;
+  const byWeek = rangeDays !== null && rangeDays <= 90;
+
+  if (byWeek) {
+    const scoped = lines.filter((line) => isPaidOrderLine(line) && orderTimestamp(line.submittedAt) >= rangeCutoffTimestamp);
+    const buckets = new Map<string, { revenue: number; units: number }>();
+    scoped.forEach((line) => {
+      const key = weekKeyFromDateValue(line.submittedAt);
+      if (!key) {
+        return;
+      }
+      const current = buckets.get(key) || { revenue: 0, units: 0 };
+      current.revenue += line.lineTotal;
+      current.units += line.units;
+      buckets.set(key, current);
+    });
+    return [...buckets.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => ({
+        key,
+        label: shortDateLabel(key),
+        revenue: value.revenue,
+        units: value.units,
+        hasUnits: true
+      }));
   }
-  const byWeek = rangeDays !== null && rangeDays <= 180;
-  const buckets = new Map<string, { revenue: number; units: number }>();
-  scoped.forEach((line) => {
-    const key = byWeek ? weekKeyFromDateValue(line.submittedAt) : monthKeyFromDateValue(line.submittedAt);
-    if (!key) {
-      return;
-    }
-    const current = buckets.get(key) || { revenue: 0, units: 0 };
-    current.revenue += line.lineTotal;
-    current.units += line.units;
-    buckets.set(key, current);
-  });
+
+  const cutoffTimestamp = orderTimestamp(MONTHLY_REVENUE_CUTOFF);
+  const buckets = new Map<string, { revenue: number; units: number; hasUnits: boolean }>();
+  lines
+    .filter((line) => (
+      isPaidOrderLine(line)
+      && orderTimestamp(line.submittedAt) >= Math.max(cutoffTimestamp, rangeCutoffTimestamp)
+    ))
+    .forEach((line) => {
+      const key = monthKeyFromDateValue(line.submittedAt);
+      if (!key) {
+        return;
+      }
+      const current = buckets.get(key) || { revenue: 0, units: 0, hasUnits: true };
+      current.revenue += line.lineTotal;
+      current.units += line.units;
+      current.hasUnits = true;
+      buckets.set(key, current);
+    });
+  monthlyRevenuePoints
+    .filter((point) => orderTimestamp(point.month) >= rangeCutoffTimestamp)
+    .forEach((point) => {
+      const key = monthKeyFromDateValue(point.month);
+      if (!key) {
+        return;
+      }
+      const current = buckets.get(key) || { revenue: 0, units: 0, hasUnits: false };
+      current.revenue += point.revenue;
+      buckets.set(key, current);
+    });
+
   return [...buckets.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => ({
       key,
-      label: byWeek ? shortDateLabel(key) : formatMonth(`${key}-01`),
+      label: formatMonth(`${key}-01`),
       revenue: value.revenue,
-      units: value.units
+      units: value.units,
+      hasUnits: value.hasUnits
     }));
 }
 
@@ -2749,6 +2801,7 @@ function TripLogModal({
 function TripPlanner({
   stores,
   orderLines,
+  monthlyRevenue,
   selectedStore,
   activeTab,
   setActiveTab,
@@ -2769,6 +2822,7 @@ function TripPlanner({
 }: {
   stores: StoreRollup[];
   orderLines: OrderLine[];
+  monthlyRevenue: MonthlyRevenuePoint[];
   selectedStore?: StoreRollup;
   activeTab: DetailTab;
   setActiveTab: (tab: DetailTab) => void;
@@ -2870,6 +2924,11 @@ function TripPlanner({
       ? orderLines.filter((line) => orderLineStoreKeys(line).some((key) => selectedStoreKeys.has(key)))
       : []
   ), [orderLines, selectedStoreKeys]);
+  const selectedStoreMonthlyRevenue = useMemo(() => (
+    selectedStore?.storeId
+      ? monthlyRevenue.filter((point) => point.storeId === selectedStore.storeId)
+      : []
+  ), [monthlyRevenue, selectedStore]);
   const canAddSelectedStore = Boolean(
     selectedStore && hasStoreCoordinates(selectedStore)
   );
@@ -2978,6 +3037,7 @@ function TripPlanner({
           onContactLogSaved={onContactLogSaved}
           onStoreNameSaved={onStoreNameSaved}
           orderLines={selectedStoreOrderLines}
+          monthlyRevenue={selectedStoreMonthlyRevenue}
           routeAction={selectedStore ? {
             disabled: !canAddSelectedStore,
             isAdded: isSelectedStoreInRoute,
@@ -7564,7 +7624,11 @@ function StoreVelocityChart({ points }: { points: StoreVelocityPoint[] }) {
               height={Math.max(0, barHeight)}
               rx={2}
             >
-              <title>{`${point.label}: ${formatUsd(point.revenue)} · ${Math.round(point.units).toLocaleString()} units`}</title>
+              <title>
+                {point.hasUnits
+                  ? `${point.label}: ${formatUsd(point.revenue)} · ${Math.round(point.units).toLocaleString()} units`
+                  : `${point.label}: ${formatUsd(point.revenue)} (pre-Cultivera, $ only)`}
+              </title>
             </rect>
           );
         })}
@@ -7579,14 +7643,27 @@ function StoreVelocityChart({ points }: { points: StoreVelocityPoint[] }) {
   );
 }
 
-function StoreVelocityPanel({ orderLines }: { orderLines: OrderLine[] }) {
+function StoreVelocityPanel({
+  orderLines,
+  monthlyRevenue
+}: {
+  orderLines: OrderLine[];
+  monthlyRevenue: MonthlyRevenuePoint[];
+}) {
   const [range, setRange] = useState<VelocityRangeId>("90");
-  const rangeDays = VELOCITY_RANGE_OPTIONS.find((option) => option.id === range)?.days ?? 90;
-  const byWeek = rangeDays !== null && rangeDays <= 180;
-  const points = useMemo(() => buildStoreVelocitySeries(orderLines, rangeDays), [orderLines, rangeDays]);
+  // "All" intentionally carries days: null — don't use `?? 90` here, it would
+  // coalesce that null right back to 90 and silently make "All" behave like 90D.
+  const selectedRangeOption = VELOCITY_RANGE_OPTIONS.find((option) => option.id === range);
+  const rangeDays = selectedRangeOption ? selectedRangeOption.days : 90;
+  const byWeek = rangeDays !== null && rangeDays <= 90;
+  const points = useMemo(
+    () => buildStoreVelocitySeries(orderLines, monthlyRevenue, rangeDays),
+    [orderLines, monthlyRevenue, rangeDays]
+  );
   const totalRevenue = points.reduce((total, point) => total + point.revenue, 0);
   const totalUnits = points.reduce((total, point) => total + point.units, 0);
   const avgPerPeriod = points.length ? totalRevenue / points.length : 0;
+  const hasHistoricalOnly = points.some((point) => !point.hasUnits);
 
   return (
     <div className="velocity-panel">
@@ -7615,9 +7692,14 @@ function StoreVelocityPanel({ orderLines }: { orderLines: OrderLine[] }) {
             <span>{Math.round(totalUnits).toLocaleString()} units</span>
             <span>{formatUsd(avgPerPeriod)} / {byWeek ? "wk" : "mo"} avg</span>
           </div>
+          {hasHistoricalOnly ? (
+            <p className="detail-note velocity-historical-note">
+              Months before May 2026 are $ totals from the Balaclava retail sales sheet (no unit breakdown).
+            </p>
+          ) : null}
         </>
       ) : (
-        <p className="detail-note">No paid orders in this range.</p>
+        <p className="detail-note">No sales data in this range.</p>
       )}
     </div>
   );
@@ -7692,6 +7774,7 @@ function StoreDetailDrawer({
   onContactLogSaved,
   onStoreNameSaved,
   orderLines = [],
+  monthlyRevenue = [],
   routeAction
 }: {
   selectedStore?: StoreRollup;
@@ -7704,6 +7787,7 @@ function StoreDetailDrawer({
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   onStoreNameSaved: (storeId: string, storeName: string) => void;
   orderLines?: OrderLine[];
+  monthlyRevenue?: MonthlyRevenuePoint[];
   routeAction?: {
     disabled: boolean;
     isAdded: boolean;
@@ -7767,6 +7851,7 @@ function StoreDetailDrawer({
           onServiceNoteSaved={onServiceNoteSaved}
           onContactLogSaved={onContactLogSaved}
           orderLines={orderLines}
+          monthlyRevenue={monthlyRevenue}
         />
       ) : null}
     </aside>
@@ -8026,7 +8111,8 @@ function StoreDetailContent({
   onGroupSaved,
   onServiceNoteSaved,
   onContactLogSaved,
-  orderLines = []
+  orderLines = [],
+  monthlyRevenue = []
 }: {
   activeTab: DetailTab;
   store: StoreRollup;
@@ -8036,6 +8122,7 @@ function StoreDetailContent({
   onServiceNoteSaved: (storeId: string, serviceNote: string | null) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   orderLines?: OrderLine[];
+  monthlyRevenue?: MonthlyRevenuePoint[];
 }) {
   if (activeTab === "orders") {
     const paidLines = orderLines.filter(isPaidOrderLine);
@@ -8057,7 +8144,7 @@ function StoreDetailContent({
           <DetailRow label="Mayfield active" value={formatUsd(store.mayfieldActiveRevenue)} />
           <DetailRow label="Leisure Land active" value={formatUsd(store.leisureLandActiveRevenue)} />
         </div>
-        <StoreVelocityPanel orderLines={orderLines} />
+        <StoreVelocityPanel orderLines={orderLines} monthlyRevenue={monthlyRevenue} />
         <StoreOrderHistory orderLines={orderLines} />
       </div>
     );
@@ -8122,6 +8209,7 @@ function StoreDetailContent({
 export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   const [stores, setStores] = useState(snapshot.stores);
   const orderLines = snapshot.orderLines || [];
+  const monthlyRevenue = snapshot.monthlyRevenue || [];
   const salesGoals = snapshot.salesGoals || [];
   const cultiveraLastSyncedAt = snapshot.cultiveraLastSyncedAt || null;
   const [storeQuery, setStoreQuery] = useState("");
@@ -8179,6 +8267,11 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
       ? orderLines.filter((line) => orderLineStoreKeys(line).some((key) => selectedStoreKeys.has(key)))
       : []
   ), [orderLines, selectedStoreKeys]);
+  const selectedStoreMonthlyRevenue = useMemo(() => (
+    selectedStore?.storeId
+      ? monthlyRevenue.filter((point) => point.storeId === selectedStore.storeId)
+      : []
+  ), [monthlyRevenue, selectedStore]);
   const viewTitle = activeView === "map"
     ? "Map"
     : activeView === "orders"
@@ -8715,12 +8808,14 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
               onContactLogSaved={handleContactLogSaved}
               onStoreNameSaved={handleStoreNameSaved}
               orderLines={selectedStoreOrderLines}
+              monthlyRevenue={selectedStoreMonthlyRevenue}
             />
           </section>
         ) : activeView === "map" ? (
           <TripPlanner
             stores={sortedStores}
             orderLines={orderLines}
+            monthlyRevenue={monthlyRevenue}
             selectedStore={selectedStore}
             activeTab={activeTab}
             setActiveTab={setActiveTab}
