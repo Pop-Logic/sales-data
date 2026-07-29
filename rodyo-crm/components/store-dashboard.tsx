@@ -3843,16 +3843,31 @@ type StoreGroupSummary = {
   members: StoreGroupMemberSummary[];
 };
 
+function groupNameForStore(store: StoreRollup) {
+  return store.groupName?.trim() || UNGROUPED_LABEL;
+}
+
+// Every identity key (storeId/license/licenseKey/derived key) a store answers
+// to, mapped to its group name — shared by the summary table and the group
+// velocity chart so both agree on membership from the same full roster.
+function buildGroupKeyMap(stores: StoreRollup[]) {
+  const map = new Map<string, string>();
+  stores.forEach((store) => {
+    const groupName = groupNameForStore(store);
+    storeIdentityKeys(store).forEach((key) => map.set(key, groupName));
+  });
+  return map;
+}
+
 // Rolls paid order lines up to the store.groupName level (e.g. "Zips",
 // "Kush 21" chains) instead of individual stores. storeCount reflects the
 // full roster for that group regardless of the current filters; members
 // only include stores with at least one paid line inside the filtered range.
 function buildStoreGroupSummaries(stores: StoreRollup[], paidLines: OrderLine[]): StoreGroupSummary[] {
-  const groupByStoreKey = new Map<string, string>();
+  const groupByStoreKey = buildGroupKeyMap(stores);
   const storeCountByGroup = new Map<string, number>();
   stores.forEach((store) => {
-    const groupName = store.groupName?.trim() || UNGROUPED_LABEL;
-    storeIdentityKeys(store).forEach((key) => groupByStoreKey.set(key, groupName));
+    const groupName = groupNameForStore(store);
     storeCountByGroup.set(groupName, (storeCountByGroup.get(groupName) || 0) + 1);
   });
 
@@ -3918,11 +3933,13 @@ function buildStoreGroupSummaries(stores: StoreRollup[], paidLines: OrderLine[])
 
 function GroupsView({
   orderLines,
+  monthlyRevenue,
   stores,
   selectedStore,
   onSelectStore
 }: {
   orderLines: OrderLine[];
+  monthlyRevenue: MonthlyRevenuePoint[];
   stores: StoreRollup[];
   selectedStore?: StoreRollup;
   onSelectStore: (key: string) => void;
@@ -3988,6 +4005,31 @@ function GroupsView({
     ? selectedGroupName
     : filteredGroups[0]?.groupName || null;
   const activeGroup = filteredGroups.find((group) => group.groupName === activeGroupName) || null;
+
+  // The velocity chart runs its own independent range (90D/180D/1Y/All), so
+  // it needs the group's full unfiltered history — not paidLines, which is
+  // already narrowed by this view's own brand/date filters above — scoped by
+  // group membership from the full store roster (not just stores with orders
+  // inside the current filter window).
+  const groupByStoreKey = useMemo(() => buildGroupKeyMap(stores), [stores]);
+  const activeGroupStoreIds = useMemo(() => (
+    new Set(
+      stores
+        .filter((store) => activeGroupName !== null && groupNameForStore(store) === activeGroupName)
+        .map((store) => store.storeId)
+        .filter((id): id is string => Boolean(id))
+    )
+  ), [stores, activeGroupName]);
+  const activeGroupOrderLines = useMemo(() => (
+    activeGroupName
+      ? orderLines.filter((line) => (
+        orderLineStoreKeys(line).some((key) => groupByStoreKey.get(key) === activeGroupName)
+      ))
+      : []
+  ), [orderLines, groupByStoreKey, activeGroupName]);
+  const activeGroupMonthlyRevenue = useMemo(() => (
+    monthlyRevenue.filter((point) => activeGroupStoreIds.has(point.storeId))
+  ), [monthlyRevenue, activeGroupStoreIds]);
 
   const groupMetrics = useMemo(() => {
     const revenue = paidLines.reduce((total, line) => total + line.lineTotal, 0);
@@ -4058,6 +4100,16 @@ function GroupsView({
         <DetailStat label="Groups" value={groupMetrics.groups.toLocaleString()} />
         <DetailStat label="Latest Order" value={formatDate(groupMetrics.latest)} />
       </section>
+
+      {activeGroup ? (
+        <section className="panel">
+          <div className="panel-header">
+            <h3>{activeGroup.groupName} Velocity</h3>
+            <span className="table-meta">{activeGroup.storeCount.toLocaleString()} stores in group</span>
+          </div>
+          <StoreVelocityPanel orderLines={activeGroupOrderLines} monthlyRevenue={activeGroupMonthlyRevenue} />
+        </section>
+      ) : null}
 
       <section className="orders-grid">
         <div className="panel">
@@ -7982,7 +8034,9 @@ function StoreVelocityPanel({
   orderLines: OrderLine[];
   monthlyRevenue: MonthlyRevenuePoint[];
 }) {
-  const [range, setRange] = useState<VelocityRangeId>("90");
+  // Defaults to 1Y (not 90D) so pre-Cultivera sheet history is visible
+  // without an extra click — 90D never blends it in by design.
+  const [range, setRange] = useState<VelocityRangeId>("365");
   // "All" intentionally carries days: null — don't use `?? 90` here, it would
   // coalesce that null right back to 90 and silently make "All" behave like 90D.
   const selectedRangeOption = VELOCITY_RANGE_OPTIONS.find((option) => option.id === range);
@@ -9184,6 +9238,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
         ) : activeView === "groups" ? (
           <GroupsView
             orderLines={orderLines}
+            monthlyRevenue={monthlyRevenue}
             stores={stores}
             selectedStore={selectedStore}
             onSelectStore={handleStoreSelect}
