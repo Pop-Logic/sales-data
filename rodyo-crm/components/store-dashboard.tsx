@@ -3967,18 +3967,13 @@ function GroupsView({
 }) {
   const [groupQuery, setGroupQuery] = useState("");
   const [brandFilter, setBrandFilter] = useState("all");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
   const [selectedGroupName, setSelectedGroupName] = useState<string | null>(null);
-
-  const bounds = useMemo(() => orderDateBounds(orderLines), [orderLines]);
-  const effectiveDateFrom = dateFrom || bounds.defaultFrom;
-  const effectiveDateTo = dateTo || bounds.defaultTo;
-
-  useEffect(() => {
-    setDateFrom("");
-    setDateTo("");
-  }, [bounds.defaultFrom, bounds.defaultTo]);
+  // Lifted out of StoreVelocityPanel so this same range scopes both the
+  // chart and the Group Activity table below — one range control instead of
+  // a separate top-of-page date filter that duplicated it.
+  const [range, setRange] = useState<VelocityRangeId>("365");
+  const selectedRangeOption = VELOCITY_RANGE_OPTIONS.find((option) => option.id === range);
+  const rangeDays = selectedRangeOption ? selectedRangeOption.days : 365;
 
   const selectedStoreKeys = useMemo(() => (
     selectedStore ? new Set(storeIdentityKeys(selectedStore)) : new Set<string>()
@@ -4001,6 +3996,7 @@ function GroupsView({
     return [...TERRITORY_BRANDS, ...dataBrands];
   }, [baseOrderLines]);
 
+  const rangeCutoffTimestamp = rangeDays ? Date.now() - rangeDays * 86_400_000 : 0;
   const paidLines = useMemo(() => (
     baseOrderLines.filter((line) => {
       if (!isPaidOrderLine(line)) {
@@ -4009,9 +4005,9 @@ function GroupsView({
       if (brandFilter !== "all" && orderBrandValue(line) !== brandFilter) {
         return false;
       }
-      return lineIsInsideDateRange(line, effectiveDateFrom, effectiveDateTo);
+      return orderTimestamp(line.submittedAt) >= rangeCutoffTimestamp;
     })
-  ), [baseOrderLines, brandFilter, effectiveDateFrom, effectiveDateTo]);
+  ), [baseOrderLines, brandFilter, rangeCutoffTimestamp]);
 
   const groupSummaries = useMemo(() => buildStoreGroupSummaries(stores, paidLines), [stores, paidLines]);
 
@@ -4069,7 +4065,9 @@ function GroupsView({
       <div className="panel orders-filter-panel">
         <div className="orders-action-row">
           <div>
-            <span className="caption">Order rollups by store group</span>
+            <span className="caption">
+              Order rollups by store group — scoped to the {VELOCITY_RANGE_OPTIONS.find((option) => option.id === range)?.label} range selected below
+            </span>
           </div>
         </div>
         <div className="orders-filter-grid">
@@ -4091,26 +4089,6 @@ function GroupsView({
               ))}
             </select>
           </div>
-          <div className="field">
-            <label>From</label>
-            <input
-              max={bounds.max}
-              min={bounds.min}
-              type="date"
-              value={effectiveDateFrom}
-              onChange={(event) => setDateFrom(event.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label>To</label>
-            <input
-              max={bounds.max}
-              min={bounds.min}
-              type="date"
-              value={effectiveDateTo}
-              onChange={(event) => setDateTo(event.target.value)}
-            />
-          </div>
         </div>
       </div>
 
@@ -4128,7 +4106,12 @@ function GroupsView({
             <h3>{activeGroup.groupName} Velocity</h3>
             <span className="table-meta">{activeGroup.storeCount.toLocaleString()} stores in group</span>
           </div>
-          <StoreVelocityPanel orderLines={activeGroupOrderLines} monthlyRevenue={activeGroupMonthlyRevenue} />
+          <StoreVelocityPanel
+            orderLines={activeGroupOrderLines}
+            monthlyRevenue={activeGroupMonthlyRevenue}
+            range={range}
+            onRangeChange={setRange}
+          />
         </section>
       ) : null}
 
@@ -8106,14 +8089,23 @@ function StoreVelocityChart({ points }: { points: StoreVelocityPoint[] }) {
 
 function StoreVelocityPanel({
   orderLines,
-  monthlyRevenue
+  monthlyRevenue,
+  range: controlledRange,
+  onRangeChange
 }: {
   orderLines: OrderLine[];
   monthlyRevenue: MonthlyRevenuePoint[];
+  // Uncontrolled by default (store drawer: owns its own range). Store Groups
+  // passes both so the same range also scopes its Group Activity table —
+  // one range control instead of a separate top-of-page date filter.
+  range?: VelocityRangeId;
+  onRangeChange?: (range: VelocityRangeId) => void;
 }) {
   // Defaults to 1Y (not 90D) so pre-Cultivera sheet history is visible
   // without an extra click — 90D never blends it in by design.
-  const [range, setRange] = useState<VelocityRangeId>("365");
+  const [internalRange, setInternalRange] = useState<VelocityRangeId>("365");
+  const range = controlledRange ?? internalRange;
+  const setRange = onRangeChange ?? setInternalRange;
   // "All" intentionally carries days: null — don't use `?? 90` here, it would
   // coalesce that null right back to 90 and silently make "All" behave like 90D.
   const selectedRangeOption = VELOCITY_RANGE_OPTIONS.find((option) => option.id === range);
