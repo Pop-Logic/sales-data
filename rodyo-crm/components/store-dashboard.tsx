@@ -3864,6 +3864,13 @@ function buildGroupKeyMap(stores: StoreRollup[]) {
 // "Kush 21" chains) instead of individual stores. storeCount reflects the
 // full roster for that group regardless of the current filters; members
 // only include stores with at least one paid line inside the filtered range.
+//
+// Every group name from the full roster gets a seeded (zero-activity) entry
+// up front — a group whose only orders fall outside the caller's date/brand
+// filter would otherwise never appear in the map at all (it's only ever
+// created inside the paidLines loop below), silently vanishing from the
+// table instead of showing with $0. This is exactly what happened to "CBC":
+// its stores' only order was outside the default current-month filter.
 function buildStoreGroupSummaries(stores: StoreRollup[], paidLines: OrderLine[]): StoreGroupSummary[] {
   const groupByStoreKey = buildGroupKeyMap(stores);
   const storeCountByGroup = new Map<string, number>();
@@ -3874,6 +3881,19 @@ function buildStoreGroupSummaries(stores: StoreRollup[], paidLines: OrderLine[])
 
   const groups = new Map<string, StoreGroupSummary>();
   const membersByGroup = new Map<string, Map<string, StoreGroupMemberSummary>>();
+
+  storeCountByGroup.forEach((count, groupName) => {
+    groups.set(groupName, {
+      groupName,
+      storeCount: count,
+      revenue: 0,
+      units: 0,
+      orderKeys: new Set<string>(),
+      lastOrderAt: null,
+      brands: { "K. Savage": 0, Mayfield: 0, "Leisure Land": 0 },
+      members: []
+    });
+  });
 
   paidLines.forEach((line) => {
     const lineStoreKey = orderLineStoreKey(line);
@@ -4158,7 +4178,11 @@ function GroupsView({
         <div className="panel">
           <div className="panel-header">
             <h3>{activeGroup ? `${activeGroup.groupName} Stores` : "Select a group"}</h3>
-            <span className="table-meta">{(activeGroup?.members.length || 0).toLocaleString()} stores</span>
+            <span className="table-meta">
+              {activeGroup
+                ? `${activeGroup.members.length.toLocaleString()} of ${activeGroup.storeCount.toLocaleString()} active in range`
+                : ""}
+            </span>
           </div>
           <div className="table-scroll">
             <table className="data-table">
@@ -4194,7 +4218,13 @@ function GroupsView({
                   </tr>
                 ))}
                 {!activeGroup?.members.length ? (
-                  <tr><td colSpan={5}>No store activity in this group.</td></tr>
+                  <tr>
+                    <td colSpan={5}>
+                      {activeGroup && activeGroup.storeCount > 0
+                        ? `None of this group's ${activeGroup.storeCount.toLocaleString()} stores had activity in the selected date range — widen From/To above to see them.`
+                        : "No store activity in this group."}
+                    </td>
+                  </tr>
                 ) : null}
               </tbody>
             </table>
