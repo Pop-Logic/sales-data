@@ -85,13 +85,26 @@ function parseTimestamp(value: unknown) {
   return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
 }
 
-function brandFromSubProductLine(value: unknown) {
+function brandFromPrefix(value: unknown) {
   const text = cleanCell(value);
   if (text.startsWith("LL")) return "Leisure Land";
   if (text.startsWith("MF")) return "Mayfield";
   if (text.startsWith("KS")) return "K. Savage";
   if (text.startsWith("Bulk")) return "Bulk";
   return "Other";
+}
+
+// Sub Product Line normally carries the brand prefix ("KS | A Grade Flower"),
+// but Cultivera intermittently omits it for a subset of rows while still
+// prefixing Product Name ("KS | Pre-Rolls - GMO - 1g") — fall back to that
+// before giving up and calling it "Other" (which silently drops the line
+// from every per-brand rollup in the app).
+function brandFromSubProductLine(subProductLine: unknown, productName: unknown) {
+  const bySubLine = brandFromPrefix(subProductLine);
+  if (bySubLine !== "Other") {
+    return bySubLine;
+  }
+  return brandFromPrefix(productName);
 }
 
 function firstSourceColumn(row: CsvRow, aliases: string[]) {
@@ -332,11 +345,12 @@ async function runOrderSync() {
         return;
       }
       const subProductLine = subProductCol ? cleanCell(row[subProductCol]) : "";
+      const productName = productCol ? cleanCell(row[productCol]) : "";
       const explicitBrand = brandCol ? cleanCell(row[brandCol]) : "";
       itemRows.push({
         order_id: order.id,
-        brand: explicitBrand || brandFromSubProductLine(subProductLine),
-        product_name: productCol ? cleanCell(row[productCol]) : "",
+        brand: explicitBrand || brandFromSubProductLine(subProductLine, productName),
+        product_name: productName,
         sub_product_line: subProductLine,
         units: unitsCol ? parseAmount(row[unitsCol]) : 0,
         line_total: lineTotalCol ? parseAmount(row[lineTotalCol]) : 0,
