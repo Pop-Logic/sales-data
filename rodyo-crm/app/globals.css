@@ -168,6 +168,16 @@ textarea {
   resize: vertical;
 }
 
+.goal-eom-derived {
+  width: 100%;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 10px;
+  font-weight: 700;
+}
+
 .multi-select {
   position: relative;
 }

@@ -1205,8 +1205,9 @@ type GoalWeek = {
   end: string;
 };
 
+// No brandEom field — EOM is derived by summing brandWeeks, not entered
+// separately. See buildBrandEomTotals in GoalsView.
 type GoalDraft = {
-  brandEom: Record<BrandFilter, string>;
   brandWeeks: Record<string, Record<BrandFilter, string>>;
   notes: Record<string, string>;
 };
@@ -1344,7 +1345,6 @@ function monthWeeks(monthKey: string): GoalWeek[] {
 }
 
 function goalsDraftFromRows(salesGoals: SalesGoal[], monthKey: string, weeks: GoalWeek[]): GoalDraft {
-  const brandEom = emptyBrandGoalStrings();
   const brandWeeks = Object.fromEntries(
     weeks.map((week) => [week.id, emptyBrandGoalStrings()])
   ) as Record<string, Record<BrandFilter, string>>;
@@ -1356,9 +1356,6 @@ function goalsDraftFromRows(salesGoals: SalesGoal[], monthKey: string, weeks: Go
       const goalType = goal.goalType.trim().toLowerCase();
       const brand = goal.brand as BrandFilter;
       const amount = cleanGoalNumber(goal.goalAmount);
-      if (goalType === "eom" && TERRITORY_BRANDS.includes(brand) && amount > 0) {
-        brandEom[brand] = String(Math.round(amount));
-      }
       if ((goalType === "week" || goalType === "weekly") && goal.weekId) {
         if (!brandWeeks[goal.weekId]) {
           brandWeeks[goal.weekId] = emptyBrandGoalStrings();
@@ -1375,7 +1372,7 @@ function goalsDraftFromRows(salesGoals: SalesGoal[], monthKey: string, weeks: Go
       }
     });
 
-  return { brandEom, brandWeeks, notes };
+  return { brandWeeks, notes };
 }
 
 function goalDraftSignature(draft: GoalDraft) {
@@ -6457,7 +6454,18 @@ function GoalsView({
   }, [savedDraft]);
 
   const selectedBrands = useMemo(() => goalBrandFilterValues(brandFilter), [brandFilter]);
-  const eomGoal = sumGoalValues(draft.brandEom, selectedBrands);
+  // EOM is no longer entered directly — it's the sum of that brand's weekly
+  // goals for the month, so Brand Goals and Weekly Goals can't drift apart.
+  const brandEomTotals = useMemo(() => (
+    TERRITORY_BRANDS.reduce((totals, brand) => {
+      totals[brand] = weeks.reduce(
+        (sum, week) => sum + cleanGoalNumber(draft.brandWeeks[week.id]?.[brand]),
+        0
+      );
+      return totals;
+    }, emptyBrandGoalNumbers())
+  ), [draft.brandWeeks, weeks]);
+  const eomGoal = selectedBrands.reduce((total, brand) => total + brandEomTotals[brand], 0);
   const weeklyGoals = useMemo(() => (
     Object.fromEntries(
       weeks.map((week) => [week.id, sumGoalValues(draft.brandWeeks[week.id] || emptyBrandGoalStrings(), selectedBrands)])
@@ -6479,16 +6487,6 @@ function GoalsView({
   const goalGap = eomGoal ? Math.max(0, eomGoal - salesToDate) : 0;
   const requiredPerDay = remainingDays ? goalGap / remainingDays : 0;
   const isDirty = goalDraftSignature(draft) !== goalDraftSignature(savedDraft);
-
-  function updateEomGoal(brand: BrandFilter, value: string) {
-    setDraft((currentDraft) => ({
-      ...currentDraft,
-      brandEom: {
-        ...currentDraft.brandEom,
-        [brand]: value
-      }
-    }));
-  }
 
   function updateWeekGoal(weekId: string, brand: BrandFilter, value: string) {
     setDraft((currentDraft) => ({
@@ -6516,15 +6514,10 @@ function GoalsView({
   async function saveGoals() {
     setSaveState("saving");
     setSaveMessage("Saving goals...");
+    // No separate EOM rows — the EOM total is always derived from these Week
+    // rows on read (see goalsDraftFromRows / brandEomTotals), so there's
+    // nothing else to persist.
     const rows = [
-      ...TERRITORY_BRANDS.flatMap((brand) => {
-        const goalAmount = cleanGoalNumber(draft.brandEom[brand]);
-        return goalAmount > 0 ? [{
-          goalType: "EOM",
-          brand,
-          goalAmount
-        }] : [];
-      }),
       ...weeks.flatMap((week) => (
         TERRITORY_BRANDS.flatMap((brand) => {
           const goalAmount = cleanGoalNumber(draft.brandWeeks[week.id]?.[brand]);
@@ -6631,7 +6624,7 @@ function GoalsView({
         <div className="panel">
           <div className="panel-header">
             <h3>Brand Goals</h3>
-            <span className="table-meta">{monthLabel(selectedMonth)}</span>
+            <span className="table-meta">{monthLabel(selectedMonth)} · summed from Weekly Goals</span>
           </div>
           <div className="goal-input-grid">
             {TERRITORY_BRANDS.map((brand) => (
@@ -6644,13 +6637,7 @@ function GoalsView({
                   />
                   {brand} EOM
                 </label>
-                <input
-                  inputMode="numeric"
-                  min="0"
-                  type="number"
-                  value={draft.brandEom[brand]}
-                  onChange={(event) => updateEomGoal(brand, event.target.value)}
-                />
+                <div className="goal-eom-derived">{formatUsd(brandEomTotals[brand])}</div>
               </div>
             ))}
           </div>
