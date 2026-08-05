@@ -3858,16 +3858,16 @@ function buildGroupKeyMap(stores: StoreRollup[]) {
 }
 
 // Rolls paid order lines up to the store.groupName level (e.g. "Zips",
-// "Kush 21" chains) instead of individual stores. storeCount reflects the
-// full roster for that group regardless of the current filters; members
-// only include stores with at least one paid line inside the filtered range.
+// "Kush 21" chains) instead of individual stores.
 //
-// Every group name from the full roster gets a seeded (zero-activity) entry
-// up front — a group whose only orders fall outside the caller's date/brand
-// filter would otherwise never appear in the map at all (it's only ever
-// created inside the paidLines loop below), silently vanishing from the
-// table instead of showing with $0. This is exactly what happened to "CBC":
-// its stores' only order was outside the default current-month filter.
+// Both the group list and each group's member list are seeded from the full
+// roster up front (zero-activity), then enriched by the paidLines loop below.
+// Without this, a group or store with no activity inside the caller's
+// date/brand filter would just be missing from the table/member list
+// entirely rather than showing at $0 — that's what happened to "CBC" (whole
+// group vanished when its one order fell outside the default filter) and to
+// every store with zero orders in range (silently dropped from its group's
+// member panel).
 function buildStoreGroupSummaries(stores: StoreRollup[], paidLines: OrderLine[]): StoreGroupSummary[] {
   const groupByStoreKey = buildGroupKeyMap(stores);
   const storeCountByGroup = new Map<string, number>();
@@ -3890,6 +3890,31 @@ function buildStoreGroupSummaries(stores: StoreRollup[], paidLines: OrderLine[])
       brands: { "K. Savage": 0, Mayfield: 0, "Leisure Land": 0 },
       members: []
     });
+  });
+
+  // Same reasoning as seeding `groups` above: every store in the group's
+  // roster gets a zero-activity member entry up front, so a store with no
+  // orders in the selected range still shows up (at $0) instead of just not
+  // being in the list at all.
+  stores.forEach((store) => {
+    const groupName = groupNameForStore(store);
+    const key = storeKey(store);
+    if (!key) {
+      return;
+    }
+    const groupMembers = membersByGroup.get(groupName) || new Map<string, StoreGroupMemberSummary>();
+    if (!groupMembers.has(key)) {
+      groupMembers.set(key, {
+        key,
+        storeName: store.storeName,
+        license: store.license || store.licenseKey || "",
+        revenue: 0,
+        units: 0,
+        orderKeys: new Set<string>(),
+        lastOrderAt: null
+      });
+    }
+    membersByGroup.set(groupName, groupMembers);
   });
 
   paidLines.forEach((line) => {
@@ -4159,9 +4184,7 @@ function GroupsView({
           <div className="panel-header">
             <h3>{activeGroup ? `${activeGroup.groupName} Stores` : "Select a group"}</h3>
             <span className="table-meta">
-              {activeGroup
-                ? `${activeGroup.members.length.toLocaleString()} of ${activeGroup.storeCount.toLocaleString()} active in range`
-                : ""}
+              {activeGroup ? `${activeGroup.members.length.toLocaleString()} stores` : ""}
             </span>
           </div>
           <div className="table-scroll">
@@ -4198,13 +4221,7 @@ function GroupsView({
                   </tr>
                 ))}
                 {!activeGroup?.members.length ? (
-                  <tr>
-                    <td colSpan={5}>
-                      {activeGroup && activeGroup.storeCount > 0
-                        ? `None of this group's ${activeGroup.storeCount.toLocaleString()} stores had activity in the selected date range — widen From/To above to see them.`
-                        : "No store activity in this group."}
-                    </td>
-                  </tr>
+                  <tr><td colSpan={5}>This group has no stores.</td></tr>
                 ) : null}
               </tbody>
             </table>
