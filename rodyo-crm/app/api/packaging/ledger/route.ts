@@ -17,6 +17,9 @@ type LedgerPayload = {
   note?: string | null;
   initials?: string | null;
   loggedAt?: string | null;
+  // Order date, passed only by the Order Received flow — used to compute
+  // and store the realized lead time alongside this receive entry.
+  orderedAt?: string | null;
   clearOnOrder?: boolean;
 };
 
@@ -42,6 +45,24 @@ function cleanLoggedAt(value: unknown) {
   return Number.isNaN(parsed.getTime()) ? localDateValue() : cleaned;
 }
 
+// Optional and stricter than cleanLoggedAt — an invalid orderedAt just means
+// no lead time gets recorded, it shouldn't get silently coerced to today.
+function cleanOrderedAt(value: unknown) {
+  const cleaned = String(value ?? "").trim();
+  if (!cleaned || !/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) {
+    return null;
+  }
+  const parsed = new Date(`${cleaned}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : cleaned;
+}
+
+function leadTimeDaysBetween(orderedAt: string, loggedAt: string) {
+  const ordered = new Date(`${orderedAt}T00:00:00Z`).getTime();
+  const delivered = new Date(`${loggedAt}T00:00:00Z`).getTime();
+  const days = Math.round((delivered - ordered) / 86_400_000);
+  return Number.isFinite(days) && days >= 0 ? days : null;
+}
+
 export async function POST(request: Request) {
   let payload: LedgerPayload;
   try {
@@ -54,6 +75,8 @@ export async function POST(request: Request) {
   const entryType = String(payload.entryType ?? "").trim();
   const qty = Number(payload.qty);
   const loggedAt = cleanLoggedAt(payload.loggedAt);
+  const orderedAt = cleanOrderedAt(payload.orderedAt);
+  const leadTimeDays = orderedAt ? leadTimeDaysBetween(orderedAt, loggedAt) : null;
 
   if (!packagingItemId) return NextResponse.json({ error: "Missing packagingItemId." }, { status: 400 });
   if (!MANUAL_TYPES.has(entryType)) {
@@ -69,20 +92,29 @@ export async function POST(request: Request) {
 
   try {
     const supabase = createSupabaseAdminClient();
-    const { data, error } = await supabase
+    const baseRow = {
+      packaging_item_id: packagingItemId,
+      entry_type: entryType,
+      qty,
+      note: payload.note ? String(payload.note).trim() || null : null,
+      initials: payload.initials ? String(payload.initials).trim().toUpperCase() || null : null,
+      // Noon UTC so the date displays correctly regardless of viewer
+      // timezone (formatShortDate always renders in UTC).
+      created_at: `${loggedAt}T12:00:00.000Z`
+    };
+
+    let { data, error } = await supabase
       .from("packaging_ledger")
-      .insert({
-        packaging_item_id: packagingItemId,
-        entry_type: entryType,
-        qty,
-        note: payload.note ? String(payload.note).trim() || null : null,
-        initials: payload.initials ? String(payload.initials).trim().toUpperCase() || null : null,
-        // Noon UTC so the date displays correctly regardless of viewer
-        // timezone (formatShortDate always renders in UTC).
-        created_at: `${loggedAt}T12:00:00.000Z`
-      })
+      .insert({ ...baseRow, ordered_at: orderedAt, lead_time_days: leadTimeDays })
       .select("id")
       .single();
+
+    // ordered_at/lead_time_days columns may not exist yet in this
+    // environment — fall back to the base row so the receive itself (and the
+    // on-hand/on-order update below) still goes through.
+    if (error) {
+      ({ data, error } = await supabase.from("packaging_ledger").insert(baseRow).select("id").single());
+    }
 
     if (error || !data) {
       return NextResponse.json(

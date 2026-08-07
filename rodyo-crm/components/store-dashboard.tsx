@@ -4780,6 +4780,14 @@ function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [showReceive, setShowReceive] = useState(false);
+  const [piecesReceived, setPiecesReceived] = useState(
+    item.onOrderQty != null ? String(item.onOrderQty) : ""
+  );
+  const [dateReceived, setDateReceived] = useState(localDateInputValue);
+  const [receiveSaving, setReceiveSaving] = useState(false);
+  const [receiveError, setReceiveError] = useState<string | null>(null);
+
   const projectedEta = dateOrdered ? addDaysIso(dateOrdered, item.leadTimeDays) : null;
 
   async function save(markOrdered: boolean, event?: FormEvent) {
@@ -4817,27 +4825,96 @@ function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () 
     }
   }
 
+  async function saveReceive(event: FormEvent) {
+    event.preventDefault();
+    setReceiveSaving(true);
+    setReceiveError(null);
+    try {
+      const response = await fetch("/api/packaging/ledger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          packagingItemId: item.id,
+          entryType: "receive",
+          qty: Number(piecesReceived),
+          loggedAt: dateReceived,
+          // The order date, so the server can record how long this shipment
+          // actually took — item.onOrderEta holds the order date, not a
+          // literal ETA (see the comment on save() above).
+          orderedAt: item.onOrderEta || null,
+          note: "Order received"
+        })
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Save failed.");
+      onDone();
+    } catch (err) {
+      setReceiveError(err instanceof Error ? err.message : "Save failed.");
+    } finally {
+      setReceiveSaving(false);
+    }
+  }
+
   return (
-    <form className="pkg-form-row" onSubmit={(e) => save(true, e)}>
-      <div className="field"><label>Qty ordered</label>
-        <input type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)} required style={{ width: 110 }} />
-      </div>
-      <div className="field"><label>Date Ordered</label>
-        <input type="date" value={dateOrdered} onChange={(e) => setDateOrdered(e.target.value)} />
-      </div>
-      {projectedEta ? (
-        <span className="table-meta" style={{ paddingBottom: 10 }}>
-          ETA {formatShortDate(projectedEta)} ({item.leadTimeDays}d lead time)
-        </span>
+    <>
+      <form className="pkg-form-row" onSubmit={(e) => save(true, e)}>
+        <div className="field"><label>Qty ordered</label>
+          <input type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)} required style={{ width: 110 }} />
+        </div>
+        <div className="field"><label>Date Ordered</label>
+          <input type="date" value={dateOrdered} onChange={(e) => setDateOrdered(e.target.value)} />
+        </div>
+        {projectedEta ? (
+          <span className="table-meta" style={{ paddingBottom: 10 }}>
+            ETA {formatShortDate(projectedEta)} ({item.leadTimeDays}d lead time)
+          </span>
+        ) : null}
+        <button className="primary-button" type="submit" disabled={saving}>
+          {saving ? "Saving…" : hasActiveOrder ? "Update Order" : "Mark Ordered"}
+        </button>
+        {hasActiveOrder ? (
+          <>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={saving}
+              onClick={() => setShowReceive((v) => !v)}
+            >
+              Order Received
+            </button>
+            <button className="secondary-button" type="button" disabled={saving} onClick={() => save(false)}>Clear</button>
+          </>
+        ) : null}
+        {error ? <p className="form-error">{error}</p> : null}
+      </form>
+      {hasActiveOrder && showReceive ? (
+        <form className="pkg-form-row" onSubmit={saveReceive}>
+          <div className="field"><label>Pieces received</label>
+            <input
+              type="number"
+              min={1}
+              value={piecesReceived}
+              onChange={(e) => setPiecesReceived(e.target.value)}
+              required
+              style={{ width: 110 }}
+            />
+          </div>
+          <div className="field"><label>Date received</label>
+            <input type="date" value={dateReceived} onChange={(e) => setDateReceived(e.target.value)} required style={{ width: 140 }} />
+          </div>
+          <span className="table-meta" style={{ paddingBottom: 10 }}>
+            Adds to on-hand and clears On Order
+          </span>
+          <button className="primary-button" type="submit" disabled={receiveSaving || piecesReceived === ""}>
+            {receiveSaving ? "Saving…" : "Confirm Received"}
+          </button>
+          <button className="secondary-button" type="button" disabled={receiveSaving} onClick={() => setShowReceive(false)}>
+            Cancel
+          </button>
+          {receiveError ? <p className="form-error">{receiveError}</p> : null}
+        </form>
       ) : null}
-      <button className="primary-button" type="submit" disabled={saving}>
-        {saving ? "Saving…" : hasActiveOrder ? "Update Order" : "Mark Ordered"}
-      </button>
-      {hasActiveOrder ? (
-        <button className="secondary-button" type="button" disabled={saving} onClick={() => save(false)}>Clear</button>
-      ) : null}
-      {error ? <p className="form-error">{error}</p> : null}
-    </form>
+    </>
   );
 }
 
@@ -5352,6 +5429,7 @@ function PackagingView({
                                           <span className="proc-item-name">
                                             {formatShortDate(entry.createdAt)} · {entry.entryType === "count" ? "Counted" : entry.entryType === "receive" ? "Received" : entry.entryType === "consume" ? "Used" : "Adjusted"}
                                             {entry.initials ? ` · ${entry.initials}` : ""}
+                                            {entry.leadTimeDays != null ? ` · ${entry.leadTimeDays}d lead time` : ""}
                                             {entry.note ? ` — ${entry.note}` : ""}
                                           </span>
                                           <span className="proc-item-units" style={{ fontWeight: 600 }}>

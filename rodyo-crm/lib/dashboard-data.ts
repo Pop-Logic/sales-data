@@ -56,6 +56,10 @@ export type PackagingLedgerEntry = {
   note: string | null;
   createdAt: string;
   initials: string | null;
+  // Set only on "receive" entries logged via Order Received — the order date
+  // and the realized order->delivery gap, for future lead-time reporting.
+  orderedAt: string | null;
+  leadTimeDays: number | null;
 };
 
 export type DashboardSnapshot = {
@@ -766,11 +770,23 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     qtyPerUnit: Number(r.qty_per_unit ?? 1)
   }));
 
-  const { data: packagingLedgerData } = await supabase
+  // ordered_at/lead_time_days are a newer migration — if it hasn't been
+  // applied yet in a given environment, fall back to the base column set
+  // instead of letting the whole ledger silently go empty (a select against
+  // an unknown column errors out entirely, not just for those two fields).
+  let { data: packagingLedgerData } = await supabase
     .from("packaging_ledger")
-    .select("id, packaging_item_id, entry_type, qty, source_barcode, note, created_at, initials")
+    .select("id, packaging_item_id, entry_type, qty, source_barcode, note, created_at, initials, ordered_at, lead_time_days")
     .order("created_at", { ascending: false })
     .limit(500);
+  if (!packagingLedgerData) {
+    const fallback = await supabase
+      .from("packaging_ledger")
+      .select("id, packaging_item_id, entry_type, qty, source_barcode, note, created_at, initials")
+      .order("created_at", { ascending: false })
+      .limit(500);
+    packagingLedgerData = (fallback.data || []).map((row) => ({ ...row, ordered_at: null, lead_time_days: null }));
+  }
   const packagingLedger: PackagingLedgerEntry[] = (packagingLedgerData || []).map((r) => ({
     id: String(r.id),
     packagingItemId: String(r.packaging_item_id),
@@ -779,7 +795,9 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     sourceBarcode: r.source_barcode ?? null,
     note: r.note ?? null,
     createdAt: String(r.created_at ?? ""),
-    initials: r.initials ?? null
+    initials: r.initials ?? null,
+    orderedAt: (r as { ordered_at?: string | null }).ordered_at ?? null,
+    leadTimeDays: (r as { lead_time_days?: number | null }).lead_time_days ?? null
   }));
 
   // SKU economics from the BALACLAVA DISTRO DATA sheet (non-fatal — inventory
