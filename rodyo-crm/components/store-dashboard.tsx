@@ -4556,7 +4556,21 @@ function pkgStats(item: PackagingItem, salesDailyUse = 0): {
   return { dailyUse, daysLeft, reorderPoint, status, estimated };
 }
 
-function PkgStatusBadge({ status, daysLeft, leadTimeDays }: { status: PkgStatus; daysLeft: number | null; leadTimeDays: number }) {
+function PkgStatusBadge({
+  status,
+  daysLeft,
+  leadTimeDays,
+  onOrderQty
+}: {
+  status: PkgStatus;
+  daysLeft: number | null;
+  leadTimeDays: number;
+  onOrderQty?: number | null;
+}) {
+  // An active order takes precedence over the underlying stock-health status
+  // — "Out"/"Reorder now" would just tell the reader something they already
+  // acted on. The On Order qty/ETA itself still shows in its own column.
+  if (onOrderQty != null) return <span className="inv-badge inv-badge-onorder">On Order</span>;
   if (status === "out") return <span className="inv-badge inv-badge-out">Out</span>;
   if (status === "reorder") {
     return (
@@ -5274,7 +5288,7 @@ function PackagingView({
                                 <span style={{ color: "var(--muted)" }}>—</span>
                               )}
                             </td>
-                            <td><PkgStatusBadge status={stats.status} daysLeft={stats.daysLeft} leadTimeDays={item.leadTimeDays} /></td>
+                            <td><PkgStatusBadge status={stats.status} daysLeft={stats.daysLeft} leadTimeDays={item.leadTimeDays} onOrderQty={item.onOrderQty} /></td>
                           </tr>
                           {isOpen ? (
                             <tr className="pkg-expand-row">
