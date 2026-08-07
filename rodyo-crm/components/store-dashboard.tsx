@@ -4692,6 +4692,8 @@ function PackagingLedgerForm({ itemId, onDone }: { itemId: string; onDone: () =>
   const [entryType, setEntryType] = useState<"count" | "receive" | "adjust">("count");
   const [qty, setQty] = useState("");
   const [note, setNote] = useState("");
+  const [loggedAt, setLoggedAt] = useState(localDateInputValue);
+  const [initials, setInitials] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -4703,7 +4705,14 @@ function PackagingLedgerForm({ itemId, onDone }: { itemId: string; onDone: () =>
       const response = await fetch("/api/packaging/ledger", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ packagingItemId: itemId, entryType, qty: Number(qty), note: note || null })
+        body: JSON.stringify({
+          packagingItemId: itemId,
+          entryType,
+          qty: Number(qty),
+          note: note || null,
+          loggedAt,
+          initials: initials.trim() || null
+        })
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Save failed.");
@@ -4726,6 +4735,18 @@ function PackagingLedgerForm({ itemId, onDone }: { itemId: string; onDone: () =>
       </div>
       <div className="field"><label>{entryType === "count" ? "Counted qty" : entryType === "receive" ? "Qty received" : "± Qty"}</label>
         <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} required style={{ width: 110 }} />
+      </div>
+      <div className="field"><label>Date</label>
+        <input type="date" value={loggedAt} onChange={(e) => setLoggedAt(e.target.value)} required style={{ width: 140 }} />
+      </div>
+      <div className="field"><label>Initials</label>
+        <input
+          value={initials}
+          onChange={(e) => setInitials(e.target.value.toUpperCase())}
+          placeholder="Initials"
+          maxLength={6}
+          style={{ width: 90 }}
+        />
       </div>
       <div className="field" style={{ flex: 1 }}><label>Note</label>
         <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="optional" />
@@ -4923,6 +4944,7 @@ function PackagingView({
   const [typeFilter, setTypeFilter] = useState("all");
   const [vendorFilter, setVendorFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [strainFilter, setStrainFilter] = useState("all");
   const [sortKey, setSortKey] = useState<PkgSortKey>("vendor");
   const [sortDir, setSortDir] = useState<SortDirection>("asc");
 
@@ -5018,12 +5040,30 @@ function PackagingView({
     () => [...new Set(activeItems.map((i) => i.vendor).filter((v): v is string => Boolean(v)))].sort(),
     [activeItems]
   );
+  const strainOptions = useMemo(
+    () => [...new Set(packagingBoms.map((b) => b.strain).filter((s): s is string => Boolean(s)))].sort(),
+    [packagingBoms]
+  );
+  const itemIdsByStrain = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const bom of packagingBoms) {
+      if (!bom.strain) continue;
+      const set = map.get(bom.strain) || new Set<string>();
+      set.add(bom.packagingItemId);
+      map.set(bom.strain, set);
+    }
+    return map;
+  }, [packagingBoms]);
 
   const STATUS_RANK: Record<PkgStatus, number> = { out: 0, reorder: 1, soon: 2, ok: 3, idle: 4 };
 
   const filtered = useMemo(() => {
     let items = activeItems;
     if (brandFilter !== "all") items = items.filter((i) => (i.brand ?? "") === brandFilter);
+    if (strainFilter !== "all") {
+      const idsForStrain = itemIdsByStrain.get(strainFilter);
+      items = items.filter((i) => idsForStrain?.has(i.id));
+    }
     if (typeFilter !== "all") items = items.filter((i) => (i.itemType ?? "") === typeFilter);
     if (vendorFilter !== "all") items = items.filter((i) => (i.vendor ?? "") === vendorFilter);
     if (statusFilter !== "all") items = items.filter((i) => statsById.get(i.id)!.status === statusFilter);
@@ -5056,7 +5096,7 @@ function PackagingView({
       return diff * dir;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeItems, statsById, brandFilter, typeFilter, vendorFilter, statusFilter, search, sortKey, sortDir]);
+  }, [activeItems, statsById, brandFilter, typeFilter, vendorFilter, statusFilter, strainFilter, itemIdsByStrain, search, sortKey, sortDir]);
 
   function setSort(key: PkgSortKey) {
     if (sortKey === key) {
@@ -5126,6 +5166,12 @@ function PackagingView({
             <select value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
               <option value="all">All Vendors</option>
               {vendorOptions.map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <select value={strainFilter} onChange={(e) => setStrainFilter(e.target.value)} style={{ fontSize: "0.85rem" }}>
+              <option value="all">All Strains</option>
+              {strainOptions.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
           <div className="field">
@@ -5291,6 +5337,7 @@ function PackagingView({
                                         <div key={entry.id} className="proc-item">
                                           <span className="proc-item-name">
                                             {formatShortDate(entry.createdAt)} · {entry.entryType === "count" ? "Counted" : entry.entryType === "receive" ? "Received" : entry.entryType === "consume" ? "Used" : "Adjusted"}
+                                            {entry.initials ? ` · ${entry.initials}` : ""}
                                             {entry.note ? ` — ${entry.note}` : ""}
                                           </span>
                                           <span className="proc-item-units" style={{ fontWeight: 600 }}>

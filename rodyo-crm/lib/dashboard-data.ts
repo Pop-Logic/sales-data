@@ -55,6 +55,7 @@ export type PackagingLedgerEntry = {
   sourceBarcode: string | null;
   note: string | null;
   createdAt: string;
+  initials: string | null;
 };
 
 export type DashboardSnapshot = {
@@ -767,7 +768,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
 
   const { data: packagingLedgerData } = await supabase
     .from("packaging_ledger")
-    .select("id, packaging_item_id, entry_type, qty, source_barcode, note, created_at")
+    .select("id, packaging_item_id, entry_type, qty, source_barcode, note, created_at, initials")
     .order("created_at", { ascending: false })
     .limit(500);
   const packagingLedger: PackagingLedgerEntry[] = (packagingLedgerData || []).map((r) => ({
@@ -777,7 +778,8 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     qty: Number(r.qty ?? 0),
     sourceBarcode: r.source_barcode ?? null,
     note: r.note ?? null,
-    createdAt: String(r.created_at ?? "")
+    createdAt: String(r.created_at ?? ""),
+    initials: r.initials ?? null
   }));
 
   // SKU economics from the BALACLAVA DISTRO DATA sheet (non-fatal — inventory

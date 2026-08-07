@@ -15,12 +15,32 @@ type LedgerPayload = {
   entryType?: string;
   qty?: number;
   note?: string | null;
+  initials?: string | null;
+  loggedAt?: string | null;
   clearOnOrder?: boolean;
 };
 
 // Manual ledger entries only — 'consume' is reserved for the automatic
 // batch-driven depletion and cannot be posted through this route.
 const MANUAL_TYPES = new Set(["count", "receive", "adjust"]);
+
+function localDateValue(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+// Falls back to today rather than rejecting, same as the contact-logs route —
+// a blank/garbled date shouldn't block saving the entry itself.
+function cleanLoggedAt(value: unknown) {
+  const cleaned = String(value ?? "").trim() || localDateValue();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) {
+    return localDateValue();
+  }
+  const parsed = new Date(`${cleaned}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? localDateValue() : cleaned;
+}
 
 export async function POST(request: Request) {
   let payload: LedgerPayload;
@@ -33,6 +53,7 @@ export async function POST(request: Request) {
   const packagingItemId = String(payload.packagingItemId ?? "").trim();
   const entryType = String(payload.entryType ?? "").trim();
   const qty = Number(payload.qty);
+  const loggedAt = cleanLoggedAt(payload.loggedAt);
 
   if (!packagingItemId) return NextResponse.json({ error: "Missing packagingItemId." }, { status: 400 });
   if (!MANUAL_TYPES.has(entryType)) {
@@ -54,7 +75,11 @@ export async function POST(request: Request) {
         packaging_item_id: packagingItemId,
         entry_type: entryType,
         qty,
-        note: payload.note ? String(payload.note).trim() || null : null
+        note: payload.note ? String(payload.note).trim() || null : null,
+        initials: payload.initials ? String(payload.initials).trim().toUpperCase() || null : null,
+        // Noon UTC so the date displays correctly regardless of viewer
+        // timezone (formatShortDate always renders in UTC).
+        created_at: `${loggedAt}T12:00:00.000Z`
       })
       .select("id")
       .single();
