@@ -2661,3 +2661,31 @@ textarea {
   border-radius: 2px;
   background: var(--blue, #378add);
 }
+
+.login-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.login-panel {
+  width: 100%;
+  max-width: 340px;
+  padding: 28px 24px;
+  display: grid;
+  gap: 6px;
+}
+
+.login-title {
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+}
