@@ -4842,6 +4842,10 @@ function PackagingOrderForm({ item, onDone }: { item: PackagingItem; onDone: () 
           // actually took — item.onOrderEta holds the order date, not a
           // literal ETA (see the comment on save() above).
           orderedAt: item.onOrderEta || null,
+          // Tells the server this receive must claim a still-open order —
+          // rejected (409) if it's already been received, so the same
+          // shipment can't be confirmed twice.
+          requireActiveOrder: true,
           note: "Order received"
         })
       });

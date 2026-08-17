@@ -21,6 +21,11 @@ type LedgerPayload = {
   // and store the realized lead time alongside this receive entry.
   orderedAt?: string | null;
   clearOnOrder?: boolean;
+  // Set only by the Order Received flow (PackagingOrderForm), which is
+  // always receiving against a specific tracked order. The plain "Received
+  // shipment" manual log entry (PackagingLedgerForm) never sets this, since
+  // it's a freeform stock addition with no order to require.
+  requireActiveOrder?: boolean;
 };
 
 // Manual ledger entries only — 'consume' is reserved for the automatic
@@ -92,6 +97,42 @@ export async function POST(request: Request) {
 
   try {
     const supabase = createSupabaseAdminClient();
+
+    // The Order Received flow atomically claims the item's open order before
+    // any ledger row is written. This is what stops the same shipment from
+    // being received twice (double-click, a stale tab, two people scanning
+    // the same box) — the claim can only succeed once, so a second attempt
+    // finds on_order_qty already null (or ordered_at already moved on) and is
+    // rejected instead of double-crediting on-hand. The plain "Received
+    // shipment" manual log entry has no order to claim, so it skips this and
+    // just opportunistically clears an on-order flag if one happens to be set.
+    if (entryType === "receive" && payload.requireActiveOrder) {
+      let claimQuery = supabase
+        .from("packaging_items")
+        .update({ on_order_qty: null, on_order_eta: null })
+        .eq("id", packagingItemId)
+        .not("on_order_qty", "is", null);
+      if (orderedAt) {
+        claimQuery = claimQuery.eq("on_order_eta", orderedAt);
+      }
+      const { data: claimed, error: claimError } = await claimQuery.select("id");
+      if (claimError) {
+        return NextResponse.json({ error: claimError.message }, { status: 500 });
+      }
+      if (!claimed || claimed.length === 0) {
+        return NextResponse.json(
+          { error: "This shipment has already been received. Refresh the page to see the current status." },
+          { status: 409 }
+        );
+      }
+    } else if (entryType === "receive" && payload.clearOnOrder !== false) {
+      await supabase
+        .from("packaging_items")
+        .update({ on_order_qty: null, on_order_eta: null })
+        .eq("id", packagingItemId)
+        .not("on_order_qty", "is", null);
+    }
+
     const baseRow = {
       packaging_item_id: packagingItemId,
       entry_type: entryType,
@@ -121,14 +162,6 @@ export async function POST(request: Request) {
         { error: error?.message || "Could not save ledger entry." },
         { status: 500 }
       );
-    }
-
-    // Receiving a shipment clears the on-order flag unless told otherwise
-    if (entryType === "receive" && payload.clearOnOrder !== false) {
-      await supabase
-        .from("packaging_items")
-        .update({ on_order_qty: null, on_order_eta: null })
-        .eq("id", packagingItemId);
     }
 
     revalidateTag(DASHBOARD_DATA_TAG, "max");
