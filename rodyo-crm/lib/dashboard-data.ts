@@ -1,7 +1,7 @@
 import { unstable_cache } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
-import { MONTHLY_REVENUE_CUTOFF, TERRITORY_BRANDS, priorityFromScore, type ContactLog, type InventoryItem, type MonthlyRevenuePoint, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
+import { MONTHLY_REVENUE_CUTOFF, TERRITORY_BRANDS, priorityFromScore, type ContactLog, type DeliveryRegion, type DriverScheduleSlot, type InventoryItem, type MonthlyRevenuePoint, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
 import { fetchSkuEconomics, type SkuEconomics } from "@/lib/sku-economics";
 
 // Cache tag for the dashboard snapshot. Write routes (order sync, contact logs,
@@ -74,6 +74,8 @@ export type DashboardSnapshot = {
   packagingBoms: PackagingBomRow[];
   packagingLedger: PackagingLedgerEntry[];
   skuEconomics: SkuEconomics[];
+  regions: DeliveryRegion[];
+  driverScheduleSlots: DriverScheduleSlot[];
   cultiveraLastSyncedAt?: string | null;
   metrics: {
     totalRetailers: number;
@@ -372,6 +374,8 @@ function demoSnapshot(): DashboardSnapshot {
     packagingBoms: [],
     packagingLedger: [],
     skuEconomics: [],
+    regions: [],
+    driverScheduleSlots: [],
     cultiveraLastSyncedAt: demoOrderLines[0]?.importedAt ?? null,
     metrics: summarize(stores)
   };
@@ -586,7 +590,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
 
   const { data: orderData, error: orderDataError } = await supabase
     .from("orders")
-    .select("id, order_number, store_id, client_name, license, license_key, submitted_at, status, imported_at, order_items(id, brand, product_name, sub_product_line, units, line_total)")
+    .select("id, order_number, store_id, client_name, license, license_key, submitted_at, status, imported_at, transfer_date, estimated_delivery_date, order_items(id, brand, product_name, sub_product_line, units, line_total)")
     .not("submitted_at", "is", null)
     .order("submitted_at", { ascending: false });
   const orderRows = orderDataError ? [] : (orderData || []);
@@ -659,7 +663,9 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
         subProductLine: item?.sub_product_line ?? null,
         units: Number(item?.units ?? 0),
         lineTotal: Number(item?.line_total ?? 0),
-        importedAt: row.imported_at
+        importedAt: row.imported_at,
+        transferDate: row.transfer_date ?? null,
+        estimatedDeliveryDate: row.estimated_delivery_date ?? null
       });
     });
   });
@@ -909,6 +915,30 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
 
   const normalizedStores = normalizeStoreClassifications(stores);
 
+  const { data: regionData } = await supabase
+    .from("regions")
+    .select("id, name, zip_codes")
+    .order("name", { ascending: true });
+  const regions: DeliveryRegion[] = (regionData || []).map((r) => ({
+    id: String(r.id),
+    name: String(r.name ?? ""),
+    zipCodes: Array.isArray(r.zip_codes) ? r.zip_codes.map((zip: unknown) => String(zip)) : []
+  }));
+
+  const { data: driverScheduleData } = await supabase
+    .from("driver_schedule_slots")
+    .select("id, weekday, vehicle_label, region_id, max_stores, max_dollar_value, active")
+    .order("weekday", { ascending: true });
+  const driverScheduleSlots: DriverScheduleSlot[] = (driverScheduleData || []).map((r) => ({
+    id: String(r.id),
+    weekday: Number(r.weekday),
+    vehicleLabel: String(r.vehicle_label ?? ""),
+    regionId: r.region_id ? String(r.region_id) : null,
+    maxStores: r.max_stores != null ? Number(r.max_stores) : null,
+    maxDollarValue: r.max_dollar_value != null ? Number(r.max_dollar_value) : null,
+    active: Boolean(r.active ?? true)
+  }));
+
   return {
     source: "supabase",
     stores: normalizedStores,
@@ -921,6 +951,8 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     packagingBoms,
     packagingLedger,
     skuEconomics,
+    regions,
+    driverScheduleSlots,
     cultiveraLastSyncedAt,
     metrics: summarize(normalizedStores)
   };

@@ -1304,6 +1304,115 @@ textarea {
   opacity: 0.6;
 }
 
+.deliveries-view {
+  display: grid;
+  gap: 14px;
+}
+
+.deliveries-panel {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.deliveries-form {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.deliveries-list {
+  display: grid;
+  gap: 8px;
+}
+
+.deliveries-list-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.deliveries-list-row-content {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.deliveries-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.deliveries-weekday-group {
+  display: grid;
+  gap: 8px;
+}
+
+.deliveries-weekday-title {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.deliveries-toggle-confirmed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.deliveries-alert-banner {
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.85rem;
+  background: color-mix(in srgb, var(--danger, #ef4444) 14%, transparent);
+  color: var(--danger, #ef4444);
+}
+
+.deliveries-status-pill {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.deliveries-status-overdue {
+  background: color-mix(in srgb, var(--danger, #ef4444) 14%, transparent);
+  color: var(--danger, #ef4444);
+}
+
+.deliveries-status-due-soon {
+  background: color-mix(in srgb, var(--warning, #f59e0b) 16%, transparent);
+  color: var(--warning, #f59e0b);
+}
+
+.deliveries-status-on-track {
+  background: color-mix(in srgb, var(--success, #22c55e) 12%, transparent);
+  color: var(--success, #22c55e);
+}
+
+.deliveries-status-confirmed {
+  background: var(--panel-2);
+  color: var(--muted);
+}
+
+.deliveries-status-unknown {
+  background: var(--panel-2);
+  color: var(--muted);
+}
+
+.deliveries-row-overdue td {
+  background: color-mix(in srgb, var(--danger, #ef4444) 6%, transparent);
+}
+
 .orders-view {
   display: grid;
   gap: 14px;

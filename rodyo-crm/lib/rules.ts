@@ -114,6 +114,28 @@ export type OrderLine = {
   units: number;
   lineTotal: number;
   importedAt?: string | null;
+  // "Transfer Date" from Cultivera — only populates once an order is actually
+  // invoiced/manifested, the closest proxy to a real delivery confirmation.
+  transferDate?: string | null;
+  // "Estimated delivery date" from Cultivera — present from submission, a
+  // forward-looking estimate rather than a confirmation.
+  estimatedDeliveryDate?: string | null;
+};
+
+export type DeliveryRegion = {
+  id: string;
+  name: string;
+  zipCodes: string[];
+};
+
+export type DriverScheduleSlot = {
+  id: string;
+  weekday: number; // 1 (Mon) - 7 (Sun)
+  vehicleLabel: string;
+  regionId: string | null;
+  maxStores: number | null;
+  maxDollarValue: number | null;
+  active: boolean;
 };
 
 // Cultivera order sync only covers submitted_at >= this date; store sales

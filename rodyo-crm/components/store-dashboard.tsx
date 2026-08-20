@@ -27,6 +27,8 @@ import {
   isStoreOverdue,
   overdueColor,
   type ContactLog,
+  type DeliveryRegion,
+  type DriverScheduleSlot,
   type InventoryItem,
   type MonthlyRevenuePoint,
   type OrderLine,
@@ -39,7 +41,7 @@ type StoreDashboardProps = {
   initialView?: string | null;
 };
 
-type ViewMode = "stores" | "map" | "orders" | "groups" | "skus" | "goals" | "logs" | "sync" | "inventory";
+type ViewMode = "stores" | "map" | "orders" | "groups" | "skus" | "goals" | "logs" | "sync" | "inventory" | "deliveries";
 type DetailTab = "contact" | "orders" | "buyer" | "delivery" | "history" | "samples" | "retail";
 type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "lastLog" | "group" | "rep" | "log";
 type LogSortKey = "date" | "store" | "rep" | "method";
@@ -96,7 +98,7 @@ type ContactLogPatch = {
 type SyncState = "idle" | "syncing" | "success" | "error";
 
 function normalizeViewMode(value?: string | null): ViewMode {
-  return value === "map" || value === "orders" || value === "groups" || value === "skus" || value === "goals" || value === "logs" || value === "sync" || value === "inventory" ? value : "stores";
+  return value === "map" || value === "orders" || value === "groups" || value === "skus" || value === "goals" || value === "logs" || value === "sync" || value === "inventory" || value === "deliveries" ? value : "stores";
 }
 
 const defaultStoreFilters: StoreFilters = {
@@ -8970,6 +8972,595 @@ function StoreDetailContent({
   );
 }
 
+type DeliveriesSubView = "queue" | "regions" | "schedule";
+
+function parseZipCodesInput(value: string): string[] {
+  return [...new Set(value.split(/[\s,]+/).map((zip) => zip.trim()).filter(Boolean))];
+}
+
+type RegionFormState = { name: string; zipCodes: string };
+
+function RegionForm({
+  initial,
+  isSaving,
+  onSubmit,
+  onCancel
+}: {
+  initial: RegionFormState;
+  isSaving: boolean;
+  onSubmit: (form: RegionFormState) => void;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState<RegionFormState>(initial);
+
+  return (
+    <form
+      className="detail-form deliveries-form"
+      onSubmit={(event) => { event.preventDefault(); onSubmit(form); }}
+    >
+      <div className="field">
+        <label>Region name</label>
+        <input
+          value={form.name}
+          onChange={(event) => setForm((f) => ({ ...f, name: event.target.value }))}
+          placeholder="e.g. I-5 North"
+          disabled={isSaving}
+          required
+        />
+      </div>
+      <div className="field">
+        <label>Zip codes (comma or newline separated)</label>
+        <textarea
+          rows={3}
+          value={form.zipCodes}
+          onChange={(event) => setForm((f) => ({ ...f, zipCodes: event.target.value }))}
+          placeholder="98225, 98226, 98229"
+          disabled={isSaving}
+          style={{ resize: "vertical" }}
+        />
+      </div>
+      <div className="detail-form-actions">
+        <button className="primary-button" type="submit" disabled={isSaving}>
+          {isSaving ? "Saving…" : "Save"}
+        </button>
+        <button className="secondary-button" type="button" onClick={onCancel} disabled={isSaving}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function RegionsPanel({ regions }: { regions: DeliveryRegion[] }) {
+  const router = useRouter();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function saveRegion(id: string | undefined, form: RegionFormState) {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/regions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, name: form.name, zipCodes: parseZipCodesInput(form.zipCodes) })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save region.");
+      setEditingId(null);
+      setIsCreating(false);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save region.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function deleteRegion(id: string) {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/regions?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not delete region.");
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete region.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="panel deliveries-panel">
+      <div className="panel-header">
+        <h3>Regions</h3>
+        <span className="table-meta">{regions.length.toLocaleString()} defined</span>
+        {!isCreating ? (
+          <button className="secondary-button" type="button" onClick={() => setIsCreating(true)}>
+            + Add Region
+          </button>
+        ) : null}
+      </div>
+      {error ? <p className="form-error">{error}</p> : null}
+      {isCreating ? (
+        <RegionForm
+          initial={{ name: "", zipCodes: "" }}
+          isSaving={isSaving}
+          onSubmit={(form) => saveRegion(undefined, form)}
+          onCancel={() => setIsCreating(false)}
+        />
+      ) : null}
+      <div className="deliveries-list">
+        {regions.map((region) => (
+          <div className="deliveries-list-row" key={region.id}>
+            {editingId === region.id ? (
+              <RegionForm
+                initial={{ name: region.name, zipCodes: region.zipCodes.join(", ") }}
+                isSaving={isSaving}
+                onSubmit={(form) => saveRegion(region.id, form)}
+                onCancel={() => setEditingId(null)}
+              />
+            ) : (
+              <div className="deliveries-list-row-content">
+                <div>
+                  <strong>{region.name}</strong>
+                  <p className="table-meta" style={{ marginTop: 4 }}>
+                    {region.zipCodes.length ? region.zipCodes.join(", ") : "No zip codes assigned"}
+                  </p>
+                </div>
+                <div className="deliveries-row-actions">
+                  <button className="secondary-button" type="button" onClick={() => setEditingId(region.id)}>Edit</button>
+                  <button className="secondary-button" type="button" onClick={() => deleteRegion(region.id)}>Delete</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+        {!regions.length ? <p className="detail-note">No regions defined yet.</p> : null}
+      </div>
+    </div>
+  );
+}
+
+type DriverScheduleFormState = {
+  weekday: number;
+  vehicleLabel: string;
+  regionId: string;
+  maxStores: string;
+  maxDollarValue: string;
+  active: boolean;
+};
+
+function DriverScheduleForm({
+  initial,
+  regions,
+  isSaving,
+  onSubmit,
+  onCancel
+}: {
+  initial: DriverScheduleFormState;
+  regions: DeliveryRegion[];
+  isSaving: boolean;
+  onSubmit: (form: DriverScheduleFormState) => void;
+  onCancel: () => void;
+}) {
+  const [form, setForm] = useState<DriverScheduleFormState>(initial);
+
+  return (
+    <form
+      className="detail-form deliveries-form"
+      onSubmit={(event) => { event.preventDefault(); onSubmit(form); }}
+    >
+      <div className="form-grid">
+        <div className="field">
+          <label>Weekday</label>
+          <select
+            value={form.weekday}
+            onChange={(event) => setForm((f) => ({ ...f, weekday: Number(event.target.value) }))}
+            disabled={isSaving}
+          >
+            {DELIVERY_WEEKDAYS.map(({ day, full }) => (
+              <option key={day} value={day}>{full}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>Vehicle</label>
+          <input
+            value={form.vehicleLabel}
+            onChange={(event) => setForm((f) => ({ ...f, vehicleLabel: event.target.value }))}
+            placeholder="e.g. Truck 1"
+            disabled={isSaving}
+            required
+          />
+        </div>
+        <div className="field">
+          <label>Region</label>
+          <select
+            value={form.regionId}
+            onChange={(event) => setForm((f) => ({ ...f, regionId: event.target.value }))}
+            disabled={isSaving}
+          >
+            <option value="">Unassigned</option>
+            {regions.map((region) => (
+              <option key={region.id} value={region.id}>{region.name}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>Max stores / trip</label>
+          <input
+            type="number"
+            min={0}
+            value={form.maxStores}
+            onChange={(event) => setForm((f) => ({ ...f, maxStores: event.target.value }))}
+            placeholder="No limit"
+            disabled={isSaving}
+          />
+        </div>
+        <div className="field">
+          <label>Max $ / trip</label>
+          <input
+            type="number"
+            min={0}
+            value={form.maxDollarValue}
+            onChange={(event) => setForm((f) => ({ ...f, maxDollarValue: event.target.value }))}
+            placeholder="No limit"
+            disabled={isSaving}
+          />
+        </div>
+        <div className="field">
+          <label>Status</label>
+          <select
+            value={form.active ? "yes" : "no"}
+            onChange={(event) => setForm((f) => ({ ...f, active: event.target.value === "yes" }))}
+            disabled={isSaving}
+          >
+            <option value="yes">Active</option>
+            <option value="no">Paused</option>
+          </select>
+        </div>
+      </div>
+      <div className="detail-form-actions">
+        <button className="primary-button" type="submit" disabled={isSaving}>
+          {isSaving ? "Saving…" : "Save"}
+        </button>
+        <button className="secondary-button" type="button" onClick={onCancel} disabled={isSaving}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+const emptyDriverScheduleForm: DriverScheduleFormState = {
+  weekday: 1,
+  vehicleLabel: "",
+  regionId: "",
+  maxStores: "",
+  maxDollarValue: "",
+  active: true
+};
+
+function DriverSchedulePanel({ slots, regions }: { slots: DriverScheduleSlot[]; regions: DeliveryRegion[] }) {
+  const router = useRouter();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const regionsById = useMemo(() => new Map(regions.map((region) => [region.id, region])), [regions]);
+  const slotsByWeekday = useMemo(() => {
+    const map = new Map<number, DriverScheduleSlot[]>();
+    slots.forEach((slot) => {
+      const list = map.get(slot.weekday) || [];
+      list.push(slot);
+      map.set(slot.weekday, list);
+    });
+    return map;
+  }, [slots]);
+
+  async function saveSlot(id: string | undefined, form: DriverScheduleFormState) {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/driver-schedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id,
+          weekday: form.weekday,
+          vehicleLabel: form.vehicleLabel,
+          regionId: form.regionId || null,
+          maxStores: form.maxStores.trim() === "" ? null : Number(form.maxStores),
+          maxDollarValue: form.maxDollarValue.trim() === "" ? null : Number(form.maxDollarValue),
+          active: form.active
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save driver schedule slot.");
+      setEditingId(null);
+      setIsCreating(false);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save driver schedule slot.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function deleteSlot(id: string) {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/driver-schedule?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not delete driver schedule slot.");
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete driver schedule slot.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="panel deliveries-panel">
+      <div className="panel-header">
+        <h3>Driver Schedule</h3>
+        <span className="table-meta">{slots.length.toLocaleString()} vehicle-days configured</span>
+        {!isCreating ? (
+          <button className="secondary-button" type="button" onClick={() => setIsCreating(true)}>
+            + Add Slot
+          </button>
+        ) : null}
+      </div>
+      {error ? <p className="form-error">{error}</p> : null}
+      {isCreating ? (
+        <DriverScheduleForm
+          initial={emptyDriverScheduleForm}
+          regions={regions}
+          isSaving={isSaving}
+          onSubmit={(form) => saveSlot(undefined, form)}
+          onCancel={() => setIsCreating(false)}
+        />
+      ) : null}
+      {DELIVERY_WEEKDAYS.map(({ day, full }) => {
+        const daySlots = slotsByWeekday.get(day) || [];
+        if (!daySlots.length) {
+          return null;
+        }
+        return (
+          <div key={day} className="deliveries-weekday-group">
+            <div className="deliveries-weekday-title">{full}</div>
+            <div className="deliveries-list">
+              {daySlots.map((slot) => (
+                <div key={slot.id} className="deliveries-list-row">
+                  {editingId === slot.id ? (
+                    <DriverScheduleForm
+                      initial={{
+                        weekday: slot.weekday,
+                        vehicleLabel: slot.vehicleLabel,
+                        regionId: slot.regionId || "",
+                        maxStores: slot.maxStores != null ? String(slot.maxStores) : "",
+                        maxDollarValue: slot.maxDollarValue != null ? String(slot.maxDollarValue) : "",
+                        active: slot.active
+                      }}
+                      regions={regions}
+                      isSaving={isSaving}
+                      onSubmit={(form) => saveSlot(slot.id, form)}
+                      onCancel={() => setEditingId(null)}
+                    />
+                  ) : (
+                    <div className="deliveries-list-row-content">
+                      <div>
+                        <strong>{slot.vehicleLabel}</strong>
+                        {!slot.active ? <span className="table-meta"> (paused)</span> : null}
+                        <p className="table-meta" style={{ marginTop: 4 }}>
+                          {regionsById.get(slot.regionId || "")?.name || "Unassigned region"}
+                          {slot.maxStores != null ? ` · Max ${slot.maxStores} stores` : ""}
+                          {slot.maxDollarValue != null ? ` · Max ${formatUsd(slot.maxDollarValue)}` : ""}
+                        </p>
+                      </div>
+                      <div className="deliveries-row-actions">
+                        <button className="secondary-button" type="button" onClick={() => setEditingId(slot.id)}>Edit</button>
+                        <button className="secondary-button" type="button" onClick={() => deleteSlot(slot.id)}>Delete</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      {!slots.length ? <p className="detail-note">No driver schedule configured yet.</p> : null}
+    </div>
+  );
+}
+
+type DeliveryQueueOrder = {
+  key: string;
+  orderNumber: string;
+  storeId: string | null;
+  storeName: string;
+  submittedAt: string | null;
+  total: number;
+  transferDate: string | null;
+  slaDeadline: string | null;
+};
+
+// Per-order rollup for the due-date queue — orderLines is per line item, but
+// the SLA/alert/confirmation state is meaningful at the order level.
+function groupOrdersForDeliveryQueue(lines: OrderLine[]): DeliveryQueueOrder[] {
+  const byOrder = new Map<string, DeliveryQueueOrder>();
+  lines.forEach((line) => {
+    if (!line.lineTotal) {
+      return;
+    }
+    const key = orderLineKey(line);
+    const current = byOrder.get(key);
+    if (current) {
+      current.total += line.lineTotal;
+      if (!current.transferDate && line.transferDate) {
+        current.transferDate = line.transferDate;
+      }
+      return;
+    }
+    const submittedDate = dateInputValue(line.submittedAt);
+    byOrder.set(key, {
+      key,
+      orderNumber: line.orderNumber,
+      storeId: line.storeId ?? null,
+      storeName: line.storeName,
+      submittedAt: line.submittedAt || null,
+      total: line.lineTotal,
+      transferDate: line.transferDate ?? null,
+      slaDeadline: submittedDate ? addUtcDays(submittedDate, 7) : null
+    });
+  });
+  return [...byOrder.values()].sort(
+    (left, right) => (left.slaDeadline || "9999").localeCompare(right.slaDeadline || "9999")
+  );
+}
+
+type QueueUrgency = "confirmed" | "overdue" | "due-soon" | "on-track" | "unknown";
+
+function queueUrgency(order: DeliveryQueueOrder, today: string): QueueUrgency {
+  if (order.transferDate) {
+    return "confirmed";
+  }
+  if (!order.slaDeadline) {
+    return "unknown";
+  }
+  if (order.slaDeadline < today) {
+    return "overdue";
+  }
+  if (order.slaDeadline <= addUtcDays(today, 2)) {
+    return "due-soon";
+  }
+  return "on-track";
+}
+
+const QUEUE_URGENCY_LABEL: Record<QueueUrgency, string> = {
+  confirmed: "Delivered",
+  overdue: "Overdue",
+  "due-soon": "Due soon",
+  "on-track": "On track",
+  unknown: "No submit date"
+};
+
+function DeliveryQueuePanel({ orderLines }: { orderLines: OrderLine[] }) {
+  const today = localDateInputValue();
+  const queue = useMemo(() => groupOrdersForDeliveryQueue(orderLines), [orderLines]);
+  const withUrgency = useMemo(
+    () => queue.map((order) => ({ order, urgency: queueUrgency(order, today) })),
+    [queue, today]
+  );
+  const overdueCount = withUrgency.filter((row) => row.urgency === "overdue").length;
+  const [showConfirmed, setShowConfirmed] = useState(false);
+  const visibleRows = showConfirmed ? withUrgency : withUrgency.filter((row) => row.urgency !== "confirmed");
+
+  return (
+    <div className="panel deliveries-panel">
+      <div className="panel-header">
+        <h3>Delivery Due Dates</h3>
+        <span className="table-meta">{queue.length.toLocaleString()} orders · 7-day SLA from submission</span>
+        <label className="deliveries-toggle-confirmed">
+          <input type="checkbox" checked={showConfirmed} onChange={(event) => setShowConfirmed(event.target.checked)} />
+          Show delivered
+        </label>
+      </div>
+      {overdueCount > 0 ? (
+        <div className="deliveries-alert-banner">
+          {overdueCount.toLocaleString()} order{overdueCount === 1 ? "" : "s"} past the 7-day delivery window and not yet confirmed delivered.
+        </div>
+      ) : null}
+      <div className="table-scroll">
+        <table className="mini-table">
+          <thead>
+            <tr>
+              <th>Store</th>
+              <th>Order #</th>
+              <th>Submitted</th>
+              <th>Total</th>
+              <th>SLA Deadline</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleRows.map(({ order, urgency }) => (
+              <tr key={order.key} className={`deliveries-row-${urgency}`}>
+                <td>{order.storeName}</td>
+                <td>{order.orderNumber}</td>
+                <td>{formatShortDate(order.submittedAt)}</td>
+                <td>{formatUsd(order.total)}</td>
+                <td>{order.slaDeadline ? formatShortDate(order.slaDeadline) : "-"}</td>
+                <td>
+                  <span className={`deliveries-status-pill deliveries-status-${urgency}`}>
+                    {QUEUE_URGENCY_LABEL[urgency]}
+                  </span>
+                </td>
+              </tr>
+            ))}
+            {!visibleRows.length ? (
+              <tr>
+                <td colSpan={6}>No orders awaiting delivery.</td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function DeliveriesView({
+  orderLines,
+  regions,
+  driverScheduleSlots
+}: {
+  orderLines: OrderLine[];
+  regions: DeliveryRegion[];
+  driverScheduleSlots: DriverScheduleSlot[];
+}) {
+  const [subView, setSubView] = useState<DeliveriesSubView>("queue");
+
+  return (
+    <section className="deliveries-view">
+      <div className="sku-group-tabs">
+        <button
+          className={`secondary-button${subView === "queue" ? " active-tab" : ""}`}
+          type="button"
+          onClick={() => setSubView("queue")}
+        >
+          Due Dates
+        </button>
+        <button
+          className={`secondary-button${subView === "regions" ? " active-tab" : ""}`}
+          type="button"
+          onClick={() => setSubView("regions")}
+        >
+          Regions
+        </button>
+        <button
+          className={`secondary-button${subView === "schedule" ? " active-tab" : ""}`}
+          type="button"
+          onClick={() => setSubView("schedule")}
+        >
+          Schedule
+        </button>
+      </div>
+      {subView === "queue" ? <DeliveryQueuePanel orderLines={orderLines} /> : null}
+      {subView === "regions" ? <RegionsPanel regions={regions} /> : null}
+      {subView === "schedule" ? <DriverSchedulePanel slots={driverScheduleSlots} regions={regions} /> : null}
+    </section>
+  );
+}
+
 export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   const [stores, setStores] = useState(snapshot.stores);
   const orderLines = snapshot.orderLines || [];
@@ -9052,6 +9643,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? "Sync"
     : activeView === "inventory"
     ? "Inventory"
+    : activeView === "deliveries"
+    ? "Deliveries"
     : "Stores";
   const viewCaption = activeView === "map"
     ? `${mappedStoreCount.toLocaleString()} mapped of ${sortedStores.length.toLocaleString()} filtered stores · ${tripStoreKeys.length.toLocaleString()} stops planned`
@@ -9069,6 +9662,8 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
     ? `${uniqueOrderCount(orderLines).toLocaleString()} synced orders · ${orderLines.length.toLocaleString()} line items`
     : activeView === "inventory"
     ? `${snapshot.inventoryItems.length.toLocaleString()} SKUs in stock snapshot`
+    : activeView === "deliveries"
+    ? `${(snapshot.regions || []).length.toLocaleString()} regions · ${(snapshot.driverScheduleSlots || []).length.toLocaleString()} scheduled vehicle-days`
     : snapshot.source === "demo"
     ? "Demo shell. Connect Supabase to load live CRM data."
     : "Live Supabase data";
@@ -9098,7 +9693,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   }, []);
 
   useEffect(() => {
-    const selectionScope = activeView === "orders" || activeView === "groups" || activeView === "skus" || activeView === "goals" || activeView === "logs" || activeView === "sync" || activeView === "inventory" ? stores : sortedStores;
+    const selectionScope = activeView === "orders" || activeView === "groups" || activeView === "skus" || activeView === "goals" || activeView === "logs" || activeView === "sync" || activeView === "inventory" || activeView === "deliveries" ? stores : sortedStores;
     if (!selectionScope.length) {
       setSelectedStoreKey("");
       return;
@@ -9291,6 +9886,9 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
           </a>
           <a className={activeView === "inventory" ? "active" : ""} href="/?view=inventory">
             Inventory
+          </a>
+          <a className={activeView === "deliveries" ? "active" : ""} href="/?view=deliveries">
+            Deliveries
           </a>
           <a className={activeView === "sync" ? "active" : ""} href="/?view=sync">
             Sync
@@ -9654,6 +10252,12 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
             packagingBoms={snapshot.packagingBoms}
             packagingLedger={snapshot.packagingLedger}
             skuEconomics={snapshot.skuEconomics}
+          />
+        ) : activeView === "deliveries" ? (
+          <DeliveriesView
+            orderLines={orderLines}
+            regions={snapshot.regions || []}
+            driverScheduleSlots={snapshot.driverScheduleSlots || []}
           />
         ) : activeView === "sync" ? (
           <SyncView

@@ -85,6 +85,24 @@ function parseTimestamp(value: unknown) {
   return Number.isNaN(timestamp.getTime()) ? null : timestamp.toISOString();
 }
 
+// Date-only (no time-of-day), and deliberately not routed through
+// parseTimestamp/toISOString — that converts to UTC and can shift an M/D/YYYY
+// sheet value to the previous or next calendar day depending on the server's
+// timezone. Cultivera's date columns ("Transfer Date", "Estimated delivery
+// date") are always M/D/YYYY, so parse that directly into YYYY-MM-DD.
+function parseDateOnly(value: unknown) {
+  const cleaned = cleanCell(value);
+  if (!cleaned) {
+    return null;
+  }
+  const match = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!match) {
+    return null;
+  }
+  const [, month, day, year] = match;
+  return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
+
 function brandFromPrefix(value: unknown) {
   const text = cleanCell(value);
   if (text.startsWith("LL")) return "Leisure Land";
@@ -246,6 +264,8 @@ async function runOrderSync() {
     const licenseCol = firstSourceColumn(sample, ["License #", "License"]);
     const submittedCol = firstSourceColumn(sample, ["Submitted Date", "Order Date", "Date"]);
     const statusCol = firstSourceColumn(sample, ["Status", "Order Status"]);
+    const transferDateCol = firstSourceColumn(sample, ["Transfer Date"]);
+    const estimatedDeliveryCol = firstSourceColumn(sample, ["Estimated delivery date"]);
     const brandCol = firstSourceColumn(sample, ["Brand"]);
     const productCol = firstSourceColumn(sample, ["Product", "Product Name", "Inventory Name", "Item"]);
     const subProductCol = firstSourceColumn(sample, ["Sub Product Line", "Subproduct Line"]);
@@ -301,6 +321,8 @@ async function runOrderSync() {
         license_key: licenseKey,
         submitted_at: submittedCol ? parseTimestamp(row[submittedCol]) : null,
         status: statusCol ? cleanCell(row[statusCol]) : "",
+        transfer_date: transferDateCol ? parseDateOnly(row[transferDateCol]) : null,
+        estimated_delivery_date: estimatedDeliveryCol ? parseDateOnly(row[estimatedDeliveryCol]) : null,
         source_name: "cultivera",
         imported_at: syncedAt,
         raw_payload: rowPayload(row)
