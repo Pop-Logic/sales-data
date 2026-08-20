@@ -122,6 +122,11 @@ export type OrderLine = {
   estimatedDeliveryDate?: string | null;
 };
 
+// Orders submitted before this date predate the delivery-scheduling
+// workflow being live and are legacy noise, not real dispatch candidates —
+// excluded from both the due-date queue display and assignment.
+export const DELIVERY_QUEUE_CUTOFF = "2026-08-01";
+
 export type DeliveryRegion = {
   id: string;
   name: string;

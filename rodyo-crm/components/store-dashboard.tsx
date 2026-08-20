@@ -20,6 +20,7 @@ import { computeDeliveryAssignments, type PendingDeliveryOrder } from "@/lib/del
 import { extractStrain, extractUnitSize, stripBrandPrefix } from "@/lib/product-parse";
 import { valueInventory, type InventoryValuation, type SkuEconomics } from "@/lib/sku-economics";
 import {
+  DELIVERY_QUEUE_CUTOFF,
   MONTHLY_REVENUE_CUTOFF,
   TERRITORY_BRANDS,
   TERRITORY_MAP_COLORS,
@@ -9404,6 +9405,10 @@ function groupOrdersForDeliveryQueue(lines: OrderLine[]): DeliveryQueueOrder[] {
     if (!line.lineTotal) {
       return;
     }
+    const submittedDate = dateInputValue(line.submittedAt);
+    if (!submittedDate || submittedDate < DELIVERY_QUEUE_CUTOFF) {
+      return;
+    }
     const key = orderLineKey(line);
     const current = byOrder.get(key);
     if (current) {
@@ -9413,7 +9418,6 @@ function groupOrdersForDeliveryQueue(lines: OrderLine[]): DeliveryQueueOrder[] {
       }
       return;
     }
-    const submittedDate = dateInputValue(line.submittedAt);
     byOrder.set(key, {
       key,
       orderId: line.orderId,
@@ -9568,7 +9572,9 @@ function DeliveryQueuePanel({
     <div className="panel deliveries-panel">
       <div className="panel-header">
         <h3>Delivery Due Dates</h3>
-        <span className="table-meta">{queue.length.toLocaleString()} orders · 7-day SLA from submission</span>
+        <span className="table-meta">
+          {queue.length.toLocaleString()} orders since {formatShortDate(DELIVERY_QUEUE_CUTOFF)} · 7-day SLA from submission
+        </span>
         <label className="deliveries-toggle-confirmed">
           <input type="checkbox" checked={showConfirmed} onChange={(event) => setShowConfirmed(event.target.checked)} />
           Show delivered

@@ -3,6 +3,7 @@ import { revalidateTag } from "next/cache";
 import { createClient } from "@supabase/supabase-js";
 import { DASHBOARD_DATA_TAG } from "@/lib/dashboard-data";
 import { addDaysUtc, computeDeliveryAssignments, dateOnly, type PendingDeliveryOrder } from "@/lib/delivery-scheduling";
+import { DELIVERY_QUEUE_CUTOFF } from "@/lib/rules";
 
 function createSupabaseAdminClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -55,7 +56,13 @@ export async function POST() {
     const alreadyAssignedOrderIds = new Set((existingRows || []).map((row) => String(row.order_id)));
 
     const pendingOrders: PendingDeliveryOrder[] = (orderRows || [])
-      .filter((row) => !row.transfer_date && !alreadyAssignedOrderIds.has(String(row.id)))
+      .filter((row) => {
+        const submittedDate = dateOnly(row.submitted_at as string | null);
+        return !row.transfer_date
+          && !alreadyAssignedOrderIds.has(String(row.id))
+          && submittedDate
+          && submittedDate >= DELIVERY_QUEUE_CUTOFF;
+      })
       .map((row) => {
         const store = row.store_id ? storesById.get(String(row.store_id)) : undefined;
         const submittedDate = dateOnly(row.submitted_at as string | null);
