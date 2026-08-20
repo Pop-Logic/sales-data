@@ -16,7 +16,13 @@ import {
   X
 } from "lucide-react";
 import type { DashboardSnapshot, PackagingItem, PackagingBomRow, PackagingLedgerEntry } from "@/lib/dashboard-data";
-import { computeDeliveryAssignments, type PendingDeliveryOrder } from "@/lib/delivery-scheduling";
+import {
+  computeDeliveryAssignments,
+  nextOccurrence,
+  UNSCHEDULABLE_REASON_LABEL,
+  type PendingDeliveryOrder,
+  type UnschedulableReason
+} from "@/lib/delivery-scheduling";
 import { extractStrain, extractUnitSize, stripBrandPrefix } from "@/lib/product-parse";
 import { valueInventory, type InventoryValuation, type SkuEconomics } from "@/lib/sku-economics";
 import {
@@ -2412,6 +2418,31 @@ function createPopupContent(store: StoreRollup) {
   return container;
 }
 
+function createRouteStopPopupContent(store: StoreRollup, stopLabel: string) {
+  const container = document.createElement("div");
+  container.className = "map-popup";
+
+  const title = document.createElement("strong");
+  title.textContent = `${stopLabel} · ${store.storeName}`;
+  container.appendChild(title);
+
+  const address = document.createElement("span");
+  address.textContent = [store.address, store.city, store.state].filter(Boolean).join(", ") || "No address on file";
+  container.appendChild(address);
+
+  if (store.phoneNumber) {
+    const phone = document.createElement("span");
+    phone.textContent = store.phoneNumber;
+    container.appendChild(phone);
+  }
+
+  const license = document.createElement("span");
+  license.textContent = `License ${store.license}`;
+  container.appendChild(license);
+
+  return container;
+}
+
 function StoreMap({
   stores,
   routeStart = DEFAULT_ROUTE_START,
@@ -2695,7 +2726,9 @@ function StoreMap({
       title: string,
       coordinates: Coordinates,
       tone: "start" | "waypoint" | "end",
-      selectStoreKey?: string
+      selectStoreKey?: string,
+      labelText?: string,
+      store?: StoreRollup
     ) {
       const element = document.createElement(selectStoreKey ? "button" : "div");
       element.className = `route-marker route-marker-${tone}`;
@@ -2707,6 +2740,13 @@ function StoreMap({
         element.addEventListener("click", () => onSelect(selectStoreKey));
       }
 
+      if (labelText) {
+        const labelEl = document.createElement("span");
+        labelEl.className = "route-marker-label";
+        labelEl.textContent = labelText;
+        element.appendChild(labelEl);
+      }
+
       const marker = new maplibre.Marker({
         element,
         anchor: "center"
@@ -2714,10 +2754,23 @@ function StoreMap({
         .setLngLat([coordinates.longitude, coordinates.latitude])
         .addTo(mapInstance);
 
+      if (store) {
+        const popup = new maplibre.Popup({
+          closeButton: false,
+          closeOnClick: false,
+          offset: 18
+        })
+          .setLngLat([coordinates.longitude, coordinates.latitude])
+          .setDOMContent(createRouteStopPopupContent(store, title.split(": ")[0] || title));
+        marker.setPopup(popup);
+        element.addEventListener("mouseenter", () => popup.addTo(mapInstance));
+        element.addEventListener("mouseleave", () => popup.remove());
+      }
+
       routeMarkersRef.current.set(key, marker);
     }
 
-    addRouteMarker("start", "S", `Start: ${routeStart.label || "Custom start"}`, routeStart, "start");
+    addRouteMarker("start", "S", `Start: ${routeStart.label || "Custom start"}`, routeStart, "start", undefined, routeStart.label || undefined);
     routeStops.forEach((store, index) => {
       const isEnd = !routeEnd && index === routeStops.length - 1;
       addRouteMarker(
@@ -2726,11 +2779,13 @@ function StoreMap({
         `${isEnd ? "End" : `Waypoint ${index + 1}`}: ${store.storeName}`,
         storeCoordinates(store),
         isEnd ? "end" : "waypoint",
-        storeKey(store)
+        storeKey(store),
+        store.storeName,
+        store
       );
     });
     if (routeEnd) {
-      addRouteMarker("route-end", "H", `End: ${routeEnd.label}`, routeEnd, "end");
+      addRouteMarker("route-end", "H", `End: ${routeEnd.label}`, routeEnd, "end", undefined, routeEnd.label || undefined);
     }
   }, [
     isMapReady,
@@ -9394,6 +9449,7 @@ type DeliveryQueueOrder = {
   submittedAt: string | null;
   total: number;
   transferDate: string | null;
+  manualDeliveredAt: string | null;
   slaDeadline: string | null;
 };
 
@@ -9416,6 +9472,9 @@ function groupOrdersForDeliveryQueue(lines: OrderLine[]): DeliveryQueueOrder[] {
       if (!current.transferDate && line.transferDate) {
         current.transferDate = line.transferDate;
       }
+      if (!current.manualDeliveredAt && line.manualDeliveredAt) {
+        current.manualDeliveredAt = line.manualDeliveredAt;
+      }
       return;
     }
     byOrder.set(key, {
@@ -9427,6 +9486,7 @@ function groupOrdersForDeliveryQueue(lines: OrderLine[]): DeliveryQueueOrder[] {
       submittedAt: line.submittedAt || null,
       total: line.lineTotal,
       transferDate: line.transferDate ?? null,
+      manualDeliveredAt: line.manualDeliveredAt ?? null,
       slaDeadline: submittedDate ? addUtcDays(submittedDate, 7) : null
     });
   });
@@ -9446,6 +9506,112 @@ const QUEUE_URGENCY_LABEL: Record<QueueUrgency, string> = {
   "on-track": "On track",
   unknown: "No submit date"
 };
+
+function DeliveryQueueRowActions({
+  order,
+  urgency,
+  delivery,
+  slots
+}: {
+  order: DeliveryQueueOrder;
+  urgency: QueueUrgency;
+  delivery: OrderDelivery | undefined;
+  slots: DriverScheduleSlot[];
+}) {
+  const router = useRouter();
+  const activeSlots = useMemo(() => slots.filter((slot) => slot.active), [slots]);
+  const today = localDateInputValue();
+  const [showAssign, setShowAssign] = useState(false);
+  const [slotId, setSlotId] = useState(() => activeSlots[0]?.id || "");
+  const [date, setDate] = useState(() => (activeSlots[0] ? nextOccurrence(today, activeSlots[0].weekday) : today));
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function handleSlotChange(id: string) {
+    setSlotId(id);
+    const slot = activeSlots.find((candidate) => candidate.id === id);
+    if (slot) {
+      setDate(nextOccurrence(today, slot.weekday));
+    }
+  }
+
+  async function runAction(action: () => Promise<Response>) {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const response = await action();
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save.");
+      setShowAssign(false);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  const saveAssign = () => runAction(() => fetch("/api/deliveries/manual-assign", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ orderId: order.orderId, slotId, scheduledDate: date, orderTotal: order.total })
+  }));
+  const unassign = () => runAction(() => fetch(`/api/deliveries/manual-assign?orderId=${encodeURIComponent(order.orderId)}`, { method: "DELETE" }));
+  const markDelivered = () => runAction(() => fetch("/api/deliveries/mark-delivered", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ orderId: order.orderId })
+  }));
+  const undoDelivered = () => runAction(() => fetch(`/api/deliveries/mark-delivered?orderId=${encodeURIComponent(order.orderId)}`, { method: "DELETE" }));
+
+  if (urgency === "confirmed") {
+    return (
+      <div className="deliveries-row-inline-actions">
+        {order.manualDeliveredAt ? (
+          <button className="secondary-button" type="button" disabled={isSaving} onClick={undoDelivered}>Undo</button>
+        ) : null}
+        {error ? <span className="form-error">{error}</span> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="deliveries-row-inline-actions">
+      {!showAssign ? (
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={isSaving || !activeSlots.length}
+          onClick={() => setShowAssign(true)}
+        >
+          {delivery ? "Reassign" : "Assign"}
+        </button>
+      ) : (
+        <div className="deliveries-inline-assign">
+          <select value={slotId} onChange={(event) => handleSlotChange(event.target.value)} disabled={isSaving}>
+            {activeSlots.map((slot) => (
+              <option key={slot.id} value={slot.id}>
+                {slot.vehicleLabel} · {DELIVERY_WEEKDAYS.find((weekday) => weekday.day === slot.weekday)?.full}
+              </option>
+            ))}
+          </select>
+          <input type="date" value={date} onChange={(event) => setDate(event.target.value)} disabled={isSaving} />
+          <button className="primary-button" type="button" disabled={isSaving} onClick={saveAssign}>
+            {isSaving ? "…" : "Confirm"}
+          </button>
+          <button className="secondary-button" type="button" disabled={isSaving} onClick={() => setShowAssign(false)}>
+            Cancel
+          </button>
+        </div>
+      )}
+      {delivery ? (
+        <button className="secondary-button" type="button" disabled={isSaving} onClick={unassign}>Unassign</button>
+      ) : null}
+      <button className="secondary-button" type="button" disabled={isSaving} onClick={markDelivered}>Mark Delivered</button>
+      {error ? <span className="form-error">{error}</span> : null}
+    </div>
+  );
+}
 
 function DeliveryQueuePanel({
   orderLines,
@@ -9493,12 +9659,12 @@ function DeliveryQueuePanel({
   // already scheduled or confirmed — recomputed from the same pure algorithm
   // the real Run Assignment call uses, so the queue reflects reality before
   // anyone commits a run.
-  const unschedulableIds = useMemo(() => {
+  const unschedulableReasonById = useMemo(() => {
     if (!configReady) {
-      return new Set<string>();
+      return new Map<string, UnschedulableReason>();
     }
     const candidates: PendingDeliveryOrder[] = queue
-      .filter((order) => !order.transferDate && !deliveryByOrderId.has(order.orderId) && order.slaDeadline)
+      .filter((order) => !order.transferDate && !order.manualDeliveredAt && !deliveryByOrderId.has(order.orderId) && order.slaDeadline)
       .map((order) => {
         const info = order.storeId ? storeInfoById.get(order.storeId) : undefined;
         return {
@@ -9521,13 +9687,14 @@ function DeliveryQueuePanel({
         orderTotal: delivery.orderTotal
       }))
     });
-    return new Set(unschedulable);
+    return new Map(unschedulable.map((entry) => [entry.orderId, entry.reason]));
   }, [configReady, queue, deliveryByOrderId, storeInfoById, today, driverScheduleSlots, regions, orderDeliveries]);
 
   const withUrgency = useMemo(() => queue.map((order) => {
     const delivery = deliveryByOrderId.get(order.orderId);
+    const unschedulableReason = unschedulableReasonById.get(order.orderId);
     let urgency: QueueUrgency;
-    if (order.transferDate) {
+    if (order.transferDate || order.manualDeliveredAt) {
       urgency = "confirmed";
     } else if (delivery) {
       urgency = delivery.scheduledDate < today ? "overdue" : "scheduled";
@@ -9535,15 +9702,15 @@ function DeliveryQueuePanel({
       urgency = "unknown";
     } else if (order.slaDeadline < today) {
       urgency = "overdue";
-    } else if (unschedulableIds.has(order.orderId)) {
+    } else if (unschedulableReason) {
       urgency = "unschedulable";
     } else if (order.slaDeadline <= addUtcDays(today, 2)) {
       urgency = "due-soon";
     } else {
       urgency = "on-track";
     }
-    return { order, urgency, delivery };
-  }), [queue, deliveryByOrderId, today, unschedulableIds]);
+    return { order, urgency, delivery, unschedulableReason };
+  }), [queue, deliveryByOrderId, today, unschedulableReasonById]);
 
   const overdueCount = withUrgency.filter((row) => row.urgency === "overdue").length;
   const unschedulableCount = withUrgency.filter((row) => row.urgency === "unschedulable").length;
@@ -9596,7 +9763,7 @@ function DeliveryQueuePanel({
       ) : null}
       {unschedulableCount > 0 ? (
         <div className="deliveries-alert-banner">
-          {unschedulableCount.toLocaleString()} order{unschedulableCount === 1 ? "" : "s"} can't be placed on any current route within their delivery window — add capacity or a matching region/day.
+          {unschedulableCount.toLocaleString()} order{unschedulableCount === 1 ? "" : "s"} can't be placed on any current route — hover the status pill for the specific reason, or assign manually.
         </div>
       ) : null}
       <div className="table-scroll">
@@ -9609,10 +9776,11 @@ function DeliveryQueuePanel({
               <th>Total</th>
               <th>SLA Deadline</th>
               <th>Status</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map(({ order, urgency, delivery }) => {
+            {visibleRows.map(({ order, urgency, delivery, unschedulableReason }) => {
               const slot = delivery ? slotsById.get(delivery.slotId) : undefined;
               return (
                 <tr key={order.key} className={`deliveries-row-${urgency}`}>
@@ -9622,7 +9790,10 @@ function DeliveryQueuePanel({
                   <td>{formatUsd(order.total)}</td>
                   <td>{order.slaDeadline ? formatShortDate(order.slaDeadline) : "-"}</td>
                   <td>
-                    <span className={`deliveries-status-pill deliveries-status-${urgency}`}>
+                    <span
+                      className={`deliveries-status-pill deliveries-status-${urgency}`}
+                      title={unschedulableReason ? UNSCHEDULABLE_REASON_LABEL[unschedulableReason] : undefined}
+                    >
                       {QUEUE_URGENCY_LABEL[urgency]}
                     </span>
                     {delivery ? (
@@ -9631,12 +9802,15 @@ function DeliveryQueuePanel({
                       </span>
                     ) : null}
                   </td>
+                  <td>
+                    <DeliveryQueueRowActions order={order} urgency={urgency} delivery={delivery} slots={driverScheduleSlots} />
+                  </td>
                 </tr>
               );
             })}
             {!visibleRows.length ? (
               <tr>
-                <td colSpan={6}>No orders awaiting delivery.</td>
+                <td colSpan={7}>No orders awaiting delivery.</td>
               </tr>
             ) : null}
           </tbody>

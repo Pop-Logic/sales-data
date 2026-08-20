@@ -120,6 +120,9 @@ export type OrderLine = {
   // "Estimated delivery date" from Cultivera — present from submission, a
   // forward-looking estimate rather than a confirmation.
   estimatedDeliveryDate?: string | null;
+  // Manual "mark delivered" — separate from transferDate so it survives the
+  // next Cultivera sync instead of being silently overwritten.
+  manualDeliveredAt?: string | null;
 };
 
 // Orders submitted before this date predate the delivery-scheduling

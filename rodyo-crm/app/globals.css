@@ -438,6 +438,7 @@ textarea {
 }
 
 .route-marker {
+  position: relative;
   display: grid;
   width: 28px;
   height: 28px;
@@ -452,6 +453,23 @@ textarea {
   font-weight: 850;
   padding: 0;
   z-index: 3;
+}
+
+.route-marker-label {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(16, 20, 24, 0.88);
+  color: #f7fbfc;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 4;
 }
 
 .route-marker-start {
@@ -1430,6 +1448,30 @@ textarea {
 
 .deliveries-row-unschedulable td {
   background: color-mix(in srgb, var(--warning, #f59e0b) 6%, transparent);
+}
+
+.deliveries-row-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.deliveries-inline-assign {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.deliveries-inline-assign select,
+.deliveries-inline-assign input[type="date"] {
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 0.8rem;
 }
 
 .orders-view {

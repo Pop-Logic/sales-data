@@ -592,7 +592,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
 
   const { data: orderData, error: orderDataError } = await supabase
     .from("orders")
-    .select("id, order_number, store_id, client_name, license, license_key, submitted_at, status, imported_at, transfer_date, estimated_delivery_date, order_items(id, brand, product_name, sub_product_line, units, line_total)")
+    .select("id, order_number, store_id, client_name, license, license_key, submitted_at, status, imported_at, transfer_date, estimated_delivery_date, manual_delivered_at, order_items(id, brand, product_name, sub_product_line, units, line_total)")
     .not("submitted_at", "is", null)
     .order("submitted_at", { ascending: false });
   const orderRows = orderDataError ? [] : (orderData || []);
@@ -667,7 +667,8 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
         lineTotal: Number(item?.line_total ?? 0),
         importedAt: row.imported_at,
         transferDate: row.transfer_date ?? null,
-        estimatedDeliveryDate: row.estimated_delivery_date ?? null
+        estimatedDeliveryDate: row.estimated_delivery_date ?? null,
+        manualDeliveredAt: row.manual_delivered_at ?? null
       });
     });
   });

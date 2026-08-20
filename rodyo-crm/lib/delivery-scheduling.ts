@@ -38,6 +38,21 @@ export type AssignmentResult = {
   scheduledDate: string;
 };
 
+export type UnschedulableReason = "no-zip" | "no-region" | "region-no-slot" | "accepted-days" | "capacity";
+
+export const UNSCHEDULABLE_REASON_LABEL: Record<UnschedulableReason, string> = {
+  "no-zip": "Store has no zip code on file",
+  "no-region": "Store's zip isn't covered by any region",
+  "region-no-slot": "Matched a region, but it has no active vehicle/day assigned",
+  "accepted-days": "A route covers this store's region, but not on a day it accepts deliveries",
+  capacity: "Every matching route is already at capacity for its next date"
+};
+
+export type UnschedulableOrder = {
+  orderId: string;
+  reason: UnschedulableReason;
+};
+
 function isoWeekday(dateStr: string): number {
   const day = new Date(`${dateStr}T00:00:00Z`).getUTCDay();
   return day === 0 ? 7 : day;
@@ -61,7 +76,7 @@ export function dateOnly(value: string | null | undefined): string | null {
 // Next calendar date >= fromDate whose weekday matches targetWeekday. A
 // weekday recurs at most once inside a 7-day SLA window, so this is the only
 // candidate date that slot can offer this particular order.
-function nextOccurrence(fromDate: string, targetWeekday: number): string {
+export function nextOccurrence(fromDate: string, targetWeekday: number): string {
   const delta = (targetWeekday - isoWeekday(fromDate) + 7) % 7;
   return addDaysUtc(fromDate, delta);
 }
@@ -78,7 +93,7 @@ export function computeDeliveryAssignments({
   slots: ScheduleSlotInput[];
   regions: RegionInput[];
   existingAssignments: ExistingAssignment[];
-}): { assignments: AssignmentResult[]; unschedulable: string[] } {
+}): { assignments: AssignmentResult[]; unschedulable: UnschedulableOrder[] } {
   const regionIdsByZip = new Map<string, string[]>();
   regions.forEach((region) => {
     region.zipCodes.forEach((zip) => {
@@ -104,16 +119,22 @@ export function computeDeliveryAssignments({
   const sortedOrders = [...orders].sort((left, right) => left.slaDeadline.localeCompare(right.slaDeadline));
 
   const assignments: AssignmentResult[] = [];
-  const unschedulable: string[] = [];
+  const unschedulable: UnschedulableOrder[] = [];
 
   sortedOrders.forEach((order) => {
     if (!order.zip || !order.storeId) {
-      unschedulable.push(order.orderId);
+      unschedulable.push({ orderId: order.orderId, reason: "no-zip" });
       return;
     }
     const regionIds = new Set(regionIdsByZip.get(order.zip) || []);
     if (!regionIds.size) {
-      unschedulable.push(order.orderId);
+      unschedulable.push({ orderId: order.orderId, reason: "no-region" });
+      return;
+    }
+
+    const regionSlots = activeSlots.filter((slot) => slot.regionId && regionIds.has(slot.regionId));
+    if (!regionSlots.length) {
+      unschedulable.push({ orderId: order.orderId, reason: "region-no-slot" });
       return;
     }
 
@@ -123,10 +144,15 @@ export function computeDeliveryAssignments({
     // urgent gets first pick of capacity); "Overdue" in the queue is the
     // signal that it missed its window, independent of whether it now has a
     // route.
-    const candidates = activeSlots
-      .filter((slot) => slot.regionId && regionIds.has(slot.regionId) && order.acceptedDays.includes(slot.weekday))
+    const candidates = regionSlots
+      .filter((slot) => order.acceptedDays.includes(slot.weekday))
       .map((slot) => ({ slot, date: nextOccurrence(today, slot.weekday) }))
       .sort((left, right) => left.date.localeCompare(right.date));
+
+    if (!candidates.length) {
+      unschedulable.push({ orderId: order.orderId, reason: "accepted-days" });
+      return;
+    }
 
     for (const { slot, date } of candidates) {
       const key = tallyKey(slot.id, date);
@@ -143,7 +169,7 @@ export function computeDeliveryAssignments({
       assignments.push({ orderId: order.orderId, slotId: slot.id, scheduledDate: date });
       return;
     }
-    unschedulable.push(order.orderId);
+    unschedulable.push({ orderId: order.orderId, reason: "capacity" });
   });
 
   return { assignments, unschedulable };
