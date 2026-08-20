@@ -40,7 +40,7 @@ type StoreDashboardProps = {
 };
 
 type ViewMode = "stores" | "map" | "orders" | "groups" | "skus" | "goals" | "logs" | "sync" | "inventory";
-type DetailTab = "contact" | "orders" | "buyer" | "history" | "samples" | "retail";
+type DetailTab = "contact" | "orders" | "buyer" | "delivery" | "history" | "samples" | "retail";
 type SortKey = "store" | "brand" | "priority" | "balaclava" | "storeRevenue" | "lastOrder" | "lastLog" | "group" | "rep" | "log";
 type LogSortKey = "date" | "store" | "rep" | "method";
 type SkuSortKey = "product" | "category" | "size" | "brand" | "units" | "revenue" | "stores" | "coverage" | "avgUnits" | "lastOrdered";
@@ -114,6 +114,7 @@ const detailTabs: { id: DetailTab; label: string }[] = [
   { id: "contact", label: "Contact" },
   { id: "orders", label: "Orders" },
   { id: "buyer", label: "Buyer" },
+  { id: "delivery", label: "Delivery" },
   { id: "history", label: "History" },
   { id: "samples", label: "Samples" },
   { id: "retail", label: "Retail" }
@@ -1838,6 +1839,151 @@ function ServiceNoteEditor({
   );
 }
 
+const DELIVERY_WEEKDAYS: { day: number; short: string; full: string }[] = [
+  { day: 1, short: "M", full: "Monday" },
+  { day: 2, short: "T", full: "Tuesday" },
+  { day: 3, short: "W", full: "Wednesday" },
+  { day: 4, short: "T", full: "Thursday" },
+  { day: 5, short: "F", full: "Friday" },
+  { day: 6, short: "S", full: "Saturday" },
+  { day: 7, short: "S", full: "Sunday" }
+];
+
+const DEFAULT_DELIVERY_DAYS = [1, 2, 3, 4, 5];
+const DEFAULT_DELIVERY_WINDOW_START = "08:00";
+const DEFAULT_DELIVERY_WINDOW_END = "16:00";
+
+type DeliveryPatch = {
+  acceptedDays: number[];
+  windowStart: string;
+  windowEnd: string;
+};
+
+function DeliveryEditor({
+  store,
+  onSaved
+}: {
+  store: StoreRollup;
+  onSaved: (storeId: string, delivery: DeliveryPatch) => void;
+}) {
+  const isDefaulted = store.deliveryAcceptedDays == null
+    && store.deliveryWindowStart == null
+    && store.deliveryWindowEnd == null;
+
+  const [selectedDays, setSelectedDays] = useState<number[]>(
+    store.deliveryAcceptedDays ?? DEFAULT_DELIVERY_DAYS
+  );
+  const [windowStart, setWindowStart] = useState(store.deliveryWindowStart ?? DEFAULT_DELIVERY_WINDOW_START);
+  const [windowEnd, setWindowEnd] = useState(store.deliveryWindowEnd ?? DEFAULT_DELIVERY_WINDOW_END);
+  const [isSaving, setIsSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    setSelectedDays(store.deliveryAcceptedDays ?? DEFAULT_DELIVERY_DAYS);
+    setWindowStart(store.deliveryWindowStart ?? DEFAULT_DELIVERY_WINDOW_START);
+    setWindowEnd(store.deliveryWindowEnd ?? DEFAULT_DELIVERY_WINDOW_END);
+    setMessage("");
+  }, [store.deliveryAcceptedDays, store.deliveryWindowStart, store.deliveryWindowEnd, store.storeId]);
+
+  function toggleDay(day: number) {
+    setSelectedDays((prev) => (
+      prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day].sort((a, b) => a - b)
+    ));
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!store.storeId) {
+      setMessage("This store is missing a Supabase store id.");
+      return;
+    }
+    if (windowEnd <= windowStart) {
+      setMessage("Window end must be after window start.");
+      return;
+    }
+    setIsSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/store-delivery", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          storeId: store.storeId,
+          acceptedDays: selectedDays,
+          windowStart,
+          windowEnd
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not save delivery window.");
+      onSaved(store.storeId, {
+        acceptedDays: result.acceptedDays ?? selectedDays,
+        windowStart: result.windowStart ?? windowStart,
+        windowEnd: result.windowEnd ?? windowEnd
+      });
+      setMessage("Saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save delivery window.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <form className="detail-form" onSubmit={handleSubmit}>
+      <div className="detail-form-title">
+        Orders Accepted
+        {isDefaulted ? <span className="table-meta" style={{ marginLeft: 8 }}>(default)</span> : null}
+      </div>
+      <div className="delivery-day-picker" role="group" aria-label="Days orders are accepted">
+        {DELIVERY_WEEKDAYS.map(({ day, short, full }) => {
+          const active = selectedDays.includes(day);
+          return (
+            <button
+              key={day}
+              type="button"
+              className={`delivery-day-toggle${active ? " active" : ""}`}
+              aria-pressed={active}
+              aria-label={full}
+              title={full}
+              disabled={isSaving}
+              onClick={() => toggleDay(day)}
+            >
+              {short}
+            </button>
+          );
+        })}
+      </div>
+      <div className="form-grid">
+        <div className="field">
+          <label>Window Start</label>
+          <input
+            type="time"
+            value={windowStart}
+            onChange={(event) => setWindowStart(event.target.value)}
+            disabled={isSaving}
+          />
+        </div>
+        <div className="field">
+          <label>Window End</label>
+          <input
+            type="time"
+            value={windowEnd}
+            onChange={(event) => setWindowEnd(event.target.value)}
+            disabled={isSaving}
+          />
+        </div>
+      </div>
+      <div className="detail-form-actions">
+        <button className="primary-button" type="submit" disabled={isSaving}>
+          {isSaving ? "Saving…" : "Save"}
+        </button>
+      </div>
+      {message ? <span className="status-message">{message}</span> : null}
+    </form>
+  );
+}
+
 type BuyerContact = {
   id: string;
   contactName: string | null;
@@ -2815,6 +2961,7 @@ function TripPlanner({
   onBuyerSaved,
   onGroupSaved,
   onServiceNoteSaved,
+  onDeliverySaved,
   onContactLogSaved,
   onStoreNameSaved
 }: {
@@ -2836,6 +2983,7 @@ function TripPlanner({
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
   onServiceNoteSaved: (storeId: string, serviceNote: string | null) => void;
+  onDeliverySaved: (storeId: string, delivery: DeliveryPatch) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   onStoreNameSaved: (storeId: string, storeName: string) => void;
 }) {
@@ -3032,6 +3180,7 @@ function TripPlanner({
           onBuyerSaved={onBuyerSaved}
           onGroupSaved={onGroupSaved}
           onServiceNoteSaved={onServiceNoteSaved}
+          onDeliverySaved={onDeliverySaved}
           onContactLogSaved={onContactLogSaved}
           onStoreNameSaved={onStoreNameSaved}
           orderLines={selectedStoreOrderLines}
@@ -8373,6 +8522,7 @@ function StoreDetailDrawer({
   onBuyerSaved,
   onGroupSaved,
   onServiceNoteSaved,
+  onDeliverySaved,
   onContactLogSaved,
   onStoreNameSaved,
   orderLines = [],
@@ -8386,6 +8536,7 @@ function StoreDetailDrawer({
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
   onServiceNoteSaved: (storeId: string, serviceNote: string | null) => void;
+  onDeliverySaved: (storeId: string, delivery: DeliveryPatch) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   onStoreNameSaved: (storeId: string, storeName: string) => void;
   orderLines?: OrderLine[];
@@ -8451,6 +8602,7 @@ function StoreDetailDrawer({
           onBuyerSaved={onBuyerSaved}
           onGroupSaved={onGroupSaved}
           onServiceNoteSaved={onServiceNoteSaved}
+          onDeliverySaved={onDeliverySaved}
           onContactLogSaved={onContactLogSaved}
           orderLines={orderLines}
           monthlyRevenue={monthlyRevenue}
@@ -8712,6 +8864,7 @@ function StoreDetailContent({
   onBuyerSaved,
   onGroupSaved,
   onServiceNoteSaved,
+  onDeliverySaved,
   onContactLogSaved,
   orderLines = [],
   monthlyRevenue = []
@@ -8722,6 +8875,7 @@ function StoreDetailContent({
   onBuyerSaved: (storeId: string, buyer: BuyerContactPatch) => void;
   onGroupSaved: (storeId: string, groupName: string | null) => void;
   onServiceNoteSaved: (storeId: string, serviceNote: string | null) => void;
+  onDeliverySaved: (storeId: string, delivery: DeliveryPatch) => void;
   onContactLogSaved: (storeId: string, contactLog: ContactLogPatch) => void;
   orderLines?: OrderLine[];
   monthlyRevenue?: MonthlyRevenuePoint[];
@@ -8758,6 +8912,14 @@ function StoreDetailContent({
         <GroupEditor store={store} existingGroups={existingGroups} onSaved={onGroupSaved} />
         <ServiceNoteEditor store={store} onSaved={onServiceNoteSaved} />
         <BuyerEditor store={store} onSaved={onBuyerSaved} />
+      </div>
+    );
+  }
+
+  if (activeTab === "delivery") {
+    return (
+      <div className="detail-stack">
+        <DeliveryEditor store={store} onSaved={onDeliverySaved} />
       </div>
     );
   }
@@ -8980,6 +9142,19 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
   function handleServiceNoteSaved(storeId: string, serviceNote: string | null) {
     setStores((currentStores) => currentStores.map((store) => (
       store.storeId === storeId ? { ...store, serviceNote } : store
+    )));
+  }
+
+  function handleDeliverySaved(storeId: string, delivery: DeliveryPatch) {
+    setStores((currentStores) => currentStores.map((store) => (
+      store.storeId === storeId
+        ? {
+          ...store,
+          deliveryAcceptedDays: delivery.acceptedDays,
+          deliveryWindowStart: delivery.windowStart,
+          deliveryWindowEnd: delivery.windowEnd
+        }
+        : store
     )));
   }
 
@@ -9414,6 +9589,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
               onBuyerSaved={handleBuyerSaved}
               onGroupSaved={handleGroupSaved}
               onServiceNoteSaved={handleServiceNoteSaved}
+              onDeliverySaved={handleDeliverySaved}
               onContactLogSaved={handleContactLogSaved}
               onStoreNameSaved={handleStoreNameSaved}
               orderLines={selectedStoreOrderLines}
@@ -9440,6 +9616,7 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
             onBuyerSaved={handleBuyerSaved}
             onGroupSaved={handleGroupSaved}
             onServiceNoteSaved={handleServiceNoteSaved}
+            onDeliverySaved={handleDeliverySaved}
             onContactLogSaved={handleContactLogSaved}
             onStoreNameSaved={handleStoreNameSaved}
           />

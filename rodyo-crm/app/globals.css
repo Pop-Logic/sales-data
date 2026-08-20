@@ -1273,6 +1273,37 @@ textarea {
   font-weight: 700;
 }
 
+.delivery-day-picker {
+  display: flex;
+  gap: 6px;
+}
+
+.delivery-day-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.delivery-day-toggle.active {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: white;
+}
+
+.delivery-day-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .orders-view {
   display: grid;
   gap: 14px;

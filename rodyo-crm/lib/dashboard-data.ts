@@ -896,6 +896,11 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
       hasContactThisWeek: Boolean(row.has_contact_this_week),
       groupName: row.group_name ?? null,
       serviceNote: row.service_note ?? null,
+      deliveryAcceptedDays: Array.isArray(row.delivery_accepted_days)
+        ? row.delivery_accepted_days.map((day: unknown) => Number(day))
+        : null,
+      deliveryWindowStart: row.delivery_window_start ? String(row.delivery_window_start).slice(0, 5) : null,
+      deliveryWindowEnd: row.delivery_window_end ? String(row.delivery_window_end).slice(0, 5) : null,
       headsetLastSale: headsetByStore.get(String(row.store_id ?? ""))?.last_sale ?? null,
       headsetUnits30d: Number(headsetByStore.get(String(row.store_id ?? ""))?.units_30d ?? 0),
       headsetSales30d: Number(headsetByStore.get(String(row.store_id ?? ""))?.sales_30d ?? 0)

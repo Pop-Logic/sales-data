@@ -74,6 +74,11 @@ export type StoreRollup = {
   hasContactThisWeek: boolean;
   groupName?: string | null;
   serviceNote?: string | null;
+  // Delivery acceptance window for the order-scheduling tool. Null means
+  // never explicitly saved — the app applies the M-F 8:00-16:00 default.
+  deliveryAcceptedDays?: number[] | null;
+  deliveryWindowStart?: string | null;
+  deliveryWindowEnd?: string | null;
   headsetLastSale?: string | null;
   headsetUnits30d?: number;
   headsetSales30d?: number;
