@@ -1309,6 +1309,11 @@ textarea {
   gap: 14px;
 }
 
+.deliveries-routes {
+  display: grid;
+  gap: 14px;
+}
+
 .deliveries-panel {
   padding: 14px;
   display: grid;
@@ -1404,6 +1409,16 @@ textarea {
   color: var(--muted);
 }
 
+.deliveries-status-scheduled {
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+  color: var(--blue);
+}
+
+.deliveries-status-unschedulable {
+  background: color-mix(in srgb, var(--warning, #f59e0b) 16%, transparent);
+  color: var(--warning, #f59e0b);
+}
+
 .deliveries-status-unknown {
   background: var(--panel-2);
   color: var(--muted);
@@ -1411,6 +1426,10 @@ textarea {
 
 .deliveries-row-overdue td {
   background: color-mix(in srgb, var(--danger, #ef4444) 6%, transparent);
+}
+
+.deliveries-row-unschedulable td {
+  background: color-mix(in srgb, var(--warning, #f59e0b) 6%, transparent);
 }
 
 .orders-view {

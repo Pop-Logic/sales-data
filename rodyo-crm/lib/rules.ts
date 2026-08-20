@@ -138,6 +138,13 @@ export type DriverScheduleSlot = {
   active: boolean;
 };
 
+export type OrderDelivery = {
+  orderId: string;
+  slotId: string;
+  scheduledDate: string;
+  orderTotal: number;
+};
+
 // Cultivera order sync only covers submitted_at >= this date; store sales
 // data further back only exists in the "Balaclava Retail Sales Data" Google
 // Sheet (K. Savage brand only), backfilled into monthly_revenue. Velocity

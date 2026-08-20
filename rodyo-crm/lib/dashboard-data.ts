@@ -1,7 +1,7 @@
 import { unstable_cache } from "next/cache";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
-import { MONTHLY_REVENUE_CUTOFF, TERRITORY_BRANDS, priorityFromScore, type ContactLog, type DeliveryRegion, type DriverScheduleSlot, type InventoryItem, type MonthlyRevenuePoint, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
+import { MONTHLY_REVENUE_CUTOFF, TERRITORY_BRANDS, priorityFromScore, type ContactLog, type DeliveryRegion, type DriverScheduleSlot, type InventoryItem, type MonthlyRevenuePoint, type OrderDelivery, type OrderLine, type SalesGoal, type StoreRollup } from "@/lib/rules";
 import { fetchSkuEconomics, type SkuEconomics } from "@/lib/sku-economics";
 
 // Cache tag for the dashboard snapshot. Write routes (order sync, contact logs,
@@ -76,6 +76,7 @@ export type DashboardSnapshot = {
   skuEconomics: SkuEconomics[];
   regions: DeliveryRegion[];
   driverScheduleSlots: DriverScheduleSlot[];
+  orderDeliveries: OrderDelivery[];
   cultiveraLastSyncedAt?: string | null;
   metrics: {
     totalRetailers: number;
@@ -376,6 +377,7 @@ function demoSnapshot(): DashboardSnapshot {
     skuEconomics: [],
     regions: [],
     driverScheduleSlots: [],
+    orderDeliveries: [],
     cultiveraLastSyncedAt: demoOrderLines[0]?.importedAt ?? null,
     metrics: summarize(stores)
   };
@@ -939,6 +941,16 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     active: Boolean(r.active ?? true)
   }));
 
+  const { data: orderDeliveryData } = await supabase
+    .from("order_deliveries")
+    .select("order_id, slot_id, scheduled_date, order_total");
+  const orderDeliveries: OrderDelivery[] = (orderDeliveryData || []).map((r) => ({
+    orderId: String(r.order_id),
+    slotId: String(r.slot_id),
+    scheduledDate: String(r.scheduled_date),
+    orderTotal: Number(r.order_total ?? 0)
+  }));
+
   return {
     source: "supabase",
     stores: normalizedStores,
@@ -953,6 +965,7 @@ async function buildDashboardSnapshot(): Promise<DashboardSnapshot> {
     skuEconomics,
     regions,
     driverScheduleSlots,
+    orderDeliveries,
     cultiveraLastSyncedAt,
     metrics: summarize(normalizedStores)
   };

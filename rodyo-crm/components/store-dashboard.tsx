@@ -16,6 +16,7 @@ import {
   X
 } from "lucide-react";
 import type { DashboardSnapshot, PackagingItem, PackagingBomRow, PackagingLedgerEntry } from "@/lib/dashboard-data";
+import { computeDeliveryAssignments, type PendingDeliveryOrder } from "@/lib/delivery-scheduling";
 import { extractStrain, extractUnitSize, stripBrandPrefix } from "@/lib/product-parse";
 import { valueInventory, type InventoryValuation, type SkuEconomics } from "@/lib/sku-economics";
 import {
@@ -31,6 +32,7 @@ import {
   type DriverScheduleSlot,
   type InventoryItem,
   type MonthlyRevenuePoint,
+  type OrderDelivery,
   type OrderLine,
   type SalesGoal,
   type StoreRollup
@@ -8972,7 +8974,7 @@ function StoreDetailContent({
   );
 }
 
-type DeliveriesSubView = "queue" | "regions" | "schedule";
+type DeliveriesSubView = "queue" | "routes" | "regions" | "schedule";
 
 function parseZipCodesInput(value: string): string[] {
   return [...new Set(value.split(/[\s,]+/).map((zip) => zip.trim()).filter(Boolean))];
@@ -9384,6 +9386,7 @@ function DriverSchedulePanel({ slots, regions }: { slots: DriverScheduleSlot[]; 
 
 type DeliveryQueueOrder = {
   key: string;
+  orderId: string;
   orderNumber: string;
   storeId: string | null;
   storeName: string;
@@ -9413,6 +9416,7 @@ function groupOrdersForDeliveryQueue(lines: OrderLine[]): DeliveryQueueOrder[] {
     const submittedDate = dateInputValue(line.submittedAt);
     byOrder.set(key, {
       key,
+      orderId: line.orderId,
       orderNumber: line.orderNumber,
       storeId: line.storeId ?? null,
       storeName: line.storeName,
@@ -9427,42 +9431,138 @@ function groupOrdersForDeliveryQueue(lines: OrderLine[]): DeliveryQueueOrder[] {
   );
 }
 
-type QueueUrgency = "confirmed" | "overdue" | "due-soon" | "on-track" | "unknown";
-
-function queueUrgency(order: DeliveryQueueOrder, today: string): QueueUrgency {
-  if (order.transferDate) {
-    return "confirmed";
-  }
-  if (!order.slaDeadline) {
-    return "unknown";
-  }
-  if (order.slaDeadline < today) {
-    return "overdue";
-  }
-  if (order.slaDeadline <= addUtcDays(today, 2)) {
-    return "due-soon";
-  }
-  return "on-track";
-}
+type QueueUrgency = "confirmed" | "overdue" | "scheduled" | "unschedulable" | "due-soon" | "on-track" | "unknown";
 
 const QUEUE_URGENCY_LABEL: Record<QueueUrgency, string> = {
   confirmed: "Delivered",
   overdue: "Overdue",
+  scheduled: "Scheduled",
+  unschedulable: "No route available",
   "due-soon": "Due soon",
   "on-track": "On track",
   unknown: "No submit date"
 };
 
-function DeliveryQueuePanel({ orderLines }: { orderLines: OrderLine[] }) {
+function DeliveryQueuePanel({
+  orderLines,
+  stores,
+  regions,
+  driverScheduleSlots,
+  orderDeliveries
+}: {
+  orderLines: OrderLine[];
+  stores: StoreRollup[];
+  regions: DeliveryRegion[];
+  driverScheduleSlots: DriverScheduleSlot[];
+  orderDeliveries: OrderDelivery[];
+}) {
+  const router = useRouter();
   const today = localDateInputValue();
   const queue = useMemo(() => groupOrdersForDeliveryQueue(orderLines), [orderLines]);
-  const withUrgency = useMemo(
-    () => queue.map((order) => ({ order, urgency: queueUrgency(order, today) })),
-    [queue, today]
-  );
-  const overdueCount = withUrgency.filter((row) => row.urgency === "overdue").length;
   const [showConfirmed, setShowConfirmed] = useState(false);
+  const [isAssigning, setIsAssigning] = useState(false);
+  const [assignMessage, setAssignMessage] = useState<string | null>(null);
+
+  const configReady = regions.length > 0 && driverScheduleSlots.some((slot) => slot.active);
+
+  const storeInfoById = useMemo(() => {
+    const map = new Map<string, { zip: string | null; acceptedDays: number[] }>();
+    stores.forEach((store) => {
+      if (!store.storeId) return;
+      map.set(store.storeId, {
+        zip: store.zip ?? null,
+        acceptedDays: store.deliveryAcceptedDays && store.deliveryAcceptedDays.length
+          ? store.deliveryAcceptedDays
+          : [1, 2, 3, 4, 5]
+      });
+    });
+    return map;
+  }, [stores]);
+
+  const deliveryByOrderId = useMemo(
+    () => new Map(orderDeliveries.map((delivery) => [delivery.orderId, delivery])),
+    [orderDeliveries]
+  );
+  const slotsById = useMemo(() => new Map(driverScheduleSlots.map((slot) => [slot.id, slot])), [driverScheduleSlots]);
+
+  // Live "would this place given current config?" preview for anything not
+  // already scheduled or confirmed — recomputed from the same pure algorithm
+  // the real Run Assignment call uses, so the queue reflects reality before
+  // anyone commits a run.
+  const unschedulableIds = useMemo(() => {
+    if (!configReady) {
+      return new Set<string>();
+    }
+    const candidates: PendingDeliveryOrder[] = queue
+      .filter((order) => !order.transferDate && !deliveryByOrderId.has(order.orderId) && order.slaDeadline)
+      .map((order) => {
+        const info = order.storeId ? storeInfoById.get(order.storeId) : undefined;
+        return {
+          orderId: order.orderId,
+          storeId: order.storeId,
+          zip: info?.zip ?? null,
+          total: order.total,
+          slaDeadline: order.slaDeadline as string,
+          acceptedDays: info?.acceptedDays ?? [1, 2, 3, 4, 5]
+        };
+      });
+    const { unschedulable } = computeDeliveryAssignments({
+      today,
+      orders: candidates,
+      slots: driverScheduleSlots,
+      regions,
+      existingAssignments: orderDeliveries.map((delivery) => ({
+        slotId: delivery.slotId,
+        scheduledDate: delivery.scheduledDate,
+        orderTotal: delivery.orderTotal
+      }))
+    });
+    return new Set(unschedulable);
+  }, [configReady, queue, deliveryByOrderId, storeInfoById, today, driverScheduleSlots, regions, orderDeliveries]);
+
+  const withUrgency = useMemo(() => queue.map((order) => {
+    const delivery = deliveryByOrderId.get(order.orderId);
+    let urgency: QueueUrgency;
+    if (order.transferDate) {
+      urgency = "confirmed";
+    } else if (delivery) {
+      urgency = delivery.scheduledDate < today ? "overdue" : "scheduled";
+    } else if (!order.slaDeadline) {
+      urgency = "unknown";
+    } else if (order.slaDeadline < today) {
+      urgency = "overdue";
+    } else if (unschedulableIds.has(order.orderId)) {
+      urgency = "unschedulable";
+    } else if (order.slaDeadline <= addUtcDays(today, 2)) {
+      urgency = "due-soon";
+    } else {
+      urgency = "on-track";
+    }
+    return { order, urgency, delivery };
+  }), [queue, deliveryByOrderId, today, unschedulableIds]);
+
+  const overdueCount = withUrgency.filter((row) => row.urgency === "overdue").length;
+  const unschedulableCount = withUrgency.filter((row) => row.urgency === "unschedulable").length;
   const visibleRows = showConfirmed ? withUrgency : withUrgency.filter((row) => row.urgency !== "confirmed");
+
+  async function runAssignment() {
+    setIsAssigning(true);
+    setAssignMessage(null);
+    try {
+      const response = await fetch("/api/deliveries/assign", { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not run assignment.");
+      setAssignMessage(
+        `Assigned ${Number(result.assigned || 0).toLocaleString()} of ${Number(result.considered || 0).toLocaleString()} pending orders` +
+        (result.unschedulable ? ` · ${Number(result.unschedulable).toLocaleString()} could not be placed` : "")
+      );
+      router.refresh();
+    } catch (err) {
+      setAssignMessage(err instanceof Error ? err.message : "Could not run assignment.");
+    } finally {
+      setIsAssigning(false);
+    }
+  }
 
   return (
     <div className="panel deliveries-panel">
@@ -9473,10 +9573,24 @@ function DeliveryQueuePanel({ orderLines }: { orderLines: OrderLine[] }) {
           <input type="checkbox" checked={showConfirmed} onChange={(event) => setShowConfirmed(event.target.checked)} />
           Show delivered
         </label>
+        <button className="secondary-button" type="button" disabled={isAssigning || !configReady} onClick={runAssignment}>
+          {isAssigning ? "Assigning…" : "Run Assignment"}
+        </button>
       </div>
+      {!configReady ? (
+        <p className="detail-note">
+          No active regions/schedule configured yet — set those up under Regions and Schedule before running assignment.
+        </p>
+      ) : null}
+      {assignMessage ? <p className="table-meta">{assignMessage}</p> : null}
       {overdueCount > 0 ? (
         <div className="deliveries-alert-banner">
           {overdueCount.toLocaleString()} order{overdueCount === 1 ? "" : "s"} past the 7-day delivery window and not yet confirmed delivered.
+        </div>
+      ) : null}
+      {unschedulableCount > 0 ? (
+        <div className="deliveries-alert-banner">
+          {unschedulableCount.toLocaleString()} order{unschedulableCount === 1 ? "" : "s"} can't be placed on any current route within their delivery window — add capacity or a matching region/day.
         </div>
       ) : null}
       <div className="table-scroll">
@@ -9492,20 +9606,28 @@ function DeliveryQueuePanel({ orderLines }: { orderLines: OrderLine[] }) {
             </tr>
           </thead>
           <tbody>
-            {visibleRows.map(({ order, urgency }) => (
-              <tr key={order.key} className={`deliveries-row-${urgency}`}>
-                <td>{order.storeName}</td>
-                <td>{order.orderNumber}</td>
-                <td>{formatShortDate(order.submittedAt)}</td>
-                <td>{formatUsd(order.total)}</td>
-                <td>{order.slaDeadline ? formatShortDate(order.slaDeadline) : "-"}</td>
-                <td>
-                  <span className={`deliveries-status-pill deliveries-status-${urgency}`}>
-                    {QUEUE_URGENCY_LABEL[urgency]}
-                  </span>
-                </td>
-              </tr>
-            ))}
+            {visibleRows.map(({ order, urgency, delivery }) => {
+              const slot = delivery ? slotsById.get(delivery.slotId) : undefined;
+              return (
+                <tr key={order.key} className={`deliveries-row-${urgency}`}>
+                  <td>{order.storeName}</td>
+                  <td>{order.orderNumber}</td>
+                  <td>{formatShortDate(order.submittedAt)}</td>
+                  <td>{formatUsd(order.total)}</td>
+                  <td>{order.slaDeadline ? formatShortDate(order.slaDeadline) : "-"}</td>
+                  <td>
+                    <span className={`deliveries-status-pill deliveries-status-${urgency}`}>
+                      {QUEUE_URGENCY_LABEL[urgency]}
+                    </span>
+                    {delivery ? (
+                      <span className="table-meta" style={{ marginLeft: 6 }}>
+                        {formatShortDate(delivery.scheduledDate)}{slot ? ` · ${slot.vehicleLabel}` : ""}
+                      </span>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
             {!visibleRows.length ? (
               <tr>
                 <td colSpan={6}>No orders awaiting delivery.</td>
@@ -9518,14 +9640,199 @@ function DeliveryQueuePanel({ orderLines }: { orderLines: OrderLine[] }) {
   );
 }
 
-function DeliveriesView({
+function RoutesPanel({
   orderLines,
-  regions,
-  driverScheduleSlots
+  stores,
+  driverScheduleSlots,
+  orderDeliveries
 }: {
   orderLines: OrderLine[];
+  stores: StoreRollup[];
+  driverScheduleSlots: DriverScheduleSlot[];
+  orderDeliveries: OrderDelivery[];
+}) {
+  const today = localDateInputValue();
+  const scheduledDates = useMemo(
+    () => [...new Set(orderDeliveries.map((delivery) => delivery.scheduledDate))].sort(),
+    [orderDeliveries]
+  );
+  const [selectedDate, setSelectedDate] = useState(
+    () => scheduledDates.find((date) => date >= today) || scheduledDates[0] || today
+  );
+
+  useEffect(() => {
+    if (scheduledDates.length && !scheduledDates.includes(selectedDate)) {
+      setSelectedDate(scheduledDates.find((date) => date >= today) || scheduledDates[0]);
+    }
+  }, [scheduledDates, selectedDate, today]);
+
+  const orderInfoById = useMemo(() => {
+    const map = new Map<string, { storeId: string | null }>();
+    orderLines.forEach((line) => {
+      if (!map.has(line.orderId)) {
+        map.set(line.orderId, { storeId: line.storeId ?? null });
+      }
+    });
+    return map;
+  }, [orderLines]);
+
+  const storesById = useMemo(
+    () => new Map(stores.filter((store) => store.storeId).map((store) => [store.storeId as string, store])),
+    [stores]
+  );
+  const slotsById = useMemo(() => new Map(driverScheduleSlots.map((slot) => [slot.id, slot])), [driverScheduleSlots]);
+
+  const dayDeliveries = useMemo(
+    () => orderDeliveries.filter((delivery) => delivery.scheduledDate === selectedDate),
+    [orderDeliveries, selectedDate]
+  );
+
+  const vehicleGroups = useMemo(() => {
+    type Group = { slot: DriverScheduleSlot | undefined; stops: StoreRollup[]; storeKeys: Set<string>; total: number };
+    const bySlot = new Map<string, Group>();
+    dayDeliveries.forEach((delivery) => {
+      const info = orderInfoById.get(delivery.orderId);
+      const store = info?.storeId ? storesById.get(info.storeId) : undefined;
+      const group = bySlot.get(delivery.slotId) || {
+        slot: slotsById.get(delivery.slotId),
+        stops: [],
+        storeKeys: new Set<string>(),
+        total: 0
+      };
+      if (store) {
+        const key = storeKey(store);
+        if (!group.storeKeys.has(key)) {
+          group.storeKeys.add(key);
+          group.stops.push(store);
+        }
+      }
+      group.total += delivery.orderTotal;
+      bySlot.set(delivery.slotId, group);
+    });
+    return [...bySlot.entries()]
+      .map(([slotId, group]) => {
+        const orderedStops = optimizeTripStores(group.stops);
+        return {
+          slotId,
+          vehicleLabel: group.slot?.vehicleLabel || "Unknown vehicle",
+          total: group.total,
+          stops: orderedStops,
+          unmappedCount: group.stops.length - orderedStops.length
+        };
+      })
+      .sort((left, right) => left.vehicleLabel.localeCompare(right.vehicleLabel));
+  }, [dayDeliveries, orderInfoById, storesById, slotsById]);
+
+  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!vehicleGroups.length) {
+      setSelectedSlotId(null);
+      return;
+    }
+    if (!vehicleGroups.some((group) => group.slotId === selectedSlotId)) {
+      setSelectedSlotId(vehicleGroups[0].slotId);
+    }
+  }, [vehicleGroups, selectedSlotId]);
+
+  const selectedGroup = vehicleGroups.find((group) => group.slotId === selectedSlotId) || null;
+  const tripMiles = selectedGroup?.stops.length ? estimatedTripMiles(selectedGroup.stops) : 0;
+
+  return (
+    <div className="deliveries-routes">
+      <div className="panel deliveries-panel">
+        <div className="panel-header">
+          <h3>Routes</h3>
+          <span className="table-meta">
+            {scheduledDates.length.toLocaleString()} scheduled date{scheduledDates.length === 1 ? "" : "s"}
+          </span>
+        </div>
+        {scheduledDates.length ? (
+          <div className="field" style={{ maxWidth: 220, padding: "0 14px 14px" }}>
+            <label>Date</label>
+            <select value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)}>
+              {scheduledDates.map((date) => (
+                <option key={date} value={date}>{formatDate(date)}</option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <p className="detail-note" style={{ margin: 14 }}>
+            No scheduled deliveries yet — run assignment from the Due Dates tab first.
+          </p>
+        )}
+      </div>
+      {vehicleGroups.length ? (
+        <>
+          <div className="sku-group-tabs">
+            {vehicleGroups.map((group) => (
+              <button
+                key={group.slotId}
+                type="button"
+                className={`secondary-button${group.slotId === selectedSlotId ? " active-tab" : ""}`}
+                onClick={() => setSelectedSlotId(group.slotId)}
+              >
+                {group.vehicleLabel} · {group.stops.length}
+              </button>
+            ))}
+          </div>
+          {selectedGroup ? (
+            <div className="panel deliveries-panel">
+              <div className="panel-header">
+                <h3>{selectedGroup.vehicleLabel}</h3>
+                <span className="table-meta">
+                  {selectedGroup.stops.length.toLocaleString()} stops · {formatUsd(selectedGroup.total)} · ~{Math.round(tripMiles).toLocaleString()} mi
+                </span>
+              </div>
+              {selectedGroup.unmappedCount > 0 ? (
+                <p className="detail-note" style={{ margin: "0 14px 10px", color: "var(--warning, #f59e0b)" }}>
+                  {selectedGroup.unmappedCount} stop{selectedGroup.unmappedCount === 1 ? "" : "s"} missing map coordinates — not shown on the route below.
+                </p>
+              ) : null}
+              <div className="trip-map-body" style={{ minHeight: 420 }}>
+                <StoreMap stores={selectedGroup.stops} routeStores={selectedGroup.stops} onSelect={() => {}} />
+              </div>
+              <div className="table-scroll">
+                <table className="mini-table">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Store</th>
+                      <th>Address</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedGroup.stops.map((store, index) => (
+                      <tr key={storeKey(store)}>
+                        <td>{index + 1}</td>
+                        <td>{store.storeName}</td>
+                        <td>{[store.address, store.city, store.state].filter(Boolean).join(", ")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : scheduledDates.length ? (
+        <p className="detail-note">No vehicles scheduled for this date.</p>
+      ) : null}
+    </div>
+  );
+}
+
+function DeliveriesView({
+  orderLines,
+  stores,
+  regions,
+  driverScheduleSlots,
+  orderDeliveries
+}: {
+  orderLines: OrderLine[];
+  stores: StoreRollup[];
   regions: DeliveryRegion[];
   driverScheduleSlots: DriverScheduleSlot[];
+  orderDeliveries: OrderDelivery[];
 }) {
   const [subView, setSubView] = useState<DeliveriesSubView>("queue");
 
@@ -9538,6 +9845,13 @@ function DeliveriesView({
           onClick={() => setSubView("queue")}
         >
           Due Dates
+        </button>
+        <button
+          className={`secondary-button${subView === "routes" ? " active-tab" : ""}`}
+          type="button"
+          onClick={() => setSubView("routes")}
+        >
+          Routes
         </button>
         <button
           className={`secondary-button${subView === "regions" ? " active-tab" : ""}`}
@@ -9554,7 +9868,23 @@ function DeliveriesView({
           Schedule
         </button>
       </div>
-      {subView === "queue" ? <DeliveryQueuePanel orderLines={orderLines} /> : null}
+      {subView === "queue" ? (
+        <DeliveryQueuePanel
+          orderLines={orderLines}
+          stores={stores}
+          regions={regions}
+          driverScheduleSlots={driverScheduleSlots}
+          orderDeliveries={orderDeliveries}
+        />
+      ) : null}
+      {subView === "routes" ? (
+        <RoutesPanel
+          orderLines={orderLines}
+          stores={stores}
+          driverScheduleSlots={driverScheduleSlots}
+          orderDeliveries={orderDeliveries}
+        />
+      ) : null}
       {subView === "regions" ? <RegionsPanel regions={regions} /> : null}
       {subView === "schedule" ? <DriverSchedulePanel slots={driverScheduleSlots} regions={regions} /> : null}
     </section>
@@ -10256,8 +10586,10 @@ export function StoreDashboard({ snapshot, initialView }: StoreDashboardProps) {
         ) : activeView === "deliveries" ? (
           <DeliveriesView
             orderLines={orderLines}
+            stores={stores}
             regions={snapshot.regions || []}
             driverScheduleSlots={snapshot.driverScheduleSlots || []}
+            orderDeliveries={snapshot.orderDeliveries || []}
           />
         ) : activeView === "sync" ? (
           <SyncView
